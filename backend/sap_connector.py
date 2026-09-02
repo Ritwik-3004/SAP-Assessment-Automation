@@ -21,6 +21,7 @@ import os
 import xml.etree.ElementTree as ET
 from typing import Optional
 
+import pythoncom
 import win32com.client
 
 from config import SAPLOGON_EXE, SAP_SCREEN_WAIT, SAP_LANDSCAPE_PATHS
@@ -29,6 +30,59 @@ logger = logging.getLogger(__name__)
 
 # Global lock: SAP GUI is single-threaded — only one operation at a time
 _sap_lock = threading.Lock()
+
+
+def _com_init():
+    """Initialize COM for the calling thread (STA). Safe to call multiple times."""
+    try:
+        pythoncom.CoInitialize()
+    except pythoncom.com_error:
+        pass  # already initialized in this thread
+
+
+def _iter_rot():
+    """Yield (display_name, moniker) pairs from the COM Running Object Table."""
+    _com_init()
+    ctx = pythoncom.CreateBindCtx(0)
+    rot = pythoncom.GetRunningObjectTable()
+    enum = rot.EnumRunning()
+    while True:
+        batch = enum.Next(20)   # returns a tuple; empty tuple = end of table
+        if not batch:
+            break
+        for moniker in batch:
+            try:
+                yield moniker.GetDisplayName(ctx, None), moniker
+            except Exception:
+                continue
+
+
+def _rot_list_names() -> list[str]:
+    """Return all display names currently registered in the COM Running Object Table."""
+    try:
+        return [name for name, _ in _iter_rot()]
+    except Exception:
+        return []
+
+
+def _rot_find_sap_gui():
+    """
+    Scan the COM ROT for the SAP GUI scripting object and return it as a
+    win32com Dispatch wrapper, or None if not found.
+
+    win32com.client.GetObject("SAPGUI") calls MkParseDisplayName which fails
+    with MK_E_SYNTAX on Python/pywin32; direct ROT enumeration avoids this.
+    COM must be initialised in the calling thread before the ROT is readable.
+    """
+    try:
+        ctx = pythoncom.CreateBindCtx(0)
+        for name, moniker in _iter_rot():
+            if "SAPGUI" in name.upper():
+                obj = moniker.BindToObject(ctx, None, pythoncom.IID_IDispatch)
+                return win32com.client.Dispatch(obj)
+    except Exception as exc:
+        logger.debug("ROT scan error: %s", exc)
+    return None
 
 
 class SAPConnector:
@@ -178,14 +232,44 @@ class SAPConnector:
     # ------------------------------------------------------------------
 
     def _attach_or_launch_gui(self):
-        try:
-            self._gui = win32com.client.GetObject("SAPGUI")
-        except Exception:
-            logger.info("SAP GUI not running — launching %s", SAPLOGON_EXE)
-            subprocess.Popen([SAPLOGON_EXE])
-            time.sleep(5)
-            self._gui = win32com.client.GetObject("SAPGUI")
-        self._engine = self._gui.GetScriptingEngine
+        _com_init()  # COM must be initialised per-thread before ROT access
+        gui = _rot_find_sap_gui()
+        if gui is not None:
+            self._gui = gui
+            self._engine = self._gui.GetScriptingEngine
+            return
+
+        logger.info("SAP GUI not in ROT — launching %s", SAPLOGON_EXE)
+        subprocess.Popen([SAPLOGON_EXE])
+
+        # Poll the ROT every 3 s for up to 45 s.
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            time.sleep(3)
+            gui = _rot_find_sap_gui()
+            if gui is not None:
+                self._gui = gui
+                self._engine = self._gui.GetScriptingEngine
+                return
+            logger.debug("Still waiting for SAP GUI in ROT …")
+
+        rot_names = _rot_list_names()
+        if not rot_names:
+            hint = (
+                "ROT is completely empty — COM may not be initialised in this process, "
+                "or SAP Logon failed to start. "
+                "Try opening SAP Logon manually before connecting."
+            )
+        else:
+            hint = (
+                "SAP Logon is running but did not register the scripting object. "
+                "Enable scripting: SAP GUI Options > Accessibility & Scripting > "
+                "Scripting > [x] Enable Scripting."
+            )
+        raise RuntimeError(
+            f"SAP GUI did not appear in the COM ROT within 45 s. {hint} "
+            f"ROT contents: {rot_names}"
+        )
 
     def _open_connection(self, system: str):
         # If already connected to this system, reuse the session
