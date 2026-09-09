@@ -161,6 +161,22 @@ class SAPConnector:
         except Exception:
             pass
 
+    def wait_until_ready(self, timeout: float = 10.0, interval: float = 0.2):
+        """Poll session.Busy until SAP GUI finishes processing the last
+        action (e.g. a live-filter refresh), instead of guessing a fixed
+        delay — a screen/grid can still be repainting when a fixed sleep
+        elapses, causing findById/RowCount/ColumnOrder to fail intermittently
+        right after an Enter or F8."""
+        session = self.get_session()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if not session.Busy:
+                    return
+            except Exception:
+                return
+            time.sleep(interval)
+
     # ------------------------------------------------------------------
     # Grid / list helpers
     # ------------------------------------------------------------------
@@ -197,6 +213,38 @@ class SAPConnector:
             rows.append(row)
 
         return rows
+
+    def dump_screen_elements(self, container_id: str = "wnd[0]/usr") -> list[dict]:
+        """
+        Recursively list every scripting element under *container_id*
+        (id, type, name, text). Used to discover the real element IDs on a
+        screen when the hardcoded IDs in a transaction module don't match —
+        call this instead of manually recording a SAP GUI script.
+        """
+        session = self.get_session()
+        root = session.findById(container_id)
+
+        out: list[dict] = []
+
+        def walk(el):
+            try:
+                out.append({
+                    "id": el.Id,
+                    "type": el.Type,
+                    "name": getattr(el, "Name", ""),
+                    "text": getattr(el, "Text", ""),
+                })
+            except Exception:
+                pass
+            try:
+                children = el.Children
+                for i in range(children.Count):
+                    walk(children.ElementAt(i))
+            except Exception:
+                pass
+
+        walk(root)
+        return out
 
     def read_list_output(self) -> list[str]:
         """

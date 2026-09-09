@@ -23,3 +23,11 @@ export interface TransactionResult {
   archiving_object?: string;
   filter?: string;
 }
+
+export interface Db15BatchResult {
+  status: "ok" | "error";
+  transaction: string;
+  message?: string;
+  rows?: Record<string, string>[];
+  errors?: { table_name: string; message: string }[];
+}

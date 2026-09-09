@@ -7,11 +7,14 @@ Start with:
 
 from __future__ import annotations
 
+import io
 import logging
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+import openpyxl
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from sap_connector import sap
@@ -76,6 +79,10 @@ class AobjRequest(BaseModel):
 
 class SaraRequest(BaseModel):
     archiving_object: str
+
+
+class Db15ExportRequest(BaseModel):
+    rows: list[dict[str, str]]
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +188,63 @@ def run_sara(req: SaraRequest):
 
 
 # ---------------------------------------------------------------------------
+# DB15 batch (Excel upload -> run DB15 per table -> Excel export)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/transactions/db15/batch")
+def run_db15_batch(file: UploadFile = File(...)):
+    _require_connection()
+    contents = file.file.read()
+    tables = _parse_table_list(contents)
+    if not tables:
+        raise HTTPException(
+            status_code=400,
+            detail="No table names found in the uploaded file. Expected a table "
+            "name in column A (and optionally a description in column B), "
+            "starting from row 2.",
+        )
+    result = db15.run_batch(tables)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result["message"])
+    return result
+
+
+@app.get("/api/transactions/db15/debug-screen")
+def debug_db15_screen():
+    """Diagnostic: dump every element on the DB15 selection screen (id, type,
+    name, text) to discover the real radio-button / field IDs for this SAP
+    system. Not used by the UI — call directly (e.g. via browser or curl)
+    while connected to SAP."""
+    _require_connection()
+    result = db15.debug_dump_screen()
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", "debug dump failed"))
+    return result
+
+
+@app.get("/api/transactions/db15/debug-grid")
+def debug_db15_grid(table_name: str):
+    """Diagnostic: filter DB15 by *table_name* and report exactly what
+    happens reading the results grid (found / row count / column order /
+    first cell), including raw error text on failure at each step."""
+    _require_connection()
+    result = db15.debug_read_grid(table_name)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", "debug dump failed"))
+    return result
+
+
+@app.post("/api/transactions/db15/export")
+def export_db15_batch(req: Db15ExportRequest):
+    buffer = _build_db15_workbook(req.rows)
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=db15_archiving_objects.xlsx"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -190,6 +254,38 @@ def _require_connection():
             status_code=403,
             detail="Not connected to SAP. POST /api/sap/connect first.",
         )
+
+
+def _parse_table_list(contents: bytes) -> list[dict]:
+    """Read (Table Name, Description) pairs from an uploaded Excel file.
+    Table name is column A, description is column B; row 1 is a header."""
+    workbook = openpyxl.load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
+    sheet = workbook.active
+
+    tables = []
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        if not row or not row[0]:
+            continue
+        name = str(row[0]).strip()
+        description = str(row[1]).strip() if len(row) > 1 and row[1] else ""
+        tables.append({"table_name": name, "description": description})
+    return tables
+
+
+def _build_db15_workbook(rows: list[dict]) -> io.BytesIO:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "DB15 Results"
+
+    columns = ["Table Name", "Table Description", "Archiving Object", "Object Description"]
+    sheet.append(columns)
+    for row in rows:
+        sheet.append([row.get(col, "") for col in columns])
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 
 if __name__ == "__main__":

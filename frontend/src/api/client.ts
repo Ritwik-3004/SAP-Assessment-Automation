@@ -42,4 +42,31 @@ export const api = {
     post<import("../types").TransactionResult>("/api/transactions/aobj", body),
   sara: (body: { archiving_object: string }) =>
     post<import("../types").TransactionResult>("/api/transactions/sara", body),
+
+  db15Batch: async (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(`${BASE}/api/transactions/db15/batch`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.json() as Promise<import("../types").Db15BatchResult>;
+  },
+
+  db15Export: async (rows: Record<string, string>[]) => {
+    const res = await fetch(`${BASE}/api/transactions/db15/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.blob();
+  },
 };

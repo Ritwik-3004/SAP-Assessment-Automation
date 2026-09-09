@@ -6,6 +6,7 @@ import Se16nPanel from "./components/transactions/Se16nPanel";
 import Se11Panel from "./components/transactions/Se11Panel";
 import AobjPanel from "./components/transactions/AobjPanel";
 import SaraPanel from "./components/transactions/SaraPanel";
+import BatchArchivingPanel from "./components/BatchArchivingPanel";
 import type { ConnectionState, TransactionId } from "./types";
 import "./App.css";
 
@@ -18,9 +19,11 @@ const TRANSACTIONS: { id: TransactionId; label: string }[] = [
   { id: "SARA",  label: "SARA — Archive Sessions" },
 ];
 
+type Tab = TransactionId | "BATCH";
+
 export default function App() {
   const [connection, setConnection] = useState<ConnectionState>({ connected: false });
-  const [activeTab, setActiveTab] = useState<TransactionId>("TAANA");
+  const [activeTab, setActiveTab] = useState<Tab>("TAANA");
 
   function handleConnected(state: ConnectionState) {
     setConnection(state);
@@ -30,13 +33,14 @@ export default function App() {
     setConnection({ connected: false });
   }
 
-  const panelMap: Record<TransactionId, React.ReactNode> = {
+  const panelMap: Record<Tab, React.ReactNode> = {
     TAANA: <TaanaPanel />,
     DB15:  <Db15Panel />,
     SE16N: <Se16nPanel />,
     SE11:  <Se11Panel />,
     AOBJ:  <AobjPanel />,
     SARA:  <SaraPanel />,
+    BATCH: <BatchArchivingPanel />,
   };
 
   return (
@@ -75,6 +79,14 @@ export default function App() {
                   {tx.label}
                 </button>
               ))}
+
+              <p className="nav-label">Batch Tools</p>
+              <button
+                className={`nav-item ${activeTab === "BATCH" ? "active" : ""}`}
+                onClick={() => setActiveTab("BATCH")}
+              >
+                Batch Archiving Analysis (Excel)
+              </button>
             </nav>
           )}
         </aside>
