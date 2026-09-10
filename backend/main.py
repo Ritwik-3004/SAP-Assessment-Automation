@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from sap_connector import sap
+import scoring
 import transactions.taana as taana
 import transactions.db15 as db15
 import transactions.db02 as db02
@@ -84,6 +85,15 @@ class SaraRequest(BaseModel):
 
 class Db15ExportRequest(BaseModel):
     rows: list[dict[str, str]]
+
+
+class Db15ScoreRequest(BaseModel):
+    rows: list[dict[str, str]]
+
+
+class Db15ScoreExportRequest(BaseModel):
+    rows: list[dict[str, str]]
+    recommended: list[dict[str, str]]
 
 
 class Db02TopTablesRequest(BaseModel):
@@ -263,6 +273,35 @@ def export_db15_batch(req: Db15ExportRequest):
     )
 
 
+@app.post("/api/transactions/db15/score")
+def score_db15_batch(req: Db15ScoreRequest):
+    result = scoring.score_archiving_objects(req.rows)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result["message"])
+    return result
+
+
+@app.post("/api/transactions/db15/score-export")
+def export_db15_scored(req: Db15ScoreExportRequest):
+    buffer = _build_multi_sheet_workbook([
+        (
+            "All Scored Objects",
+            ["Table Name", "Table Description", "Archiving Object", "Object Description", "Score"],
+            req.rows,
+        ),
+        (
+            "Recommended",
+            ["Table Name", "Table Description", "Archiving Object", "Object Description", "Score", "Rationale"],
+            req.recommended,
+        ),
+    ])
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=archiving_objects_scored.xlsx"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # DB02 (generate a starting table list via the SQL Editor's "top tables by
 # size" query, for users who don't already have a list of tables to check)
@@ -381,6 +420,39 @@ def _build_workbook(rows: list[dict], columns: list[str], sheet_title: str) -> i
     workbook.save(buffer)
     buffer.seek(0)
     return buffer
+
+
+def _build_multi_sheet_workbook(sheets: list[tuple[str, list[str], list[dict]]]) -> io.BytesIO:
+    """Build a workbook with one sheet per (title, columns, rows) tuple.
+    Numeric-looking cell values (e.g. Score) are written as real numbers so
+    they sort/filter correctly in Excel, instead of as text."""
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+
+    for title, columns, rows in sheets:
+        sheet = workbook.create_sheet(title)
+        sheet.append(columns)
+        for row in rows:
+            sheet.append([_numeric_or_raw(row.get(col, "")) for col in columns])
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+
+def _numeric_or_raw(value):
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value)
+        except ValueError:
+            try:
+                return float(value)
+            except ValueError:
+                pass
+    return value
 
 
 if __name__ == "__main__":

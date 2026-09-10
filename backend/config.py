@@ -21,3 +21,7 @@ SAP_SCREEN_WAIT = float(os.getenv("SAP_SCREEN_WAIT", "1.5"))
 # FastAPI server
 API_HOST = os.getenv("API_HOST", "127.0.0.1")
 API_PORT = int(os.getenv("API_PORT", "8000"))
+
+# Claude API (used to score archiving objects for relevance per table)
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+SCORING_MODEL = os.getenv("SCORING_MODEL", "claude-haiku-4-5")

@@ -85,4 +85,20 @@ export const api = {
     }
     return res.blob();
   },
+
+  db15Score: (rows: Record<string, string>[]) =>
+    post<import("../types").ScoredResult>("/api/transactions/db15/score", { rows }),
+
+  db15ScoreExport: async (rows: Record<string, string>[], recommended: Record<string, string>[]) => {
+    const res = await fetch(`${BASE}/api/transactions/db15/score-export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows, recommended }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.blob();
+  },
 };

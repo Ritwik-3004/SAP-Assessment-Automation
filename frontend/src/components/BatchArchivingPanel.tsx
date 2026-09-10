@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import ResultsTable from "./ResultsTable";
-import type { Db15BatchResult } from "../types";
+import type { Db15BatchResult, ScoredResult } from "../types";
 
 const PREVIEW_ROWS = 20;
 
@@ -12,12 +12,19 @@ export default function BatchArchivingPanel() {
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState("");
 
+  const [scored, setScored] = useState<ScoredResult | null>(null);
+  const [scoring, setScoring] = useState(false);
+  const [showRecommended, setShowRecommended] = useState(false);
+  const [scoredExporting, setScoredExporting] = useState(false);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!file) return;
     setLoading(true);
     setError("");
     setResult(null);
+    setScored(null);
+    setShowRecommended(false);
     try {
       const res = await api.db15Batch(file);
       setResult(res);
@@ -46,6 +53,41 @@ export default function BatchArchivingPanel() {
       setError(err instanceof Error ? err.message : "Export failed");
     } finally {
       setExporting(false);
+    }
+  }
+
+  async function handleScore() {
+    if (!result?.rows?.length) return;
+    setScoring(true);
+    setError("");
+    try {
+      const res = await api.db15Score(result.rows);
+      setScored(res);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Scoring failed");
+    } finally {
+      setScoring(false);
+    }
+  }
+
+  async function handleScoredExport() {
+    if (!scored?.rows?.length) return;
+    setScoredExporting(true);
+    setError("");
+    try {
+      const blob = await api.db15ScoreExport(scored.rows, scored.recommended ?? []);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "archiving_objects_scored.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Export failed");
+    } finally {
+      setScoredExporting(false);
     }
   }
 
@@ -103,6 +145,54 @@ export default function BatchArchivingPanel() {
           >
             {exporting ? "Preparing file…" : "Export to Excel"}
           </button>
+
+          <div className="tx-description" style={{ marginTop: "1.5rem" }}>
+            <strong>Score &amp; Recommend</strong> — have Claude score each candidate
+            object per table for archiving relevance (0–100, approximate), then pick the
+            highest-scoring object per table as the recommended setup. Scores and
+            rationale are AI-generated best-effort judgments, not verified SAP guidance
+            — treat them as a starting point.
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleScore}
+            disabled={scoring}
+          >
+            {scoring ? "Scoring objects…" : "Score & Recommend Objects"}
+          </button>
+        </>
+      )}
+
+      {scored?.rows && scored.rows.length > 0 && (
+        <>
+          <ResultsTable
+            rows={scored.rows.slice(0, PREVIEW_ROWS)}
+            caption={`Preview — showing ${Math.min(PREVIEW_ROWS, scored.rows.length)} of ${scored.rows.length} scored rows`}
+          />
+
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setShowRecommended((v) => !v)}
+          >
+            {showRecommended ? "Hide Recommended List" : "Show Recommended List"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={handleScoredExport}
+            disabled={scoredExporting}
+          >
+            {scoredExporting ? "Preparing file…" : "Download Excel (Scored)"}
+          </button>
+
+          {showRecommended && scored.recommended && (
+            <ResultsTable
+              rows={scored.recommended}
+              caption="Recommended — highest-scoring object per table"
+            />
+          )}
         </>
       )}
     </div>

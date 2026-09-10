@@ -38,3 +38,10 @@ export interface Db02TopTablesResult {
   message?: string;
   rows?: Record<string, string>[];
 }
+
+export interface ScoredResult {
+  status: "ok" | "error";
+  message?: string;
+  rows?: Record<string, string>[];
+  recommended?: Record<string, string>[];
+}
