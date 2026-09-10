@@ -115,15 +115,35 @@ automate that judgment call:
    reveals the highest-scoring object per table (one row per table); **Download Excel
    (Scored)** exports a 2-sheet workbook — "All Scored Objects" (every table/object
    pair with its Score) and "Recommended" (the top pick per table, plus the Rationale).
-3. Scores and rationale are the model's best-effort judgment, not verified SAP
-   guidance — the UI says so explicitly, and any SAP Note/doc reference in a rationale
-   is the model's own recollection, not independently checked.
+3. Scores and rationale are the model's best-effort judgment. For a table covered by
+   the DVM Guide (see below), the rationale explicitly says so when it draws on it
+   (e.g. "Official Data Management Guide recommends BC_E071K..."); otherwise it's the
+   model's own recollection, not independently checked.
 
 Requires `ANTHROPIC_API_KEY` in `backend/.env` (see [Configuration](#configuration)).
 Backend implementation: `scoring.py` (new top-level module, not under `transactions/`
 since it's a post-processing/LLM step, not a SAP transaction), plus
 `/api/transactions/db15/score` and `/api/transactions/db15/score-export` in
 `backend/main.py`.
+
+#### Grounded in SAP's official DVM Guide
+
+`backend/resources/DVM_Guide.pdf` is SAP's own "Data Management Guide for SAP Business
+Suite" (Best-Practice Document) — the same document people already consult by hand to
+pick the right archiving object. `backend/dvm_guide.py` parses it once (~225 pages,
+one numbered section per table/table-group, e.g. "5.13 E070, E071, E071K: Change and
+Transport System", each with an "Archiving" subsection naming the recommended
+object(s)) into a `{TABLE_NAME: section_text}` lookup, cached to
+`backend/resources/dvm_guide_index.json` (git-ignored — derived data, rebuilt
+automatically whenever it's missing or older than the PDF; ~7s cold, instant after).
+For every table being scored, `scoring.py` looks up that table's excerpt and includes
+it in the prompt, with an explicit instruction to treat it as authoritative when it
+names a specific object. Confirmed live: not every table is covered (the guide indexes
+~207 distinct table names), so scoring gracefully falls back to the model's general
+knowledge for anything the guide doesn't mention.
+
+If you replace `DVM_Guide.pdf` with a different or updated version, just delete
+`dvm_guide_index.json` (or touch the PDF) — the index rebuilds on the next scoring run.
 
 **Token-budget gotcha (found while testing against a real table with ~20+
 candidates):** each table's candidates are scored in a single structured-output
