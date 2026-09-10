@@ -60,25 +60,39 @@ npm install
 npm run dev
 ```
 
-## Transactions
+## Design principle: no tcodes in the UI
+
+The sidebar and login screen deliberately never show a transaction code or ask the
+user to pick one — end users doing an archivability assessment shouldn't need to know
+which SAP tcode does the work (they could just as easily run it by hand in SAP GUI if
+that were the point). Each sidebar item names the *task* ("Generate Table List", "Find
+Archiving Objects for Tables"); the transaction(s) behind it are an implementation
+detail documented here for developers, not exposed in the app itself.
+
+## Backend transaction modules
+
+Each of the following has its own `backend/transactions/*.py` module and single-item
+FastAPI endpoint (see [API Reference](#api-reference)), usable directly (e.g. via
+`/docs` or curl) for development/debugging, but **none of them has a dedicated frontend
+panel** — only the task-oriented tools below (Find Archiving Objects for Tables,
+Generate Table List) are exposed in the UI.
 
 | Transaction | Purpose |
 |---|---|
 | **TAANA** | Database table analysis — row counts, sizes, archivability flags |
 | **DB15** | Find which archiving objects reference a given table |
+| **DB02** | HANA database administration cockpit (used here for its SQL Editor) |
 | **SE16N** | Browse table contents with optional WHERE filter |
 | **SE11** | ABAP Dictionary — view table field definitions and data types |
 | **AOBJ** | List all archiving objects with customizing settings |
 | **SARA** | Archive Administration — view sessions and statistics for an archiving object |
 
-Each transaction can be run one-off from its own panel in the sidebar (single table/object at a time).
+## Find Archiving Objects for Tables (Excel upload)
 
-## Batch Archiving Analysis (Excel upload)
-
-The **Batch Archiving Analysis** tab (`frontend/src/components/BatchArchivingPanel.tsx`) automates DB15 across a whole list of tables in one go:
+The **Find Archiving Objects for Tables** tab (`frontend/src/components/BatchArchivingPanel.tsx`) automates DB15 across a whole list of tables in one go. The tcode itself is an implementation detail — the UI only presents the task ("look up the archiving object(s) for these tables"), by design, so end users don't need to know which transaction does the work:
 
 1. Upload an `.xlsx`/`.xls` file with a header row, table name in column A, and an optional description in column B.
-2. Pick a transaction from the dropdown (currently only **DB15** is implemented — the other five are listed but disabled until they get the same treatment) and click Submit.
+2. Click Submit.
 3. The backend navigates to DB15 once, selects the **Archiving Objects** radio button, then for each table types it into **Objects for Table**, presses Enter, and reads the resulting archiving-object grid.
 4. Results (Table Name, Table Description, Archiving Object, Object Description) are shown on screen and can be downloaded as a single `.xlsx` via **Export to Excel**.
 
@@ -92,7 +106,7 @@ Don't have a starting list of tables yet? The **Generate Table List (DB02)** tab
 2. The backend navigates to DB02, opens the **Diagnostics → SQL Editor** tree node, pastes in a canned HANA SQL query that lists the system's largest tables (by memory size) with their descriptions, presses F8 (Execute), switches to the **Result** tab, and reads the grid.
 3. The first 20 rows are shown as a preview; **Download Excel** exports the full list.
 
-The exported file's columns (Table Name in column A, Description in column B) intentionally match what the **Batch Archiving Analysis** upload expects, so the downloaded file can be fed straight into that tool without any edits.
+The exported file's columns (Table Name in column A, Description in column B) intentionally match what the **Find Archiving Objects for Tables** upload expects, so the downloaded file can be fed straight into that tool without any edits.
 
 Backend implementation: `db02.run_get_top_tables()` in `backend/transactions/db02.py`, plus `/api/transactions/db02/top-tables` and `/api/transactions/db02/export` in `backend/main.py`.
 
@@ -107,7 +121,7 @@ SAP GUI element IDs (e.g. `wnd[0]/usr/ctxtP_TNAME`) can differ across SAP versio
 4. Stop recording and open the generated `.vbs` file
 5. Copy the correct element IDs into the corresponding file in `backend/transactions/`
 
-**Option B — built-in diagnostic endpoints (DB15 only, for now):** while connected to SAP, call these directly (browser, curl, or PowerShell's `Invoke-RestMethod`) instead of recording a script:
+**Option B — built-in diagnostic endpoints (DB15 and DB02 only, for now):** while connected to SAP, call these directly (browser, curl, or PowerShell's `Invoke-RestMethod`) instead of recording a script:
 
 | Endpoint | Purpose |
 |---|---|
