@@ -7,6 +7,7 @@ import Se11Panel from "./components/transactions/Se11Panel";
 import AobjPanel from "./components/transactions/AobjPanel";
 import SaraPanel from "./components/transactions/SaraPanel";
 import BatchArchivingPanel from "./components/BatchArchivingPanel";
+import GenerateTableListPanel from "./components/GenerateTableListPanel";
 import type { ConnectionState, TransactionId } from "./types";
 import "./App.css";
 
@@ -19,7 +20,7 @@ const TRANSACTIONS: { id: TransactionId; label: string }[] = [
   { id: "SARA",  label: "SARA — Archive Sessions" },
 ];
 
-type Tab = TransactionId | "BATCH";
+type Tab = TransactionId | "BATCH" | "TOP_TABLES";
 
 export default function App() {
   const [connection, setConnection] = useState<ConnectionState>({ connected: false });
@@ -41,6 +42,7 @@ export default function App() {
     AOBJ:  <AobjPanel />,
     SARA:  <SaraPanel />,
     BATCH: <BatchArchivingPanel />,
+    TOP_TABLES: <GenerateTableListPanel />,
   };
 
   return (
@@ -81,6 +83,12 @@ export default function App() {
               ))}
 
               <p className="nav-label">Batch Tools</p>
+              <button
+                className={`nav-item ${activeTab === "TOP_TABLES" ? "active" : ""}`}
+                onClick={() => setActiveTab("TOP_TABLES")}
+              >
+                Generate Table List (DB02)
+              </button>
               <button
                 className={`nav-item ${activeTab === "BATCH" ? "active" : ""}`}
                 onClick={() => setActiveTab("BATCH")}

@@ -31,3 +31,10 @@ export interface Db15BatchResult {
   rows?: Record<string, string>[];
   errors?: { table_name: string; message: string }[];
 }
+
+export interface Db02TopTablesResult {
+  status: "ok" | "error";
+  transaction: string;
+  message?: string;
+  rows?: Record<string, string>[];
+}

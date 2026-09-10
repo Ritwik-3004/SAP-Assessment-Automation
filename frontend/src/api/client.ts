@@ -69,4 +69,20 @@ export const api = {
     }
     return res.blob();
   },
+
+  db02TopTables: (body: { limit: number }) =>
+    post<import("../types").Db02TopTablesResult>("/api/transactions/db02/top-tables", body),
+
+  db02Export: async (rows: Record<string, string>[]) => {
+    const res = await fetch(`${BASE}/api/transactions/db02/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.blob();
+  },
 };

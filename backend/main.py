@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from sap_connector import sap
 import transactions.taana as taana
 import transactions.db15 as db15
+import transactions.db02 as db02
 import transactions.se16n as se16n
 import transactions.se11 as se11
 import transactions.aobj as aobj
@@ -83,6 +84,20 @@ class SaraRequest(BaseModel):
 
 class Db15ExportRequest(BaseModel):
     rows: list[dict[str, str]]
+
+
+class Db02TopTablesRequest(BaseModel):
+    limit: int = 300
+
+
+class Db02ExportRequest(BaseModel):
+    rows: list[dict[str, str]]
+
+
+class Db02DebugClickRequest(BaseModel):
+    tree_id: str
+    node_key: str
+    action: str = "select"
 
 
 # ---------------------------------------------------------------------------
@@ -236,12 +251,93 @@ def debug_db15_grid(table_name: str):
 
 @app.post("/api/transactions/db15/export")
 def export_db15_batch(req: Db15ExportRequest):
-    buffer = _build_db15_workbook(req.rows)
+    buffer = _build_workbook(
+        req.rows,
+        columns=["Table Name", "Table Description", "Archiving Object", "Object Description"],
+        sheet_title="DB15 Results",
+    )
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=db15_archiving_objects.xlsx"},
     )
+
+
+# ---------------------------------------------------------------------------
+# DB02 (generate a starting table list via the SQL Editor's "top tables by
+# size" query, for users who don't already have a list of tables to check)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/transactions/db02/top-tables")
+def get_db02_top_tables(req: Db02TopTablesRequest):
+    _require_connection()
+    result = db02.run_get_top_tables(req.limit)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result["message"])
+    return result
+
+
+@app.post("/api/transactions/db02/export")
+def export_db02_top_tables(req: Db02ExportRequest):
+    buffer = _build_workbook(
+        req.rows,
+        columns=["Table Name", "Description"],
+        sheet_title="Top Tables",
+    )
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=db02_top_tables.xlsx"},
+    )
+
+
+@app.get("/api/transactions/db02/debug-screen")
+def debug_db02_screen(container_id: str = "wnd[0]/usr"):
+    """Diagnostic: navigate to DB02 and dump every element under
+    *container_id* (id, type, name, text). Not used by the UI — call
+    directly while connected to SAP to discover the real tree/SQL editor
+    structure before wiring up db02.run_get_top_tables()."""
+    _require_connection()
+    result = db02.debug_dump_screen(container_id)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", "debug dump failed"))
+    return result
+
+
+@app.get("/api/transactions/db02/debug-tree")
+def debug_db02_tree(tree_id: str):
+    """Diagnostic: navigate to DB02, find the tree control at *tree_id*, and
+    list every node's key + display text, to identify the real node keys for
+    "Diagnostics" and "SQL Editor" without guessing."""
+    _require_connection()
+    result = db02.debug_dump_tree(tree_id)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", "tree dump failed"))
+    return result
+
+
+@app.get("/api/transactions/db02/debug-probe-run")
+def debug_db02_probe_run(limit: int = 20):
+    """Diagnostic: drill into SQL Editor, try setting the query text,
+    pressing F8 to execute, switching to the Result tab, and dumping the
+    screen afterward — reporting each step's outcome independently."""
+    _require_connection()
+    result = db02.debug_probe_run(limit)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", "probe run failed"))
+    return result
+
+
+@app.post("/api/transactions/db02/debug-click")
+def debug_db02_click(req: Db02DebugClickRequest):
+    """Diagnostic: navigate to DB02, perform *action* on *node_key* in the
+    tree at *tree_id*, then dump wnd[0]/usr afterwards so the effect of the
+    click is visible in the response."""
+    _require_connection()
+    result = db02.debug_click_tree_node(req.tree_id, req.node_key, req.action)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", "tree click failed"))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -272,12 +368,11 @@ def _parse_table_list(contents: bytes) -> list[dict]:
     return tables
 
 
-def _build_db15_workbook(rows: list[dict]) -> io.BytesIO:
+def _build_workbook(rows: list[dict], columns: list[str], sheet_title: str) -> io.BytesIO:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
-    sheet.title = "DB15 Results"
+    sheet.title = sheet_title
 
-    columns = ["Table Name", "Table Description", "Archiving Object", "Object Description"]
     sheet.append(columns)
     for row in rows:
         sheet.append([row.get(col, "") for col in columns])
