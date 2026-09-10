@@ -98,6 +98,46 @@ The **Find Archiving Objects for Tables** tab (`frontend/src/components/BatchArc
 
 Backend implementation: `db15.run_batch()` in `backend/transactions/db15.py`, plus `/api/transactions/db15/batch` and `/api/transactions/db15/export` in `backend/main.py` (see [API Reference](#api-reference)).
 
+### Score & Recommend Objects (Claude API)
+
+A table can have many candidate archiving objects (e.g. CDHDR has dozens) — picking
+the right one has always required manual judgment (experience, search, or asking an
+LLM by hand). Once a lookup above has results, click **Score & Recommend Objects** to
+automate that judgment call:
+
+1. The backend groups the results by table and sends each table's full candidate list
+   to Claude (`claude-haiku-4-5`) in one request, asking for a 0–100 relevance score
+   and a short rationale for every candidate. Tables with only one candidate skip the
+   API call entirely (score is trivially 100). This runs concurrently (~8 tables at a
+   time) since a large batch (e.g. 300 tables from the DB02 tool) can mean hundreds of
+   calls.
+2. A preview of the first 20 scored rows renders on screen; **Show Recommended List**
+   reveals the highest-scoring object per table (one row per table); **Download Excel
+   (Scored)** exports a 2-sheet workbook — "All Scored Objects" (every table/object
+   pair with its Score) and "Recommended" (the top pick per table, plus the Rationale).
+3. Scores and rationale are the model's best-effort judgment, not verified SAP
+   guidance — the UI says so explicitly, and any SAP Note/doc reference in a rationale
+   is the model's own recollection, not independently checked.
+
+Requires `ANTHROPIC_API_KEY` in `backend/.env` (see [Configuration](#configuration)).
+Backend implementation: `scoring.py` (new top-level module, not under `transactions/`
+since it's a post-processing/LLM step, not a SAP transaction), plus
+`/api/transactions/db15/score` and `/api/transactions/db15/score-export` in
+`backend/main.py`.
+
+**Token-budget gotcha (found while testing against a real table with ~20+
+candidates):** each table's candidates are scored in a single structured-output
+response, so the response's required length grows with the candidate count. An
+initial flat `max_tokens` (later a per-candidate estimate capped too low) silently
+truncated the JSON for large tables, which failed to parse and — because of a second
+bug in the recommended-list aggregation — caused the whole table to disappear from the
+Recommended sheet with no visible error. Both are fixed: `max_tokens` scales with
+candidate count up to 16,000 (Haiku 4.5's ceiling is 64,000; 16,000 is the point past
+which non-streaming responses risk HTTP timeouts, and comfortably covers even a
+~60-candidate table), the rationale prompt asks for one short sentence per candidate to
+keep actual usage well under that, and a table that still fails to score now shows up
+in both sheets with an explicit "Scoring failed: ..." message instead of vanishing.
+
 ## Generate Table List (DB02)
 
 Don't have a starting list of tables yet? The **Generate Table List (DB02)** tab (`frontend/src/components/GenerateTableListPanel.tsx`) automates DB02/DBACOCKPIT's SQL Editor to build one:
@@ -145,6 +185,10 @@ SAPLOGON_EXE=C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe
 SAP_SCREEN_WAIT=1.5
 API_HOST=127.0.0.1
 API_PORT=8000
+
+# Required only for "Score & Recommend Objects" (backend/scoring.py)
+ANTHROPIC_API_KEY=sk-ant-...
+SCORING_MODEL=claude-haiku-4-5
 ```
 
 ## API Reference
@@ -170,6 +214,8 @@ Key endpoints:
 | POST | `/api/transactions/db15/export` | Export batch DB15 results (JSON rows) to a downloadable `.xlsx` |
 | GET | `/api/transactions/db15/debug-screen` | Diagnostic: dump DB15 selection-screen elements |
 | GET | `/api/transactions/db15/debug-grid` | Diagnostic: filter DB15 by a table and report grid-read details |
+| POST | `/api/transactions/db15/score` | Score every table/object row for archiving relevance via the Claude API and derive a recommended (highest-scoring) object per table |
+| POST | `/api/transactions/db15/score-export` | Export the scored rows + recommended list (JSON) to a downloadable 2-sheet `.xlsx` |
 | POST | `/api/transactions/db02/top-tables` | Run the "top tables by size" SQL query via DB02's SQL Editor |
 | POST | `/api/transactions/db02/export` | Export the top-tables result (JSON rows) to a downloadable `.xlsx` |
 | GET | `/api/transactions/db02/debug-screen` | Diagnostic: dump DB02 screen elements under a given container |
