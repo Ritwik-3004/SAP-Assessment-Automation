@@ -259,7 +259,7 @@ def export_db15_batch(req: Db15ExportRequest):
     return StreamingResponse(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=db15_archiving_objects.xlsx"},
+        headers={"Content-Disposition": "attachment; filename=archiving_objects_by_table.xlsx"},
     )
 
 

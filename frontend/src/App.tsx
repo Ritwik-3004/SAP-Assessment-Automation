@@ -1,30 +1,20 @@
 import { useState } from "react";
 import LoginPanel from "./components/LoginPanel";
-import TaanaPanel from "./components/transactions/TaanaPanel";
-import Db15Panel from "./components/transactions/Db15Panel";
-import Se16nPanel from "./components/transactions/Se16nPanel";
-import Se11Panel from "./components/transactions/Se11Panel";
-import AobjPanel from "./components/transactions/AobjPanel";
-import SaraPanel from "./components/transactions/SaraPanel";
 import BatchArchivingPanel from "./components/BatchArchivingPanel";
 import GenerateTableListPanel from "./components/GenerateTableListPanel";
-import type { ConnectionState, TransactionId } from "./types";
+import type { ConnectionState } from "./types";
 import "./App.css";
 
-const TRANSACTIONS: { id: TransactionId; label: string }[] = [
-  { id: "TAANA", label: "TAANA — Table Analysis" },
-  { id: "DB15",  label: "DB15 — Find Archiving Objects" },
-  { id: "SE16N", label: "SE16N — Table Browser" },
-  { id: "SE11",  label: "SE11 — Dictionary" },
-  { id: "AOBJ",  label: "AOBJ — Archiving Objects" },
-  { id: "SARA",  label: "SARA — Archive Sessions" },
-];
+const TASKS = [
+  { id: "TOP_TABLES", label: "Generate Table List (DB02)" },
+  { id: "BATCH", label: "Find Archiving Objects for Tables" },
+] as const;
 
-type Tab = TransactionId | "BATCH" | "TOP_TABLES";
+type Tab = (typeof TASKS)[number]["id"];
 
 export default function App() {
   const [connection, setConnection] = useState<ConnectionState>({ connected: false });
-  const [activeTab, setActiveTab] = useState<Tab>("TAANA");
+  const [activeTab, setActiveTab] = useState<Tab>("TOP_TABLES");
 
   function handleConnected(state: ConnectionState) {
     setConnection(state);
@@ -35,14 +25,8 @@ export default function App() {
   }
 
   const panelMap: Record<Tab, React.ReactNode> = {
-    TAANA: <TaanaPanel />,
-    DB15:  <Db15Panel />,
-    SE16N: <Se16nPanel />,
-    SE11:  <Se11Panel />,
-    AOBJ:  <AobjPanel />,
-    SARA:  <SaraPanel />,
-    BATCH: <BatchArchivingPanel />,
     TOP_TABLES: <GenerateTableListPanel />,
+    BATCH: <BatchArchivingPanel />,
   };
 
   return (
@@ -71,30 +55,16 @@ export default function App() {
 
           {connection.connected && (
             <nav className="tx-nav">
-              <p className="nav-label">Transactions</p>
-              {TRANSACTIONS.map((tx) => (
+              <p className="nav-label">Tasks</p>
+              {TASKS.map((task) => (
                 <button
-                  key={tx.id}
-                  className={`nav-item ${activeTab === tx.id ? "active" : ""}`}
-                  onClick={() => setActiveTab(tx.id)}
+                  key={task.id}
+                  className={`nav-item ${activeTab === task.id ? "active" : ""}`}
+                  onClick={() => setActiveTab(task.id)}
                 >
-                  {tx.label}
+                  {task.label}
                 </button>
               ))}
-
-              <p className="nav-label">Batch Tools</p>
-              <button
-                className={`nav-item ${activeTab === "TOP_TABLES" ? "active" : ""}`}
-                onClick={() => setActiveTab("TOP_TABLES")}
-              >
-                Generate Table List (DB02)
-              </button>
-              <button
-                className={`nav-item ${activeTab === "BATCH" ? "active" : ""}`}
-                onClick={() => setActiveTab("BATCH")}
-              >
-                Batch Archiving Analysis (Excel)
-              </button>
             </nav>
           )}
         </aside>
@@ -106,12 +76,11 @@ export default function App() {
             <div className="welcome">
               <h1>SAP Archivability Assessment</h1>
               <p>
-                Connect to your SAP system using the panel on the left to begin
-                running transactions.
+                Connect to your SAP system using the panel on the left to get started.
               </p>
               <ul className="tx-list">
-                {TRANSACTIONS.map((tx) => (
-                  <li key={tx.id}>{tx.label}</li>
+                {TASKS.map((task) => (
+                  <li key={task.id}>{task.label}</li>
                 ))}
               </ul>
             </div>
