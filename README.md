@@ -92,11 +92,11 @@ Generate Table List) are exposed in the UI.
 The **Find Archiving Objects for Tables** tab (`frontend/src/components/BatchArchivingPanel.tsx`) automates DB15 across a whole list of tables in one go. The tcode itself is an implementation detail — the UI only presents the task ("look up the archiving object(s) for these tables"), by design, so end users don't need to know which transaction does the work:
 
 1. Upload an `.xlsx`/`.xls` file with a header row, table name in column A, and an optional description in column B.
-2. Click Submit.
+2. Click Submit. A progress bar fills in as each table finishes (e.g. "12 of 40 — BSEG"), since this can take a while on a large list.
 3. The backend navigates to DB15 once, selects the **Archiving Objects** radio button, then for each table types it into **Objects for Table**, presses Enter, and reads the resulting archiving-object grid.
 4. Results (Table Name, Table Description, Archiving Object, Object Description) are shown on screen and can be downloaded as a single `.xlsx` via **Export to Excel**.
 
-Backend implementation: `db15.run_batch()` in `backend/transactions/db15.py`, plus `/api/transactions/db15/batch` and `/api/transactions/db15/export` in `backend/main.py` (see [API Reference](#api-reference)).
+Backend implementation: `db15.run_batch()` in `backend/transactions/db15.py`, plus `/api/transactions/db15/batch` and `/api/transactions/db15/export` in `backend/main.py` (see [API Reference](#api-reference), and [Progress polling](#progress-polling-for-long-running-batches) for how the progress bar works).
 
 ### Score & Recommend Objects (Claude API)
 
@@ -110,7 +110,8 @@ automate that judgment call:
    and a short rationale for every candidate. Tables with only one candidate skip the
    API call entirely (score is trivially 100). This runs concurrently (~8 tables at a
    time) since a large batch (e.g. 300 tables from the DB02 tool) can mean hundreds of
-   calls.
+   calls — a progress bar tracks tables resolved, not individual API calls, so it still
+   advances one table at a time even though several are scored in parallel underneath.
 2. A preview of the first 20 scored rows renders on screen; **Show Recommended List**
    reveals the highest-scoring object per table (one row per table); **Download Excel
    (Scored)** exports a 2-sheet workbook — "All Scored Objects" (every table/object
@@ -158,11 +159,41 @@ which non-streaming responses risk HTTP timeouts, and comfortably covers even a
 keep actual usage well under that, and a table that still fails to score now shows up
 in both sheets with an explicit "Scoring failed: ..." message instead of vanishing.
 
+## Progress polling for long-running batches
+
+DB15 lookup and Scoring can take minutes on a large batch (e.g. 300 tables from the
+DB02 tool), so both moved from "block the HTTP request until the whole batch
+finishes" to a start-then-poll pattern:
+
+1. `POST /api/transactions/db15/batch` (or `/db15/score`) validates the input, kicks
+   off the real work on a background `threading.Thread`, and returns immediately with
+   `{"status": "started", "total": N}`.
+2. The frontend polls `GET .../batch/progress` (or `.../score/progress`) every ~700ms
+   (`pollUntilDone()` in `frontend/src/api/client.ts`) until `status` is `"done"` or
+   `"error"` — each snapshot carries `completed`/`total`/`message` (the table just
+   finished), rendered by `frontend/src/components/ProgressBar.tsx`. Once `"done"`,
+   the snapshot's `result` field is the exact payload the endpoint used to return
+   directly.
+
+`backend/progress.py`'s `ProgressTracker` holds this state — one shared instance per
+operation (this app is single-user/local, so no job IDs needed). A second
+`POST .../batch` or `.../score` while one is already running gets `409`, not a second
+overlapping job. `db15.run_batch()` and `scoring.score_archiving_objects()` both take
+an optional `on_progress(completed, message)` callback, called once per table
+resolved — for scoring that means once per table as its `ThreadPoolExecutor` future
+completes (or immediately for the zero/single-candidate shortcuts), not once per
+underlying API call.
+
+`GET /api/transactions/db02/top-tables` is unchanged (still a single blocking
+request) — a single SQL query execution has no sub-step to poll, so its panel shows
+an indeterminate animated bar (`<ProgressBar mode="indeterminate" />`) instead of a
+real percentage.
+
 ## Generate Table List (DB02)
 
 Don't have a starting list of tables yet? The **Generate Table List (DB02)** tab (`frontend/src/components/GenerateTableListPanel.tsx`) automates DB02/DBACOCKPIT's SQL Editor to build one:
 
-1. Pick "Top N tables" (default 300) and click **Generate List**.
+1. Pick "Top N tables" (default 300) and click **Generate List**. An animated progress bar shows the query is running (no percentage — see [Progress polling](#progress-polling-for-long-running-batches) for why).
 2. The backend navigates to DB02, opens the **Diagnostics → SQL Editor** tree node, pastes in a canned HANA SQL query that lists the system's largest tables (by memory size) with their descriptions, presses F8 (Execute), switches to the **Result** tab, and reads the grid.
 3. The first 20 rows are shown as a preview; **Download Excel** exports the full list.
 
@@ -230,11 +261,13 @@ Key endpoints:
 | POST | `/api/transactions/se11` | Run SE11 |
 | POST | `/api/transactions/aobj` | Run AOBJ |
 | POST | `/api/transactions/sara` | Run SARA |
-| POST | `/api/transactions/db15/batch` | Upload an Excel file of tables and run DB15 against each one |
+| POST | `/api/transactions/db15/batch` | Upload an Excel file of tables; starts the DB15 batch lookup in the background and returns `{status: "started", total}` immediately |
+| GET | `/api/transactions/db15/batch/progress` | Poll for batch lookup progress; `result` is populated once `status` is `"done"` |
 | POST | `/api/transactions/db15/export` | Export batch DB15 results (JSON rows) to a downloadable `.xlsx` |
 | GET | `/api/transactions/db15/debug-screen` | Diagnostic: dump DB15 selection-screen elements |
 | GET | `/api/transactions/db15/debug-grid` | Diagnostic: filter DB15 by a table and report grid-read details |
-| POST | `/api/transactions/db15/score` | Score every table/object row for archiving relevance via the Claude API and derive a recommended (highest-scoring) object per table |
+| POST | `/api/transactions/db15/score` | Starts scoring every table/object row for archiving relevance via the Claude API in the background; returns `{status: "started", total}` immediately |
+| GET | `/api/transactions/db15/score/progress` | Poll for scoring progress; `result` (rows + recommended) is populated once `status` is `"done"` |
 | POST | `/api/transactions/db15/score-export` | Export the scored rows + recommended list (JSON) to a downloadable 2-sheet `.xlsx` |
 | POST | `/api/transactions/db02/top-tables` | Run the "top tables by size" SQL query via DB02's SQL Editor |
 | POST | `/api/transactions/db02/export` | Export the top-tables result (JSON rows) to a downloadable `.xlsx` |
