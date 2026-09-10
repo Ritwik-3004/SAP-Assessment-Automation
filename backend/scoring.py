@@ -63,10 +63,15 @@ class ScoringResponse(BaseModel):
     candidates: list[ScoredCandidate]
 
 
-def score_archiving_objects(rows: list[dict]) -> dict:
+def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
     """
     Score every (table, archiving object) row for relevance, and derive the
     recommended (highest-scoring) object per table.
+
+    *on_progress*, if given, is called as on_progress(completed_count,
+    table_name) once per distinct table as its scoring resolves (including
+    the zero/single-candidate shortcuts), so a caller can report progress on
+    a long-running batch.
 
     Returns {"status": "ok", "rows": [...with Score...], "recommended": [...]}
     or {"status": "error", "message": ...}.
@@ -93,7 +98,7 @@ def score_archiving_objects(rows: list[dict]) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     try:
-        scores_by_table = _score_all_tables(client, tables)
+        scores_by_table = _score_all_tables(client, tables, on_progress)
     except (
         anthropic.AuthenticationError,
         anthropic.RateLimitError,
@@ -153,23 +158,42 @@ def score_archiving_objects(rows: list[dict]) -> dict:
     return {"status": "ok", "rows": scored_rows, "recommended": recommended_rows}
 
 
-def _score_all_tables(client: anthropic.Anthropic, tables: "OrderedDict[str, dict]") -> dict:
-    """Returns {table_name: {archiving_object: {"score": int, "rationale": str}}}."""
+def _score_all_tables(
+    client: anthropic.Anthropic, tables: "OrderedDict[str, dict]", on_progress=None
+) -> dict:
+    """Returns {table_name: {archiving_object: {"score": int, "rationale": str}}}.
+    Reports progress once per distinct table in *tables* (zero-candidate
+    tables included), so completed count always reaches len(tables)."""
     results: dict[str, dict] = {}
+    completed = 0
 
+    def _report(table_name: str):
+        nonlocal completed
+        completed += 1
+        if on_progress:
+            on_progress(completed, table_name)
+
+    zero_candidate_tables = []
     single_candidate_tables = []
     multi_candidate_tables = []
     for table_name, entry in tables.items():
-        if len(entry["candidates"]) == 1:
+        n = len(entry["candidates"])
+        if n == 0:
+            zero_candidate_tables.append(table_name)
+        elif n == 1:
             single_candidate_tables.append(table_name)
-        elif len(entry["candidates"]) > 1:
+        else:
             multi_candidate_tables.append(table_name)
+
+    for table_name in zero_candidate_tables:
+        _report(table_name)
 
     for table_name in single_candidate_tables:
         obj = tables[table_name]["candidates"][0]["object"]
         results[table_name] = {
             obj: {"score": 100, "rationale": "Only archiving object found for this table."}
         }
+        _report(table_name)
 
     if not multi_candidate_tables:
         return results
@@ -189,6 +213,7 @@ def _score_all_tables(client: anthropic.Anthropic, tables: "OrderedDict[str, dic
                     cand["object"]: {"score": "", "rationale": f"Scoring failed: {exc}"}
                     for cand in tables[table_name]["candidates"]
                 }
+            _report(table_name)
 
     return results
 

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import ResultsTable from "./ResultsTable";
-import type { Db15BatchResult, ScoredResult } from "../types";
+import ProgressBar from "./ProgressBar";
+import type { Db15BatchResult, ProgressSnapshot, ScoredResult } from "../types";
 
 const PREVIEW_ROWS = 20;
 
@@ -9,11 +10,13 @@ export default function BatchArchivingPanel() {
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<Db15BatchResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [lookupProgress, setLookupProgress] = useState<ProgressSnapshot<Db15BatchResult> | null>(null);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState("");
 
   const [scored, setScored] = useState<ScoredResult | null>(null);
   const [scoring, setScoring] = useState(false);
+  const [scoreProgress, setScoreProgress] = useState<ProgressSnapshot<ScoredResult> | null>(null);
   const [showRecommended, setShowRecommended] = useState(false);
   const [scoredExporting, setScoredExporting] = useState(false);
 
@@ -25,9 +28,16 @@ export default function BatchArchivingPanel() {
     setResult(null);
     setScored(null);
     setShowRecommended(false);
+    setLookupProgress(null);
     try {
-      const res = await api.db15Batch(file);
-      setResult(res);
+      const started = await api.db15Batch(file);
+      setLookupProgress({ status: "running", completed: 0, total: started.total, message: null, result: null });
+      const final = await api.pollDb15Batch(setLookupProgress);
+      if (final.status === "error") {
+        setError(final.message ?? "Lookup failed");
+      } else {
+        setResult(final.result);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Lookup failed");
     } finally {
@@ -60,9 +70,16 @@ export default function BatchArchivingPanel() {
     if (!result?.rows?.length) return;
     setScoring(true);
     setError("");
+    setScoreProgress(null);
     try {
-      const res = await api.db15Score(result.rows);
-      setScored(res);
+      const started = await api.db15Score(result.rows);
+      setScoreProgress({ status: "running", completed: 0, total: started.total, message: null, result: null });
+      const final = await api.pollDb15Score(setScoreProgress);
+      if (final.status === "error") {
+        setError(final.message ?? "Scoring failed");
+      } else {
+        setScored(final.result);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Scoring failed");
     } finally {
@@ -114,6 +131,15 @@ export default function BatchArchivingPanel() {
         <button type="submit" className="btn btn-primary" disabled={loading || !file}>
           {loading ? "Looking up archiving objects…" : "Submit"}
         </button>
+
+        {loading && (
+          <ProgressBar
+            mode="determinate"
+            completed={lookupProgress?.completed ?? 0}
+            total={lookupProgress?.total ?? 0}
+            label={lookupProgress?.message ?? undefined}
+          />
+        )}
       </form>
 
       {error && <p className="tx-error">{error}</p>}
@@ -148,10 +174,11 @@ export default function BatchArchivingPanel() {
 
           <div className="tx-description" style={{ marginTop: "1.5rem" }}>
             <strong>Score &amp; Recommend</strong> — have Claude score each candidate
-            object per table for archiving relevance (0–100, approximate), then pick the
-            highest-scoring object per table as the recommended setup. Scores and
-            rationale are AI-generated best-effort judgments, not verified SAP guidance
-            — treat them as a starting point.
+            object per table for archiving relevance (0–100, approximate), referring to
+            SAP's official Data Management Guide (DVM Guide) where it covers that table,
+            then pick the highest-scoring object per table as the recommended setup.
+            Scores and rationale are AI-generated best-effort judgments, not guaranteed
+            SAP guidance — treat them as a starting point.
           </div>
           <button
             type="button"
@@ -161,6 +188,15 @@ export default function BatchArchivingPanel() {
           >
             {scoring ? "Scoring objects…" : "Score & Recommend Objects"}
           </button>
+
+          {scoring && (
+            <ProgressBar
+              mode="determinate"
+              completed={scoreProgress?.completed ?? 0}
+              total={scoreProgress?.total ?? 0}
+              label={scoreProgress?.message ?? undefined}
+            />
+          )}
         </>
       )}
 

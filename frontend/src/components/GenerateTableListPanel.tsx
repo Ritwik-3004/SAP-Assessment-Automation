@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import ResultsTable from "./ResultsTable";
+import ProgressBar from "./ProgressBar";
 import type { Db02TopTablesResult } from "../types";
 
 const PREVIEW_ROWS = 20;
@@ -75,6 +76,8 @@ export default function GenerateTableListPanel() {
         <button type="submit" className="btn btn-primary" disabled={loading}>
           {loading ? "Running SQL Editor query…" : "Generate List"}
         </button>
+
+        {loading && <ProgressBar mode="indeterminate" label="Running SQL Editor query…" />}
       </form>
 
       {error && <p className="tx-error">{error}</p>}

@@ -22,6 +22,24 @@ async function get<T>(path: string): Promise<T> {
   return res.json();
 }
 
+/** Poll a /progress endpoint until it reaches "done" or "error", calling
+ * onTick with every snapshot along the way. Used for long-running batch
+ * operations (DB15 lookup, scoring) that run in a background thread. */
+async function pollUntilDone<T>(
+  getProgress: () => Promise<import("../types").ProgressSnapshot<T>>,
+  onTick: (snapshot: import("../types").ProgressSnapshot<T>) => void,
+  intervalMs = 700
+): Promise<import("../types").ProgressSnapshot<T>> {
+  for (;;) {
+    const snapshot = await getProgress();
+    onTick(snapshot);
+    if (snapshot.status === "done" || snapshot.status === "error") {
+      return snapshot;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 export const api = {
   health: () => get<{ status: string; sap_connected: boolean }>("/api/health"),
   systems: () => get<{ systems: { id: string; description: string; name: string }[] }>("/api/sap/systems"),
@@ -54,8 +72,16 @@ export const api = {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail ?? res.statusText);
     }
-    return res.json() as Promise<import("../types").Db15BatchResult>;
+    return res.json() as Promise<import("../types").JobStarted>;
   },
+
+  db15BatchProgress: () =>
+    get<import("../types").ProgressSnapshot<import("../types").Db15BatchResult>>(
+      "/api/transactions/db15/batch/progress"
+    ),
+
+  pollDb15Batch: (onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").Db15BatchResult>) => void) =>
+    pollUntilDone(() => api.db15BatchProgress(), onTick),
 
   db15Export: async (rows: Record<string, string>[]) => {
     const res = await fetch(`${BASE}/api/transactions/db15/export`, {
@@ -87,7 +113,15 @@ export const api = {
   },
 
   db15Score: (rows: Record<string, string>[]) =>
-    post<import("../types").ScoredResult>("/api/transactions/db15/score", { rows }),
+    post<import("../types").JobStarted>("/api/transactions/db15/score", { rows }),
+
+  db15ScoreProgress: () =>
+    get<import("../types").ProgressSnapshot<import("../types").ScoredResult>>(
+      "/api/transactions/db15/score/progress"
+    ),
+
+  pollDb15Score: (onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").ScoredResult>) => void) =>
+    pollUntilDone(() => api.db15ScoreProgress(), onTick),
 
   db15ScoreExport: async (rows: Record<string, string>[], recommended: Record<string, string>[]) => {
     const res = await fetch(`${BASE}/api/transactions/db15/score-export`, {

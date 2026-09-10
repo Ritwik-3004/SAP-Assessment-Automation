@@ -336,3 +336,40 @@ body {
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* ── Progress bar ─────────────────────────────────────────── */
+.progress-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.progress-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--tab-bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 999px;
+  transition: width .25s ease;
+}
+
+.progress-bar-indeterminate {
+  width: 40% !important;
+  animation: progress-bar-sweep 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-bar-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
+.progress-bar-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}

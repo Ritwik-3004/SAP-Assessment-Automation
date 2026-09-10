@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 from typing import Optional
 
 import openpyxl
@@ -18,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from sap_connector import sap
+from progress import ProgressTracker
 import scoring
 import transactions.taana as taana
 import transactions.db15 as db15
@@ -28,6 +30,7 @@ import transactions.aobj as aobj
 import transactions.sara as sara
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="SAP Assessment Automation API",
@@ -42,6 +45,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Single-user local app: one shared tracker per long-running batch operation
+# is enough, no job IDs needed. The frontend polls the matching /progress
+# endpoint while the background thread below runs the real work.
+_db15_batch_progress = ProgressTracker()
+_scoring_progress = ProgressTracker()
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +228,9 @@ def run_sara(req: SaraRequest):
 @app.post("/api/transactions/db15/batch")
 def run_db15_batch(file: UploadFile = File(...)):
     _require_connection()
+    if _db15_batch_progress.is_running():
+        raise HTTPException(status_code=409, detail="A batch lookup is already in progress.")
+
     contents = file.file.read()
     tables = _parse_table_list(contents)
     if not tables:
@@ -228,10 +240,27 @@ def run_db15_batch(file: UploadFile = File(...)):
             "name in column A (and optionally a description in column B), "
             "starting from row 2.",
         )
-    result = db15.run_batch(tables)
-    if result["status"] == "error":
-        raise HTTPException(status_code=500, detail=result["message"])
-    return result
+
+    _db15_batch_progress.start(len(tables))
+
+    def job():
+        try:
+            result = db15.run_batch(tables, on_progress=_db15_batch_progress.update)
+            if result["status"] == "error":
+                _db15_batch_progress.fail(result["message"])
+            else:
+                _db15_batch_progress.finish(result)
+        except Exception as exc:
+            logger.exception("DB15 batch job failed")
+            _db15_batch_progress.fail(str(exc))
+
+    threading.Thread(target=job, daemon=True).start()
+    return {"status": "started", "total": len(tables)}
+
+
+@app.get("/api/transactions/db15/batch/progress")
+def get_db15_batch_progress():
+    return _db15_batch_progress.snapshot()
 
 
 @app.get("/api/transactions/db15/debug-screen")
@@ -275,10 +304,30 @@ def export_db15_batch(req: Db15ExportRequest):
 
 @app.post("/api/transactions/db15/score")
 def score_db15_batch(req: Db15ScoreRequest):
-    result = scoring.score_archiving_objects(req.rows)
-    if result["status"] == "error":
-        raise HTTPException(status_code=500, detail=result["message"])
-    return result
+    if _scoring_progress.is_running():
+        raise HTTPException(status_code=409, detail="A scoring run is already in progress.")
+
+    distinct_tables = {row.get("Table Name", "") for row in req.rows}
+    _scoring_progress.start(len(distinct_tables))
+
+    def job():
+        try:
+            result = scoring.score_archiving_objects(req.rows, on_progress=_scoring_progress.update)
+            if result["status"] == "error":
+                _scoring_progress.fail(result["message"])
+            else:
+                _scoring_progress.finish(result)
+        except Exception as exc:
+            logger.exception("Scoring job failed")
+            _scoring_progress.fail(str(exc))
+
+    threading.Thread(target=job, daemon=True).start()
+    return {"status": "started", "total": len(distinct_tables)}
+
+
+@app.get("/api/transactions/db15/score/progress")
+def get_db15_score_progress():
+    return _scoring_progress.snapshot()
 
 
 @app.post("/api/transactions/db15/score-export")

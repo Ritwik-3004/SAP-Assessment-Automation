@@ -45,3 +45,16 @@ export interface ScoredResult {
   rows?: Record<string, string>[];
   recommended?: Record<string, string>[];
 }
+
+export interface JobStarted {
+  status: "started";
+  total: number;
+}
+
+export interface ProgressSnapshot<T> {
+  status: "idle" | "running" | "done" | "error";
+  completed: number;
+  total: number;
+  message?: string | null;
+  result: T | null;
+}

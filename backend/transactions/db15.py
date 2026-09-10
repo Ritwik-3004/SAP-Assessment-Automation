@@ -60,19 +60,23 @@ def _run(table_name: str) -> dict:
         return {"status": "error", "transaction": "DB15", "message": str(exc)}
 
 
-def run_batch(tables: list[dict]) -> dict:
+def run_batch(tables: list[dict], on_progress=None) -> dict:
     """
     Run DB15 once per table in *tables* (each a dict with "table_name" and
     optional "description"), reusing a single DB15 screen for all of them.
+
+    *on_progress*, if given, is called as on_progress(completed_count,
+    table_name) after each table is processed, so a caller can report
+    progress on a long-running batch.
 
     Returns {"status", "transaction", "rows": [...], "errors": [...]}, where
     each row is {"Table Name", "Table Description", "Archiving Object",
     "Object Description"}.
     """
-    return sap.run(_run_batch, tables)
+    return sap.run(_run_batch, tables, on_progress)
 
 
-def _run_batch(tables: list[dict]) -> dict:
+def _run_batch(tables: list[dict], on_progress=None) -> dict:
     session = sap.get_session()
     sap.navigate_to("DB15")
     time.sleep(SAP_SCREEN_WAIT)
@@ -81,6 +85,7 @@ def _run_batch(tables: list[dict]) -> dict:
     rows = []
     errors = []
 
+    completed = 0
     for entry in tables:
         table_name = (entry.get("table_name") or "").strip()
         description = entry.get("description") or ""
@@ -110,6 +115,10 @@ def _run_batch(tables: list[dict]) -> dict:
         except Exception as exc:
             logger.exception("DB15 batch failed for table %s", table_name)
             errors.append({"table_name": table_name.upper(), "message": str(exc)})
+        finally:
+            completed += 1
+            if on_progress:
+                on_progress(completed, table_name.upper())
 
     return {"status": "ok", "transaction": "DB15", "rows": rows, "errors": errors}
 
