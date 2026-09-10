@@ -50,3 +50,6 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Derived/cached data (regenerated automatically, not source content)
+backend/resources/dvm_guide_index.json

@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import anthropic
 from pydantic import BaseModel, Field
 
+import dvm_guide
 from config import ANTHROPIC_API_KEY, SCORING_MODEL
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,15 @@ SYSTEM_PROMPT = (
     "rationale if you are genuinely aware of one -- do not invent one. "
     "Approximate scores are fine; exact precision is not required. A table "
     "may have many candidates -- keep every rationale terse so the full "
-    "response fits comfortably."
+    "response fits comfortably.\n\n"
+    "You may also be given a reference excerpt from SAP's official Data "
+    "Management Guide for SAP Business Suite, specific to the table being "
+    "scored. Treat it as the authoritative source when present: if it names "
+    "a specific recommended archiving object for this table, that candidate "
+    "should score much higher than unrelated ones, and its rationale should "
+    "say the recommendation comes from the guide. If no excerpt is given, "
+    "or it doesn't clearly resolve the choice, fall back on general SAP "
+    "archiving knowledge."
 )
 
 
@@ -188,7 +197,18 @@ def _score_one_table(client: anthropic.Anthropic, table_name: str, entry: dict) 
     candidate_lines = "\n".join(
         f"- {cand['object']}: {cand['description']}" for cand in entry["candidates"]
     )
+
+    reference = dvm_guide.get_reference(table_name)
+    reference_block = ""
+    if reference:
+        reference_block = (
+            "Reference excerpt from SAP's official Data Management Guide for "
+            "SAP Business Suite, covering this specific table:\n"
+            f"---\n{reference}\n---\n\n"
+        )
+
     user_content = (
+        f"{reference_block}"
         f"Table: {table_name} ({entry['description']})\n\n"
         f"Candidate archiving objects:\n{candidate_lines}\n\n"
         "Score every candidate listed above."
