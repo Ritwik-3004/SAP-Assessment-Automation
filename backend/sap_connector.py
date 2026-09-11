@@ -23,11 +23,24 @@ import xml.etree.ElementTree as ET
 from typing import Optional
 
 import pythoncom
+import pywintypes
 import win32com.client
 
 from config import SAPLOGON_EXE, SAP_SCREEN_WAIT, SAP_LANDSCAPE_PATHS
 
+# COM HRESULT for "The object invoked has disconnected from its clients."
+# Fired when SAP GUI closes/crashes/times-out while Python still holds COM refs.
+_RPC_E_DISCONNECTED = -2147417848  # 0x80010108
+
+
 logger = logging.getLogger(__name__)
+
+
+def _is_disconnect_error(exc: BaseException) -> bool:
+    try:
+        return isinstance(exc, pywintypes.com_error) and exc.args[0] == _RPC_E_DISCONNECTED
+    except Exception:
+        return False
 
 
 class _ComWorker:
@@ -77,7 +90,17 @@ class SAPConnector:
         self._connection = None
         self._session = None
         self._connected = False
+        self._system: str | None = None
+        self._user: str | None = None
         self._worker = _ComWorker()
+
+    @property
+    def connected_system(self) -> str | None:
+        return self._system
+
+    @property
+    def connected_user(self) -> str | None:
+        return self._user
 
     # ------------------------------------------------------------------
     # Public API
@@ -89,7 +112,27 @@ class SAPConnector:
         Used by the transaction modules so their entire findById(...) sequence
         executes on the same thread as the session that created it.
         """
-        return self._worker.run(func, *args, **kwargs)
+        try:
+            return self._worker.run(func, *args, **kwargs)
+        except Exception as exc:
+            if _is_disconnect_error(exc):
+                self._reset()
+                raise RuntimeError(
+                    "SAP GUI disconnected unexpectedly (RPC_E_DISCONNECTED). "
+                    "The SAP session may have timed out or the GUI was closed. "
+                    "Reconnect via /api/sap/connect and try again."
+                ) from exc
+            raise
+
+    def _reset(self):
+        """Null out all COM references and mark the connector as disconnected."""
+        self._connected = False
+        self._session = None
+        self._connection = None
+        self._engine = None
+        self._gui = None
+        self._system = None
+        self._user = None
 
     def connect(
         self,
@@ -115,6 +158,8 @@ class SAPConnector:
             self._open_connection(system)
             self._login(client, username, password, language)
             self._connected = True
+            self._system = system
+            self._user = username
             logger.info("Connected to SAP system '%s' as '%s'", system, username)
             return {"status": "connected", "system": system, "user": username}
         except Exception as exc:
@@ -130,13 +175,14 @@ class SAPConnector:
             if self._session:
                 self._session.findById("wnd[0]/tbar[0]/okcd").text = "/nex"
                 self._session.findById("wnd[0]").sendVKey(0)
-            self._connected = False
-            self._session = None
-            self._connection = None
-            return {"status": "disconnected"}
         except Exception as exc:
-            logger.exception("SAP disconnect failed")
-            return {"status": "error", "message": str(exc)}
+            if _is_disconnect_error(exc):
+                logger.info("SAP GUI already disconnected; clearing local state.")
+            else:
+                logger.exception("SAP disconnect failed")
+        finally:
+            self._reset()
+        return {"status": "disconnected"}
 
     @property
     def is_connected(self) -> bool:
@@ -346,15 +392,34 @@ class SAPConnector:
 
     def _login(self, client: str, username: str, password: str, language: str):
         session = self._session
-        # Wait for login screen
         time.sleep(SAP_SCREEN_WAIT)
 
-        # Some systems show a welcome/info screen first — dismiss it
+        # Dismiss welcome/info popup if present
         try:
             session.findById("wnd[1]").sendVKey(0)
             time.sleep(0.5)
         except Exception:
             pass
+
+        # If the username field doesn't exist the session is already past the
+        # login screen (e.g. reused after a page refresh).  Navigate to the
+        # SAP main menu so subsequent transaction calls start from a clean,
+        # predictable screen rather than wherever the session was left.
+        try:
+            session.findById("wnd[0]/usr/txtRSYST-BNAME")
+        except Exception:
+            logger.info("Session already authenticated — resetting to main menu.")
+            try:
+                session.findById("wnd[0]/tbar[0]/okcd").text = "/n"
+                session.findById("wnd[0]").sendVKey(0)
+                time.sleep(SAP_SCREEN_WAIT)
+            except Exception as reset_exc:
+                logger.warning("Could not navigate to main menu: %s", reset_exc)
+            try:
+                session.findById("wnd[1]").sendVKey(0)  # dismiss any popup
+            except Exception:
+                pass
+            return
 
         # Fill standard login fields (NetWeaver 7.x)
         try:
@@ -376,7 +441,6 @@ class SAPConnector:
         # Handle "already logged in on another terminal" popup
         try:
             popup = session.findById("wnd[1]")
-            # Press Enter (option: continue without logging off other session)
             popup.sendVKey(0)
             time.sleep(0.5)
         except Exception:

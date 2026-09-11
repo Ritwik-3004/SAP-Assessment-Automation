@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import LoginPanel from "./components/LoginPanel";
 import BatchArchivingPanel from "./components/BatchArchivingPanel";
 import GenerateTableListPanel from "./components/GenerateTableListPanel";
+import { api } from "./api/client";
 import type { ConnectionState } from "./types";
 import "./App.css";
 
@@ -15,6 +16,17 @@ type Tab = (typeof TASKS)[number]["id"];
 export default function App() {
   const [connection, setConnection] = useState<ConnectionState>({ connected: false });
   const [activeTab, setActiveTab] = useState<Tab>("TOP_TABLES");
+
+  // On mount, ask the backend whether a SAP session is already open (e.g. after
+  // a page refresh) and restore the connected state so the user doesn't have to
+  // re-enter credentials.
+  useEffect(() => {
+    api.sapInfo().then((info) => {
+      if (info.connected && info.system) {
+        setConnection({ connected: true, system: info.system, user: info.user ?? "" });
+      }
+    }).catch(() => {});
+  }, []);
 
   function handleConnected(state: ConnectionState) {
     setConnection(state);

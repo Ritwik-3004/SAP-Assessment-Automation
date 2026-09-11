@@ -107,6 +107,8 @@ body {
 
 .login-form { display: flex; flex-direction: column; gap: 10px; }
 
+.login-actions { display: flex; gap: 8px; }
+
 .form-row { display: flex; flex-direction: column; gap: 4px; }
 
 .form-row label {
@@ -279,6 +281,150 @@ body {
   font-style: italic;
 }
 
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ── File picker card ─────────────────────────────────────── */
+.file-picker {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.file-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.file-picker-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+
+.btn-refresh {
+  background: none;
+  border: none;
+  font-size: 15px;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0 2px;
+  line-height: 1;
+  transition: color .15s;
+}
+.btn-refresh:hover:not(:disabled) { color: var(--primary); }
+.btn-refresh:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Radio list */
+.file-radio-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.file-radio-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+  user-select: none;
+}
+.file-radio-item:hover { background: var(--tab-bg); }
+.file-radio-item.selected {
+  background: #e8f0ff;
+  border-color: #c7d8f8;
+}
+.file-radio-item input[type="radio"] {
+  accent-color: var(--primary);
+  flex-shrink: 0;
+}
+.file-radio-name {
+  font-size: 13px;
+  color: var(--text);
+}
+.file-radio-item.selected .file-radio-name {
+  color: var(--primary);
+  font-weight: 500;
+}
+
+/* "or" row with upload button */
+.file-picker-or {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 2px;
+}
+.or-divider {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.upload-trigger {
+  cursor: pointer;
+}
+
+/* Uploaded-file row (replaces the list) */
+.uploaded-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.file-icon-lg { font-size: 20px; flex-shrink: 0; }
+.uploaded-file-name {
+  font-size: 13px;
+  font-weight: 500;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.btn-clear-upload {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .12s, color .12s;
+  flex-shrink: 0;
+}
+.btn-clear-upload:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* ── Saved-to-input notice ────────────────────────────────── */
+.saved-notice {
+  font-size: 12px;
+  color: var(--success);
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.saved-notice code, .tx-hint code {
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11.5px;
+}
+
 /* ── Results table ────────────────────────────────────────── */
 .table-wrapper {
   display: flex;
@@ -326,9 +472,46 @@ body {
 .results-table tbody tr:last-child td { border-bottom: none; }
 .results-table tbody tr:hover { background: #f9fafb; }
 
+.table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .row-count {
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.page-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 14px;
+  line-height: 1.4;
+  cursor: pointer;
+  color: var(--text);
+  transition: background .12s;
+}
+
+.page-btn:hover:not(:disabled) { background: var(--tab-bg); }
+.page-btn:disabled { opacity: .35; cursor: not-allowed; }
+
+.page-info {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 82px;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .empty-msg {

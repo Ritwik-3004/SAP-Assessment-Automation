@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 TOP_TABLES_QUERY = """SELECT TOP {limit}
     M_CS_TABLES.TABLE_NAME "Table Name",
-    DD02T.DDTEXT "Description"
+    DD02T.DDTEXT "Description",
+    ROUND(M_CS_TABLES.MEMORY_SIZE_IN_TOTAL / 1073741824.0, 2) VOLUME_GB
 FROM M_CS_TABLES
 JOIN DD02T ON
 DD02T.TABNAME = M_CS_TABLES.TABLE_NAME
@@ -52,11 +53,16 @@ RESULT_GRID_ID = (
     "cntlSQL_OUTPUT_CONT_HDB/shellcont/shell"
 )
 
-# Confirmed live column IDs on the SQL Editor's result grid (ColumnOrder ==
-# ["TABLENAME", "DESCRIPTION"], matching the SQL's own column aliases).
+# Confirmed live column IDs on the SQL Editor's result grid.
+# VOLUME_GB is the unquoted alias for the computed size column; HANA uppercases
+# it so the grid column ID is VOLUME_GB.  A few spellings are mapped defensively
+# in case a future system normalises the alias differently.
 DB02_COLUMN_LABELS = {
     "TABLENAME": "Table Name",
     "DESCRIPTION": "Description",
+    "VOLUME_GB": "Volume (GB)",
+    "VOLUMEGB": "Volume (GB)",
+    "Volume_GB": "Volume (GB)",
 }
 
 
@@ -71,14 +77,35 @@ def run_get_top_tables(limit: int = 300) -> dict:
 def _run_get_top_tables(limit: int) -> dict:
     try:
         session = sap.get_session()
+
+        # Two-step navigation: go to main menu first, then DB02.
+        # Jumping to /nDB02 while already inside DB02 doesn't always reset
+        # the navigation tree, leaving the SQL Editor in whatever state it
+        # was in after the previous run — which can make doubleClickNode
+        # toggle the editor *closed* instead of open (error 619).
+        try:
+            session.findById("wnd[0]/tbar[0]/okcd").text = "/n"
+            session.findById("wnd[0]").sendVKey(0)
+            time.sleep(SAP_SCREEN_WAIT)
+            sap.dismiss_popup()
+        except Exception:
+            pass
+
         sap.navigate_to("DB02")
         time.sleep(SAP_SCREEN_WAIT)
-
-        tree = session.findById(NAV_TREE_ID)
-        tree.doubleClickNode(SQL_EDITOR_NODE_KEY)
-        sap.wait_until_ready()
-        time.sleep(SAP_SCREEN_WAIT)
         sap.dismiss_popup()
+
+        # Open the SQL Editor via the navigation tree — but only if it isn't
+        # already visible.  doubleClickNode is a toggle: calling it on an open
+        # node closes the editor and leaves SQL_INPUT_SHELL_ID absent.
+        try:
+            session.findById(SQL_INPUT_SHELL_ID)
+        except Exception:
+            tree = session.findById(NAV_TREE_ID)
+            tree.doubleClickNode(SQL_EDITOR_NODE_KEY)
+            sap.wait_until_ready()
+            time.sleep(SAP_SCREEN_WAIT)
+            sap.dismiss_popup()
 
         session.findById(SQL_INPUT_SHELL_ID).text = TOP_TABLES_QUERY.format(limit=limit)
 
@@ -86,6 +113,14 @@ def _run_get_top_tables(limit: int) -> dict:
         sap.wait_until_ready()
         time.sleep(SAP_SCREEN_WAIT)
         sap.dismiss_popup()
+
+        # Log the status bar message (contains row count or SQL error text)
+        try:
+            status_text = session.findById("wnd[0]/sbar/pane[0]").text
+            if status_text:
+                logger.info("DB02 SQL status bar: %s", status_text)
+        except Exception:
+            status_text = ""
 
         session.findById(RESULT_TAB_ID).select()
         sap.wait_until_ready()
@@ -122,7 +157,13 @@ def _read_result_grid(session, retries: int = 3, retry_wait: float = 0.4) -> lis
                 for col_id in col_ids:
                     label = DB02_COLUMN_LABELS.get(col_id, col_id)
                     try:
-                        row[label] = grid.GetCellValue(row_idx, col_id)
+                        value = grid.GetCellValue(row_idx, col_id)
+                        if label == "Volume (GB)":
+                            try:
+                                value = f"{float(value):.2f}"
+                            except (ValueError, TypeError):
+                                pass
+                        row[label] = value
                     except Exception:
                         row[label] = ""
                 rows.append(row)

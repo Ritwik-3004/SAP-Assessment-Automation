@@ -87,14 +87,26 @@ Generate Table List) are exposed in the UI.
 | **AOBJ** | List all archiving objects with customizing settings |
 | **SARA** | Archive Administration — view sessions and statistics for an archiving object |
 
-## Find Archiving Objects for Tables (Excel upload)
+## Input and Output Folders
+
+The backend creates two folders at the project root on startup:
+
+| Folder | Purpose |
+|---|---|
+| `input/` | Holds table lists (`.xlsx`) used as input to the Find Archiving Objects tool |
+| `output/` | Holds saved results exported from Find Archiving Objects |
+
+Files are never auto-saved. Every panel shows a **Save to folder** button (writes to the appropriate folder) and a separate **Download** button (downloads to the browser). This keeps folder contents intentional — only files the user explicitly saved land there.
+
+## Find Archiving Objects for Tables
 
 The **Find Archiving Objects for Tables** tab (`frontend/src/components/BatchArchivingPanel.tsx`) automates DB15 across a whole list of tables in one go. The tcode itself is an implementation detail — the UI only presents the task ("look up the archiving object(s) for these tables"), by design, so end users don't need to know which transaction does the work:
 
-1. Upload an `.xlsx`/`.xls` file with a header row, table name in column A, and an optional description in column B.
-2. Click Submit. A progress bar fills in as each table finishes (e.g. "12 of 40 — BSEG"), since this can take a while on a large list.
+1. **Choose the input file.** The panel lists all `.xlsx`/`.xls` files from the `input/` folder as radio buttons — typically this is the file saved by **Generate Table List**. If you want a different file, click **Upload a different file** to pick one from anywhere on disk; the uploaded filename replaces the radio list until you click **Use input folder** to go back.
+2. Click **Submit**. A progress bar fills in as each table finishes (e.g. "12 of 40 — BSEG"), since this can take a while on a large list.
 3. The backend navigates to DB15 once, selects the **Archiving Objects** radio button, then for each table types it into **Objects for Table**, presses Enter, and reads the resulting archiving-object grid.
-4. Results (Table Name, Table Description, Archiving Object, Object Description) are shown on screen and can be downloaded as a single `.xlsx` via **Export to Excel**.
+4. Results (Table Name, Table Description, Archiving Object, Object Description) are shown on screen (20 rows per page, with ← → navigation).
+5. Click **Save to output folder** to write `output/archiving_objects_by_table.xlsx`, or **Download** to get the file directly in the browser.
 
 Backend implementation: `db15.run_batch()` in `backend/transactions/db15.py`, plus `/api/transactions/db15/batch` and `/api/transactions/db15/export` in `backend/main.py` (see [API Reference](#api-reference), and [Progress polling](#progress-polling-for-long-running-batches) for how the progress bar works).
 
@@ -112,10 +124,8 @@ automate that judgment call:
    time) since a large batch (e.g. 300 tables from the DB02 tool) can mean hundreds of
    calls — a progress bar tracks tables resolved, not individual API calls, so it still
    advances one table at a time even though several are scored in parallel underneath.
-2. A preview of the first 20 scored rows renders on screen; **Show Recommended List**
-   reveals the highest-scoring object per table (one row per table); **Download Excel
-   (Scored)** exports a 2-sheet workbook — "All Scored Objects" (every table/object
-   pair with its Score) and "Recommended" (the top pick per table, plus the Rationale).
+2. A preview of the first 20 scored rows renders on screen with ← → pagination; **Show Recommended List**
+   reveals the highest-scoring object per table (one row per table). Click **Save to output folder** to write `output/archiving_objects_scored.xlsx`, or **Download Excel (Scored)** to get the file directly — either exports a 2-sheet workbook: "All Scored Objects" (every table/object pair with its Score) and "Recommended" (the top pick per table, plus the Rationale).
 3. Scores and rationale are the model's best-effort judgment. For a table covered by
    the DVM Guide (see below), the rationale explicitly says so when it draws on it
    (e.g. "Official Data Management Guide recommends BC_E071K..."); otherwise it's the
@@ -194,12 +204,29 @@ real percentage.
 Don't have a starting list of tables yet? The **Generate Table List (DB02)** tab (`frontend/src/components/GenerateTableListPanel.tsx`) automates DB02/DBACOCKPIT's SQL Editor to build one:
 
 1. Pick "Top N tables" (default 300) and click **Generate List**. An animated progress bar shows the query is running (no percentage — see [Progress polling](#progress-polling-for-long-running-batches) for why).
-2. The backend navigates to DB02, opens the **Diagnostics → SQL Editor** tree node, pastes in a canned HANA SQL query that lists the system's largest tables (by memory size) with their descriptions, presses F8 (Execute), switches to the **Result** tab, and reads the grid.
-3. The first 20 rows are shown as a preview; **Download Excel** exports the full list.
+2. The backend navigates to DB02, opens the **Diagnostics → SQL Editor** tree node, pastes in a canned HANA SQL query that lists the system's largest tables by total memory size, presses F8 (Execute), switches to the **Result** tab, and reads the grid.
+3. Results include **Table Name**, **Description**, and **Volume (GB)** (rounded to 2 decimal places). The first 20 rows are shown as a preview with ← → pagination; the full list is available via save or download.
+4. Click **Save to input folder** to write `input/list_of_tables.xlsx` (making it immediately available in the Find Archiving Objects file picker), or **Download Excel** to get the file directly.
 
-The exported file's columns (Table Name in column A, Description in column B) intentionally match what the **Find Archiving Objects for Tables** upload expects, so the downloaded file can be fed straight into that tool without any edits.
+The saved file's columns (Table Name in column A, Description in column B) match what the **Find Archiving Objects for Tables** tool expects, so the saved file can be fed straight in without any edits. The Volume (GB) column is included in the saved file but is not required by DB15.
 
 Backend implementation: `db02.run_get_top_tables()` in `backend/transactions/db02.py`, plus `/api/transactions/db02/top-tables` and `/api/transactions/db02/export` in `backend/main.py`.
+
+### DB02 navigation robustness
+
+DB02's SQL Editor node is a toggle — double-clicking it when already open closes it, leaving the input shell absent (SAP error 619). The backend guards against this: it navigates to the SAP main menu first (ensuring a clean DB02 start), then checks whether the SQL Editor shell already exists before double-clicking the tree node. This makes repeated runs within the same session reliable regardless of what screen DB02 was left on.
+
+## Session persistence
+
+The tool keeps the SAP session alive in the backend process — closing or refreshing the browser tab does **not** disconnect from SAP. On page load the frontend calls `GET /api/sap/info`; if the backend is still connected it restores the connected state (system name, username) without requiring the user to re-enter credentials or re-authenticate.
+
+If the SAP session is still live but the browser shows "Not Connected", click **Connect** with the same details — the backend detects the already-authenticated session, navigates back to the SAP main menu to ensure a clean screen state, and marks the session as connected without logging in again.
+
+## Saved connection details
+
+Click **Save** (next to **Connect** in the login form) to persist all connection fields — including the password — to `sap_credentials.json` at the project root. The next time the page loads (or the backend restarts), the form is pre-filled automatically from that file, so you only need to click **Connect**.
+
+The credentials file is stored locally on the machine running the backend; it is not transmitted anywhere. Add it to `.gitignore` if this repository is shared.
 
 ## Adjusting Screen Element IDs
 
@@ -255,6 +282,13 @@ Key endpoints:
 | POST | `/api/sap/connect` | Connect and log in |
 | POST | `/api/sap/disconnect` | Log out |
 | GET | `/api/sap/status` | Whether currently connected |
+| GET | `/api/sap/info` | Current connection state including system + user (used by the frontend on page load to restore session) |
+| GET | `/api/sap/credentials` | Return saved connection details from `sap_credentials.json` |
+| POST | `/api/sap/credentials` | Save connection details (including password) to `sap_credentials.json` |
+| GET | `/api/files/input` | List `.xlsx`/`.xls` files in the `input/` folder, newest first |
+| POST | `/api/files/input/save` | Save table list rows to `input/list_of_tables.xlsx` |
+| POST | `/api/files/output/save-archiving` | Save archiving-objects rows to `output/archiving_objects_by_table.xlsx` |
+| POST | `/api/files/output/save-scored` | Save scored rows + recommended list to `output/archiving_objects_scored.xlsx` |
 | POST | `/api/transactions/taana` | Run TAANA |
 | POST | `/api/transactions/db15` | Run DB15 for a single table |
 | POST | `/api/transactions/se16n` | Run SE16N |
@@ -262,6 +296,7 @@ Key endpoints:
 | POST | `/api/transactions/aobj` | Run AOBJ |
 | POST | `/api/transactions/sara` | Run SARA |
 | POST | `/api/transactions/db15/batch` | Upload an Excel file of tables; starts the DB15 batch lookup in the background and returns `{status: "started", total}` immediately |
+| POST | `/api/transactions/db15/batch-from-input` | Start DB15 batch using a file already in the `input/` folder (body: `{filename}`) |
 | GET | `/api/transactions/db15/batch/progress` | Poll for batch lookup progress; `result` is populated once `status` is `"done"` |
 | POST | `/api/transactions/db15/export` | Export batch DB15 results (JSON rows) to a downloadable `.xlsx` |
 | GET | `/api/transactions/db15/debug-screen` | Diagnostic: dump DB15 selection-screen elements |
@@ -269,7 +304,7 @@ Key endpoints:
 | POST | `/api/transactions/db15/score` | Starts scoring every table/object row for archiving relevance via the Claude API in the background; returns `{status: "started", total}` immediately |
 | GET | `/api/transactions/db15/score/progress` | Poll for scoring progress; `result` (rows + recommended) is populated once `status` is `"done"` |
 | POST | `/api/transactions/db15/score-export` | Export the scored rows + recommended list (JSON) to a downloadable 2-sheet `.xlsx` |
-| POST | `/api/transactions/db02/top-tables` | Run the "top tables by size" SQL query via DB02's SQL Editor |
+| POST | `/api/transactions/db02/top-tables` | Run the "top tables by size" SQL query via DB02's SQL Editor; returns Table Name, Description, Volume (GB) |
 | POST | `/api/transactions/db02/export` | Export the top-tables result (JSON rows) to a downloadable `.xlsx` |
 | GET | `/api/transactions/db02/debug-screen` | Diagnostic: dump DB02 screen elements under a given container |
 | GET | `/api/transactions/db02/debug-tree` | Diagnostic: dump a tree control's node keys + display text |

@@ -10,16 +10,26 @@ interface Props {
 
 export default function LoginPanel({ onConnected, onDisconnected, connection }: Props) {
   const [systems, setSystems] = useState<SapSystem[]>([]);
-  const [system, setSystem] = useState("");
-  const [client, setClient] = useState("");
-  const [username, setUsername] = useState("");
+  const [system, setSystem] = useState(() => localStorage.getItem("sap_system") ?? "");
+  const [client, setClient] = useState(() => localStorage.getItem("sap_client") ?? "");
+  const [username, setUsername] = useState(() => localStorage.getItem("sap_username") ?? "");
   const [password, setPassword] = useState("");
-  const [language, setLanguage] = useState("EN");
+  const [language, setLanguage] = useState(() => localStorage.getItem("sap_language") ?? "EN");
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedNotice, setSavedNotice] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     api.systems().then((r) => setSystems(r.systems)).catch(() => {});
+    // Load saved credentials from the server file (persists across browser sessions)
+    api.loadCredentials().then((creds) => {
+      if (creds.system) setSystem(creds.system);
+      if (creds.client) setClient(creds.client);
+      if (creds.username) setUsername(creds.username);
+      if (creds.password) setPassword(creds.password);
+      if (creds.language) setLanguage(creds.language);
+    }).catch(() => {});
   }, []);
 
   async function handleConnect(e: React.FormEvent) {
@@ -28,11 +38,27 @@ export default function LoginPanel({ onConnected, onDisconnected, connection }: 
     setError("");
     try {
       const res = await api.connect({ system, client, username, password, language });
+      localStorage.setItem("sap_system", system);
+      localStorage.setItem("sap_client", client);
+      localStorage.setItem("sap_username", username);
+      localStorage.setItem("sap_language", language);
       onConnected({ connected: true, system: res.system, user: res.user });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Connection failed");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setSavedNotice(false);
+    try {
+      await api.saveCredentials({ system, client, username, password, language });
+      setSavedNotice(true);
+      setTimeout(() => setSavedNotice(false), 3000);
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -132,9 +158,15 @@ export default function LoginPanel({ onConnected, onDisconnected, connection }: 
 
         {error && <p className="form-error">{error}</p>}
 
-        <button type="submit" className="btn btn-primary" disabled={loading}>
-          {loading ? "Connecting…" : "Connect"}
-        </button>
+        <div className="login-actions">
+          <button type="submit" className="btn btn-primary" disabled={loading}>
+            {loading ? "Connecting…" : "Connect"}
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+        {savedNotice && <p className="saved-notice">Credentials saved.</p>}
       </form>
     </div>
   );

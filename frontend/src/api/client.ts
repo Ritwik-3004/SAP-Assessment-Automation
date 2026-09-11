@@ -47,6 +47,10 @@ export const api = {
     post<{ status: string; system: string; user: string }>("/api/sap/connect", body),
   disconnect: () => post<{ status: string }>("/api/sap/disconnect", {}),
   status: () => get<{ connected: boolean }>("/api/sap/status"),
+  sapInfo: () => get<{ connected: boolean; system: string | null; user: string | null }>("/api/sap/info"),
+  loadCredentials: () => get<{ system?: string; client?: string; username?: string; password?: string; language?: string }>("/api/sap/credentials"),
+  saveCredentials: (body: { system: string; client: string; username: string; password: string; language: string }) =>
+    post<{ saved: boolean }>("/api/sap/credentials", body),
 
   taana: (body: { table_name?: string; max_rows: number }) =>
     post<import("../types").TransactionResult>("/api/transactions/taana", body),
@@ -135,4 +139,18 @@ export const api = {
     }
     return res.blob();
   },
+
+  getInputFiles: () => get<{ files: string[] }>("/api/files/input"),
+
+  db15BatchFromInput: (filename: string) =>
+    post<import("../types").JobStarted>("/api/transactions/db15/batch-from-input", { filename }),
+
+  saveToInput: (rows: Record<string, string>[]) =>
+    post<{ saved: boolean; path: string }>("/api/files/input/save", { rows }),
+
+  saveArchivingToOutput: (rows: Record<string, string>[]) =>
+    post<{ saved: boolean; path: string }>("/api/files/output/save-archiving", { rows }),
+
+  saveScoredToOutput: (rows: Record<string, string>[], recommended: Record<string, string>[]) =>
+    post<{ saved: boolean; path: string }>("/api/files/output/save-scored", { rows, recommended }),
 };

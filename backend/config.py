@@ -1,7 +1,14 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Input / output folders at the project root (one level above backend/)
+_PROJECT_ROOT = Path(__file__).parent.parent
+INPUT_DIR = _PROJECT_ROOT / "input"
+OUTPUT_DIR = _PROJECT_ROOT / "output"
+CREDENTIALS_FILE = _PROJECT_ROOT / "sap_credentials.json"
 
 # SAP Logon landscape file path (used to discover configured systems)
 SAP_LANDSCAPE_PATHS = [

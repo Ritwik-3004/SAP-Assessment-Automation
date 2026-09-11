@@ -8,8 +8,11 @@ Start with:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import threading
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 import openpyxl
@@ -20,6 +23,7 @@ from pydantic import BaseModel
 
 from sap_connector import sap
 from progress import ProgressTracker
+from config import INPUT_DIR, OUTPUT_DIR, CREDENTIALS_FILE
 import scoring
 import transactions.taana as taana
 import transactions.db15 as db15
@@ -32,10 +36,21 @@ import transactions.sara as sara
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("Input folder:  %s", INPUT_DIR)
+    logger.info("Output folder: %s", OUTPUT_DIR)
+    yield
+
+
 app = FastAPI(
     title="SAP Assessment Automation API",
     version="1.0.0",
     description="Backend for SAP archivability analysis via GUI scripting.",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -119,6 +134,22 @@ class Db02DebugClickRequest(BaseModel):
     action: str = "select"
 
 
+class Db15BatchFromInputRequest(BaseModel):
+    filename: str
+
+
+class SaveTablesRequest(BaseModel):
+    rows: list[dict[str, str]]
+
+
+class SaveCredentialsRequest(BaseModel):
+    system: str
+    client: str
+    username: str
+    password: str
+    language: str = "EN"
+
+
 # ---------------------------------------------------------------------------
 # SAP session endpoints
 # ---------------------------------------------------------------------------
@@ -157,6 +188,103 @@ def disconnect():
 @app.get("/api/sap/status")
 def status():
     return {"connected": sap.is_connected}
+
+
+@app.get("/api/sap/info")
+def sap_info():
+    """Return current connection state including system and user — used by the
+    frontend on page load to restore the session without re-entering credentials."""
+    return {
+        "connected": sap.is_connected,
+        "system": sap.connected_system,
+        "user": sap.connected_user,
+    }
+
+
+@app.post("/api/sap/credentials")
+def save_credentials(req: SaveCredentialsRequest):
+    """Persist connection details (including password) to a local JSON file so
+    the login form auto-fills on the next session."""
+    data = {
+        "system": req.system,
+        "client": req.client,
+        "username": req.username,
+        "password": req.password,
+        "language": req.language,
+    }
+    CREDENTIALS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return {"saved": True}
+
+
+@app.get("/api/sap/credentials")
+def load_credentials():
+    """Return previously saved connection details, or an empty object if none."""
+    if not CREDENTIALS_FILE.exists():
+        return {}
+    try:
+        return json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# File folder endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/files/input")
+def list_input_files():
+    """List Excel files in the input folder, newest-modified first."""
+    files = sorted(
+        [f for f in INPUT_DIR.glob("*.xlsx")] + [f for f in INPUT_DIR.glob("*.xls")],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    return {"files": [f.name for f in files]}
+
+
+@app.post("/api/files/input/save")
+def save_tables_to_input(req: SaveTablesRequest):
+    """Save the table list rows to input/list_of_tables.xlsx."""
+    columns = ["Table Name", "Description"]
+    if req.rows and "Volume (GB)" in req.rows[0]:
+        columns.append("Volume (GB)")
+    buf = _build_workbook(req.rows, columns=columns, sheet_title="Top Tables")
+    dest = INPUT_DIR / "list_of_tables.xlsx"
+    dest.write_bytes(buf.getvalue())
+    return {"saved": True, "path": str(dest)}
+
+
+@app.post("/api/files/output/save-archiving")
+def save_archiving_to_output(req: Db15ExportRequest):
+    """Save archiving-objects rows to output/archiving_objects_by_table.xlsx."""
+    buf = _build_workbook(
+        req.rows,
+        columns=["Table Name", "Table Description", "Archiving Object", "Object Description"],
+        sheet_title="DB15 Results",
+    )
+    dest = OUTPUT_DIR / "archiving_objects_by_table.xlsx"
+    dest.write_bytes(buf.getvalue())
+    return {"saved": True, "path": str(dest)}
+
+
+@app.post("/api/files/output/save-scored")
+def save_scored_to_output(req: Db15ScoreExportRequest):
+    """Save scored archiving-objects to output/archiving_objects_scored.xlsx."""
+    buf = _build_multi_sheet_workbook([
+        (
+            "All Scored Objects",
+            ["Table Name", "Table Description", "Archiving Object", "Object Description", "Score"],
+            req.rows,
+        ),
+        (
+            "Recommended",
+            ["Table Name", "Table Description", "Archiving Object", "Object Description", "Score", "Rationale"],
+            req.recommended,
+        ),
+    ])
+    dest = OUTPUT_DIR / "archiving_objects_scored.xlsx"
+    dest.write_bytes(buf.getvalue())
+    return {"saved": True, "path": str(dest)}
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +367,43 @@ def run_db15_batch(file: UploadFile = File(...)):
             detail="No table names found in the uploaded file. Expected a table "
             "name in column A (and optionally a description in column B), "
             "starting from row 2.",
+        )
+
+    _db15_batch_progress.start(len(tables))
+
+    def job():
+        try:
+            result = db15.run_batch(tables, on_progress=_db15_batch_progress.update)
+            if result["status"] == "error":
+                _db15_batch_progress.fail(result["message"])
+            else:
+                _db15_batch_progress.finish(result)
+        except Exception as exc:
+            logger.exception("DB15 batch job failed")
+            _db15_batch_progress.fail(str(exc))
+
+    threading.Thread(target=job, daemon=True).start()
+    return {"status": "started", "total": len(tables)}
+
+
+@app.post("/api/transactions/db15/batch-from-input")
+def run_db15_batch_from_input(req: Db15BatchFromInputRequest):
+    """Start a DB15 batch job using a file that already exists in the input folder."""
+    _require_connection()
+    if _db15_batch_progress.is_running():
+        raise HTTPException(status_code=409, detail="A batch lookup is already in progress.")
+
+    safe_name = Path(req.filename).name
+    file_path = INPUT_DIR / safe_name
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"'{safe_name}' not found in the input folder.")
+
+    tables = _parse_table_list(file_path.read_bytes())
+    if not tables:
+        raise HTTPException(
+            status_code=400,
+            detail="No table names found in the file. Expected a table name in column A "
+            "(and optionally a description in column B), starting from row 2.",
         )
 
     _db15_batch_progress.start(len(tables))
@@ -367,9 +532,12 @@ def get_db02_top_tables(req: Db02TopTablesRequest):
 
 @app.post("/api/transactions/db02/export")
 def export_db02_top_tables(req: Db02ExportRequest):
+    columns = ["Table Name", "Description"]
+    if req.rows and "Volume (GB)" in req.rows[0]:
+        columns.append("Volume (GB)")
     buffer = _build_workbook(
         req.rows,
-        columns=["Table Name", "Description"],
+        columns=columns,
         sheet_title="Top Tables",
     )
     return StreamingResponse(
