@@ -39,6 +39,13 @@ export interface Db02TopTablesResult {
   rows?: Record<string, string>[];
 }
 
+export interface HeaderTableBatchResult {
+  status: "ok" | "error";
+  message?: string;
+  rows?: Record<string, string>[];
+  errors?: { archiving_object: string; message: string }[];
+}
+
 export interface ScoredResult {
   status: "ok" | "error";
   message?: string;

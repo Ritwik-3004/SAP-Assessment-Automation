@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import LoginPanel from "./components/LoginPanel";
 import BatchArchivingPanel from "./components/BatchArchivingPanel";
 import GenerateTableListPanel from "./components/GenerateTableListPanel";
+import HeaderTablePanel from "./components/HeaderTablePanel";
 import { api } from "./api/client";
 import type { ConnectionState } from "./types";
 import "./App.css";
@@ -9,6 +10,7 @@ import "./App.css";
 const TASKS = [
   { id: "TOP_TABLES", label: "Generate Table List (DB02)" },
   { id: "BATCH", label: "Find Archiving Objects for Tables" },
+  { id: "HEADER_TABLES", label: "Find Header Tables for Archiving Objects" },
 ] as const;
 
 type Tab = (typeof TASKS)[number]["id"];
@@ -39,6 +41,7 @@ export default function App() {
   const panelMap: Record<Tab, React.ReactNode> = {
     TOP_TABLES: <GenerateTableListPanel />,
     BATCH: <BatchArchivingPanel />,
+    HEADER_TABLES: <HeaderTablePanel />,
   };
 
   return (

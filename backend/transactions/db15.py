@@ -63,15 +63,16 @@ def _run(table_name: str) -> dict:
 def run_batch(tables: list[dict], on_progress=None) -> dict:
     """
     Run DB15 once per table in *tables* (each a dict with "table_name" and
-    optional "description"), reusing a single DB15 screen for all of them.
+    optional "description"/"volume_gb"/"volume_mb"), reusing a single DB15
+    screen for all of them.
 
     *on_progress*, if given, is called as on_progress(completed_count,
     table_name) after each table is processed, so a caller can report
     progress on a long-running batch.
 
     Returns {"status", "transaction", "rows": [...], "errors": [...]}, where
-    each row is {"Table Name", "Table Description", "Archiving Object",
-    "Object Description"}.
+    each row is {"Table Name", "Table Description", "Volume (GB)",
+    "Volume (MB)", "Archiving Object", "Object Description"}.
     """
     return sap.run(_run_batch, tables, on_progress)
 
@@ -89,6 +90,8 @@ def _run_batch(tables: list[dict], on_progress=None) -> dict:
     for entry in tables:
         table_name = (entry.get("table_name") or "").strip()
         description = entry.get("description") or ""
+        volume_gb = entry.get("volume_gb") or ""
+        volume_mb = entry.get("volume_mb") or ""
         if not table_name:
             continue
 
@@ -102,6 +105,8 @@ def _run_batch(tables: list[dict], on_progress=None) -> dict:
                     rows.append({
                         "Table Name": table_name.upper(),
                         "Table Description": description,
+                        "Volume (GB)": volume_gb,
+                        "Volume (MB)": volume_mb,
                         "Archiving Object": obj_code,
                         "Object Description": obj_desc,
                     })
@@ -109,6 +114,8 @@ def _run_batch(tables: list[dict], on_progress=None) -> dict:
                 rows.append({
                     "Table Name": table_name.upper(),
                     "Table Description": description,
+                    "Volume (GB)": volume_gb,
+                    "Volume (MB)": volume_mb,
                     "Archiving Object": "",
                     "Object Description": "(no archiving objects found)",
                 })

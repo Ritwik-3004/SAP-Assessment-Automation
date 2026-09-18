@@ -30,6 +30,11 @@ export default function BatchArchivingPanel() {
   const [savingScored, setSavingScored] = useState(false);
   const [savedScoredPath, setSavedScoredPath] = useState<string | null>(null);
 
+  // ── Grouped by Object ───────────────────────────────────────────────────
+  const [groupedRows, setGroupedRows] = useState<Record<string, string>[] | null>(null);
+  const [showGrouped, setShowGrouped] = useState(false);
+  const [groupedLoading, setGroupedLoading] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   async function fetchInputFiles() {
@@ -78,6 +83,8 @@ export default function BatchArchivingPanel() {
     setResult(null);
     setScored(null);
     setShowRecommended(false);
+    setGroupedRows(null);
+    setShowGrouped(false);
     setLookupProgress(null);
     try {
       let started: import("../types").JobStarted;
@@ -143,6 +150,8 @@ export default function BatchArchivingPanel() {
     setScoring(true);
     setError("");
     setScoreProgress(null);
+    setGroupedRows(null);
+    setShowGrouped(false);
     try {
       const started = await api.db15Score(result.rows);
       setScoreProgress({ status: "running", completed: 0, total: started.total, message: null, result: null });
@@ -195,13 +204,39 @@ export default function BatchArchivingPanel() {
     }
   }
 
+  async function handleToggleGrouped() {
+    if (showGrouped) {
+      setShowGrouped(false);
+      return;
+    }
+    if (groupedRows) {
+      setShowGrouped(true);
+      return;
+    }
+    if (!scored?.recommended?.length) return;
+    setGroupedLoading(true);
+    setError("");
+    try {
+      const res = await api.groupByObject(scored.recommended);
+      setGroupedRows(res.rows);
+      setShowGrouped(true);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Grouping failed");
+    } finally {
+      setGroupedLoading(false);
+    }
+  }
+
   return (
     <div className="tx-panel">
       <div className="tx-description">
         <strong>Find Archiving Objects for Tables</strong> — select a table list from the
         input folder, or upload your own Excel file (Table Name in column A, Description
         in column B, header row first). For each table, this looks up the archiving
-        object(s) that reference it.
+        object(s) that reference it. If your file doesn't already have "Volume (GB)" /
+        "Volume (MB)" size columns, they're fetched automatically from DB02 (MB is
+        included since small tables often round to 0.00 GB) and carried through every
+        result and export below — if you already have them, your values are used as-is.
       </div>
 
       <form className="tx-form" onSubmit={handleSubmit}>
@@ -345,8 +380,15 @@ export default function BatchArchivingPanel() {
             object per table for archiving relevance (0–100, approximate), referring to
             SAP's official Data Management Guide (DVM Guide) where it covers that table,
             then pick the highest-scoring object per table as the recommended setup.
-            Scores and rationale are AI-generated best-effort judgments, not guaranteed
-            SAP guidance — treat them as a starting point.
+            Every table is included below even if none was found — for a table with no
+            archiving object, this also checks the DVM Guide for a housekeeping/cleanup
+            program instead (shown in its own column, never mixed with Archiving Object;
+            a SAP for Me portal search is planned as a further fallback once access is
+            granted). "Show Grouped by Object" then rolls tables sharing the same
+            archiving object or housekeeping program into one view with a cumulative
+            size, sorted largest-first (tables with neither found are grouped last).
+            Scores and rationale are AI-generated best-effort judgments, not
+            guaranteed SAP guidance — treat them as a starting point.
           </div>
           <button
             type="button"
@@ -399,6 +441,14 @@ export default function BatchArchivingPanel() {
             >
               {showRecommended ? "Hide Recommended" : "Show Recommended"}
             </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleToggleGrouped}
+              disabled={groupedLoading}
+            >
+              {groupedLoading ? "Grouping…" : showGrouped ? "Hide Grouped by Object" : "Show Grouped by Object"}
+            </button>
           </div>
           {savedScoredPath && (
             <div className="saved-notice">
@@ -410,6 +460,13 @@ export default function BatchArchivingPanel() {
             <ResultsTable
               rows={scored.recommended}
               caption="Recommended — highest-scoring object per table"
+            />
+          )}
+
+          {showGrouped && groupedRows && (
+            <ResultsTable
+              rows={groupedRows}
+              caption="Grouped by Object — tables sharing an archiving object/housekeeping program, sorted by cumulative size (largest first; tables with neither are grouped last)"
             />
           )}
         </>

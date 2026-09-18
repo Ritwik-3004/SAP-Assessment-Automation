@@ -153,4 +153,54 @@ export const api = {
 
   saveScoredToOutput: (rows: Record<string, string>[], recommended: Record<string, string>[]) =>
     post<{ saved: boolean; path: string }>("/api/files/output/save-scored", { rows, recommended }),
+
+  groupByObject: (recommended: Record<string, string>[]) =>
+    post<{ status: "ok"; rows: Record<string, string>[] }>("/api/transactions/db15/group-by-object", { recommended }),
+
+  getOutputFiles: () => get<{ files: string[] }>("/api/files/output"),
+
+  headerTablesBatch: async (file: File, maxObjects: number) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(`${BASE}/api/transactions/header-tables/batch?max_objects=${maxObjects}`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.json() as Promise<import("../types").JobStarted>;
+  },
+
+  headerTablesBatchFromOutput: (filename: string, maxObjects: number) =>
+    post<import("../types").JobStarted>("/api/transactions/header-tables/batch-from-output", {
+      filename,
+      max_objects: maxObjects,
+    }),
+
+  headerTablesBatchProgress: () =>
+    get<import("../types").ProgressSnapshot<import("../types").HeaderTableBatchResult>>(
+      "/api/transactions/header-tables/batch/progress"
+    ),
+
+  pollHeaderTablesBatch: (
+    onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").HeaderTableBatchResult>) => void
+  ) => pollUntilDone(() => api.headerTablesBatchProgress(), onTick),
+
+  headerTablesExport: async (rows: Record<string, string>[]) => {
+    const res = await fetch(`${BASE}/api/transactions/header-tables/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.blob();
+  },
+
+  saveHeaderTablesToOutput: (rows: Record<string, string>[]) =>
+    post<{ saved: boolean; path: string }>("/api/files/output/save-header-tables", { rows }),
 };

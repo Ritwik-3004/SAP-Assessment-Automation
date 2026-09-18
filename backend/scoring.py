@@ -3,16 +3,25 @@ Score archiving objects for relevance per table, using the Claude API, and
 derive a recommended (highest-scoring) object per table.
 
 Takes the output of db15.run_batch() -- rows shaped
-{"Table Name", "Table Description", "Archiving Object", "Object Description"},
-one row per (table, candidate archiving object) pair -- and adds a Score
-(0-100) to every row, plus a separate "recommended" list with one row per
-table (the max-score candidate) and a Rationale column.
+{"Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
+"Archiving Object", "Object Description"}, one row per (table, candidate
+archiving object) pair -- and adds a Score (0-100) to every row, plus a
+separate "recommended" list with one row per table (the max-score
+candidate) and a Rationale column. Volume (GB)/Volume (MB) are carried
+through unchanged (they're per-table facts, not something to score).
 
 One Claude API call per table (not per object): all of a table's candidates
 are scored together in a single structured response, which is both cheaper
 and lets the model reason comparatively across that table's own candidates.
 Tables with a single candidate skip the API call entirely (nothing to
-compare against). Tables with zero candidates pass through unscored.
+compare against).
+
+A table with zero archiving-object candidates is not just dropped: it's
+looked up in housekeeping.py for a housekeeping/cleanup program instead (see
+that module for the DVM-Guide-first / SAP-for-Me-later lookup order), and
+still gets a row in both "rows" and "recommended" either way -- with the
+result in a separate "Housekeeping Program" column, never mixed into
+"Archiving Object", and a Rationale explaining what (if anything) was found.
 """
 
 import logging
@@ -23,6 +32,7 @@ import anthropic
 from pydantic import BaseModel, Field
 
 import dvm_guide
+import housekeeping
 from config import ANTHROPIC_API_KEY, SCORING_MODEL
 
 logger = logging.getLogger(__name__)
@@ -71,10 +81,15 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
     *on_progress*, if given, is called as on_progress(completed_count,
     table_name) once per distinct table as its scoring resolves (including
     the zero/single-candidate shortcuts), so a caller can report progress on
-    a long-running batch.
+    a long-running batch. If any table has zero archiving-object candidates,
+    one extra call reports a status message while the (separate,
+    non-incremental) housekeeping-program lookup for those tables runs.
 
     Returns {"status": "ok", "rows": [...with Score...], "recommended": [...]}
-    or {"status": "error", "message": ...}.
+    or {"status": "error", "message": ...}. Every table appears in both
+    "rows" and "recommended" -- a table with neither an archiving object nor
+    a housekeeping program still gets a row, with both columns blank and a
+    Rationale explaining nothing was found.
     """
     if not ANTHROPIC_API_KEY:
         return {
@@ -87,7 +102,12 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
         table_name = row.get("Table Name", "")
         entry = tables.setdefault(
             table_name,
-            {"description": row.get("Table Description", ""), "candidates": []},
+            {
+                "description": row.get("Table Description", ""),
+                "volume_gb": row.get("Volume (GB)", ""),
+                "volume_mb": row.get("Volume (MB)", ""),
+                "candidates": [],
+            },
         )
         obj = row.get("Archiving Object", "")
         if obj:
@@ -108,20 +128,46 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
         logger.exception("Scoring failed")
         return {"status": "error", "message": str(exc)}
 
+    zero_candidate_tables = [name for name, entry in tables.items() if not entry["candidates"]]
+    housekeeping_by_table: dict[str, dict] = {}
+    if zero_candidate_tables:
+        if on_progress:
+            on_progress(
+                len(tables),
+                f"Looking up housekeeping programs for {len(zero_candidate_tables)} "
+                "table(s) without an archiving object…",
+            )
+        try:
+            housekeeping_by_table = housekeeping.find_housekeeping_programs(zero_candidate_tables)
+        except Exception as exc:
+            logger.warning("Housekeeping-program lookup failed: %s", exc, exc_info=True)
+
     scored_rows = []
     recommended_rows = []
     for table_name, entry in tables.items():
         description = entry["description"]
+        volume_gb = entry["volume_gb"]
+        volume_mb = entry["volume_mb"]
         candidate_scores = scores_by_table.get(table_name, {})
 
         if not entry["candidates"]:
-            scored_rows.append({
+            hk = housekeeping_by_table.get(table_name, {})
+            hk_program = hk.get("program", "")
+            row = {
                 "Table Name": table_name,
                 "Table Description": description,
+                "Volume (GB)": volume_gb,
+                "Volume (MB)": volume_mb,
                 "Archiving Object": "",
-                "Object Description": "(no archiving objects found)",
+                "Object Description": "(no archiving object found)",
+                "Housekeeping Program": hk_program,
                 "Score": "",
-            })
+            }
+            rationale = hk.get("rationale") or (
+                "No suitable archiving object or housekeeping program found."
+            )
+            scored_rows.append(row)
+            recommended_rows.append({**row, "Rationale": rationale})
             continue
 
         best = None
@@ -137,8 +183,11 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
             scored_rows.append({
                 "Table Name": table_name,
                 "Table Description": description,
+                "Volume (GB)": volume_gb,
+                "Volume (MB)": volume_mb,
                 "Archiving Object": cand["object"],
                 "Object Description": cand["description"],
+                "Housekeeping Program": "",
                 "Score": score_str,
             })
             numeric_score = raw_score if isinstance(raw_score, int) else -1
@@ -147,8 +196,11 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
                 best = {
                     "Table Name": table_name,
                     "Table Description": description,
+                    "Volume (GB)": volume_gb,
+                    "Volume (MB)": volume_mb,
                     "Archiving Object": cand["object"],
                     "Object Description": cand["description"],
+                    "Housekeeping Program": "",
                     "Score": score_str,
                     "Rationale": score_info.get("rationale", ""),
                 }

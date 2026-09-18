@@ -10,12 +10,14 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 import openpyxl
+from openpyxl.styles import Alignment
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -25,6 +27,7 @@ from sap_connector import sap
 from progress import ProgressTracker
 from config import INPUT_DIR, OUTPUT_DIR, CREDENTIALS_FILE
 import scoring
+import grouping
 import transactions.taana as taana
 import transactions.db15 as db15
 import transactions.db02 as db02
@@ -66,6 +69,27 @@ app.add_middleware(
 # endpoint while the background thread below runs the real work.
 _db15_batch_progress = ProgressTracker()
 _scoring_progress = ProgressTracker()
+_header_table_progress = ProgressTracker()
+
+# Column order for the "Grouped by Object" sheet/endpoint — mirrors the
+# "Recommended" row shape (grouping.build_object_groups() only adds fields,
+# never renames the existing ones) plus the three new per-group columns.
+GROUPED_COLUMNS = [
+    "Archiving Object", "Object Description", "Housekeeping Program",
+    "Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
+    "Cumulative Size (GB)", "Cumulative Size (MB)", "Table Count", "Rationale",
+]
+
+# Group-level columns in GROUPED_COLUMNS -- constant across every member row
+# of a group (see grouping.build_object_groups()) -- get vertically merged
+# into one cell per group in the exported sheet, so a group with several
+# tables doesn't repeat the same Archiving Object/Housekeeping
+# Program/cumulative-size value on every row. Table Name/Table
+# Description/Volume/Rationale are per-table and are never merged.
+GROUPED_MERGE_COLUMNS = [
+    "Archiving Object", "Object Description", "Housekeeping Program",
+    "Cumulative Size (GB)", "Cumulative Size (MB)", "Table Count",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +144,10 @@ class Db15ScoreExportRequest(BaseModel):
     recommended: list[dict[str, str]]
 
 
+class GroupByObjectRequest(BaseModel):
+    recommended: list[dict[str, str]]
+
+
 class Db02TopTablesRequest(BaseModel):
     limit: int = 300
 
@@ -136,6 +164,15 @@ class Db02DebugClickRequest(BaseModel):
 
 class Db15BatchFromInputRequest(BaseModel):
     filename: str
+
+
+class HeaderTableBatchFromOutputRequest(BaseModel):
+    filename: str
+    max_objects: int = 20
+
+
+class HeaderTableExportRequest(BaseModel):
+    rows: list[dict[str, str]]
 
 
 class SaveTablesRequest(BaseModel):
@@ -242,12 +279,23 @@ def list_input_files():
     return {"files": [f.name for f in files]}
 
 
+@app.get("/api/files/output")
+def list_output_files():
+    """List Excel files in the output folder, newest-modified first --
+    mirrors list_input_files() above. Used to auto-detect
+    archiving_objects_scored.xlsx for the header-table lookup tool."""
+    files = sorted(
+        [f for f in OUTPUT_DIR.glob("*.xlsx")] + [f for f in OUTPUT_DIR.glob("*.xls")],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    return {"files": [f.name for f in files]}
+
+
 @app.post("/api/files/input/save")
 def save_tables_to_input(req: SaveTablesRequest):
     """Save the table list rows to input/list_of_tables.xlsx."""
-    columns = ["Table Name", "Description"]
-    if req.rows and "Volume (GB)" in req.rows[0]:
-        columns.append("Volume (GB)")
+    columns = ["Table Name", "Description"] + _optional_size_columns(req.rows)
     buf = _build_workbook(req.rows, columns=columns, sheet_title="Top Tables")
     dest = INPUT_DIR / "list_of_tables.xlsx"
     dest.write_bytes(buf.getvalue())
@@ -259,7 +307,7 @@ def save_archiving_to_output(req: Db15ExportRequest):
     """Save archiving-objects rows to output/archiving_objects_by_table.xlsx."""
     buf = _build_workbook(
         req.rows,
-        columns=["Table Name", "Table Description", "Archiving Object", "Object Description"],
+        columns=["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description"],
         sheet_title="DB15 Results",
     )
     dest = OUTPUT_DIR / "archiving_objects_by_table.xlsx"
@@ -273,13 +321,19 @@ def save_scored_to_output(req: Db15ScoreExportRequest):
     buf = _build_multi_sheet_workbook([
         (
             "All Scored Objects",
-            ["Table Name", "Table Description", "Archiving Object", "Object Description", "Score"],
+            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description", "Housekeeping Program", "Score"],
             req.rows,
         ),
         (
             "Recommended",
-            ["Table Name", "Table Description", "Archiving Object", "Object Description", "Score", "Rationale"],
+            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description", "Housekeeping Program", "Score", "Rationale"],
             req.recommended,
+        ),
+        (
+            "Grouped by Object",
+            GROUPED_COLUMNS,
+            grouping.build_object_groups(req.recommended),
+            GROUPED_MERGE_COLUMNS,
         ),
     ])
     dest = OUTPUT_DIR / "archiving_objects_scored.xlsx"
@@ -370,19 +424,7 @@ def run_db15_batch(file: UploadFile = File(...)):
         )
 
     _db15_batch_progress.start(len(tables))
-
-    def job():
-        try:
-            result = db15.run_batch(tables, on_progress=_db15_batch_progress.update)
-            if result["status"] == "error":
-                _db15_batch_progress.fail(result["message"])
-            else:
-                _db15_batch_progress.finish(result)
-        except Exception as exc:
-            logger.exception("DB15 batch job failed")
-            _db15_batch_progress.fail(str(exc))
-
-    threading.Thread(target=job, daemon=True).start()
+    threading.Thread(target=_run_db15_batch_job, args=(tables,), daemon=True).start()
     return {"status": "started", "total": len(tables)}
 
 
@@ -407,19 +449,7 @@ def run_db15_batch_from_input(req: Db15BatchFromInputRequest):
         )
 
     _db15_batch_progress.start(len(tables))
-
-    def job():
-        try:
-            result = db15.run_batch(tables, on_progress=_db15_batch_progress.update)
-            if result["status"] == "error":
-                _db15_batch_progress.fail(result["message"])
-            else:
-                _db15_batch_progress.finish(result)
-        except Exception as exc:
-            logger.exception("DB15 batch job failed")
-            _db15_batch_progress.fail(str(exc))
-
-    threading.Thread(target=job, daemon=True).start()
+    threading.Thread(target=_run_db15_batch_job, args=(tables,), daemon=True).start()
     return {"status": "started", "total": len(tables)}
 
 
@@ -457,7 +487,7 @@ def debug_db15_grid(table_name: str):
 def export_db15_batch(req: Db15ExportRequest):
     buffer = _build_workbook(
         req.rows,
-        columns=["Table Name", "Table Description", "Archiving Object", "Object Description"],
+        columns=["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description"],
         sheet_title="DB15 Results",
     )
     return StreamingResponse(
@@ -500,13 +530,19 @@ def export_db15_scored(req: Db15ScoreExportRequest):
     buffer = _build_multi_sheet_workbook([
         (
             "All Scored Objects",
-            ["Table Name", "Table Description", "Archiving Object", "Object Description", "Score"],
+            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description", "Housekeeping Program", "Score"],
             req.rows,
         ),
         (
             "Recommended",
-            ["Table Name", "Table Description", "Archiving Object", "Object Description", "Score", "Rationale"],
+            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description", "Housekeeping Program", "Score", "Rationale"],
             req.recommended,
+        ),
+        (
+            "Grouped by Object",
+            GROUPED_COLUMNS,
+            grouping.build_object_groups(req.recommended),
+            GROUPED_MERGE_COLUMNS,
         ),
     ])
     return StreamingResponse(
@@ -514,6 +550,14 @@ def export_db15_scored(req: Db15ScoreExportRequest):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=archiving_objects_scored.xlsx"},
     )
+
+
+@app.post("/api/transactions/db15/group-by-object")
+def group_db15_by_object(req: GroupByObjectRequest):
+    """Group scored tables by their recommended Archiving Object or
+    Housekeeping Program, sorted by cumulative size — pure in-memory
+    computation over already-scored data, so no progress polling needed."""
+    return {"status": "ok", "rows": grouping.build_object_groups(req.recommended)}
 
 
 # ---------------------------------------------------------------------------
@@ -532,9 +576,7 @@ def get_db02_top_tables(req: Db02TopTablesRequest):
 
 @app.post("/api/transactions/db02/export")
 def export_db02_top_tables(req: Db02ExportRequest):
-    columns = ["Table Name", "Description"]
-    if req.rows and "Volume (GB)" in req.rows[0]:
-        columns.append("Volume (GB)")
+    columns = ["Table Name", "Description"] + _optional_size_columns(req.rows)
     buffer = _build_workbook(
         req.rows,
         columns=columns,
@@ -597,6 +639,129 @@ def debug_db02_click(req: Db02DebugClickRequest):
 
 
 # ---------------------------------------------------------------------------
+# Header table lookup (SE16N / ARCH_DEF) for the top N archiving objects by
+# cumulative size, sourced from the scored workbook's "Grouped by Object"
+# sheet or an uploaded equivalent.
+# ---------------------------------------------------------------------------
+
+@app.post("/api/transactions/header-tables/batch")
+def run_header_table_batch(file: UploadFile = File(...), max_objects: int = 20):
+    _require_connection()
+    if _header_table_progress.is_running():
+        raise HTTPException(status_code=409, detail="A header-table lookup is already in progress.")
+
+    contents = file.file.read()
+    archiving_objects = _parse_top_archiving_objects(contents, limit=max_objects)
+    if not archiving_objects:
+        raise HTTPException(
+            status_code=400,
+            detail="No 'Archiving Object' column with values found in the uploaded file's "
+            "last sheet. Expected a sheet shaped like the 'Grouped by Object' sheet from "
+            "archiving_objects_scored.xlsx.",
+        )
+
+    _header_table_progress.start(len(archiving_objects))
+    threading.Thread(target=_run_header_table_job, args=(archiving_objects,), daemon=True).start()
+    return {"status": "started", "total": len(archiving_objects)}
+
+
+@app.post("/api/transactions/header-tables/batch-from-output")
+def run_header_table_batch_from_output(req: HeaderTableBatchFromOutputRequest):
+    """Start a header-table lookup job using a file that already exists in
+    the output folder (e.g. archiving_objects_scored.xlsx)."""
+    _require_connection()
+    if _header_table_progress.is_running():
+        raise HTTPException(status_code=409, detail="A header-table lookup is already in progress.")
+
+    safe_name = Path(req.filename).name
+    file_path = OUTPUT_DIR / safe_name
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"'{safe_name}' not found in the output folder.")
+
+    archiving_objects = _parse_top_archiving_objects(file_path.read_bytes(), limit=req.max_objects)
+    if not archiving_objects:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No 'Archiving Object' column with values found in '{safe_name}''s last sheet.",
+        )
+
+    _header_table_progress.start(len(archiving_objects))
+    threading.Thread(target=_run_header_table_job, args=(archiving_objects,), daemon=True).start()
+    return {"status": "started", "total": len(archiving_objects)}
+
+
+@app.get("/api/transactions/header-tables/batch/progress")
+def get_header_table_batch_progress():
+    return _header_table_progress.snapshot()
+
+
+@app.post("/api/transactions/header-tables/export")
+def export_header_tables(req: HeaderTableExportRequest):
+    buffer = _build_workbook(
+        req.rows,
+        columns=["Archiving Object", "Header Table"],
+        sheet_title="Header Tables",
+    )
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=header_tables.xlsx"},
+    )
+
+
+@app.post("/api/files/output/save-header-tables")
+def save_header_tables_to_output(req: HeaderTableExportRequest):
+    """Save header-table rows to output/header_tables.xlsx."""
+    buf = _build_workbook(
+        req.rows,
+        columns=["Archiving Object", "Header Table"],
+        sheet_title="Header Tables",
+    )
+    dest = OUTPUT_DIR / "header_tables.xlsx"
+    dest.write_bytes(buf.getvalue())
+    return {"saved": True, "path": str(dest)}
+
+
+@app.get("/api/transactions/se16n/debug-arch-def-screen")
+def debug_arch_def_screen():
+    """Diagnostic: navigate to SE16N, load ARCH_DEF's Selection Criteria
+    screen, and dump every element (id/type/name/text). Not used by the UI —
+    call directly while connected to SAP to discover the real 'Arch. Object'
+    field ID before wiring up se16n.find_header_table()."""
+    _require_connection()
+    result = se16n.debug_dump_arch_def_screen()
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", "debug dump failed"))
+    return result
+
+
+@app.get("/api/transactions/se16n/debug-arch-def-query")
+def debug_arch_def_query(archiving_object: str):
+    """Diagnostic: query ARCH_DEF for *archiving_object* and report every
+    step's outcome independently (filter readback, status bar text after
+    Execute, each candidate grid path's found/row_count/column_order/
+    first_row) instead of only the final result — for diagnosing a wrong/
+    empty result."""
+    _require_connection()
+    result = se16n.debug_query_arch_def(archiving_object)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", "debug query failed"))
+    return result
+
+
+def _run_header_table_job(archiving_objects: list[str]):
+    try:
+        result = se16n.run_batch_find_header_tables(archiving_objects, on_progress=_header_table_progress.update)
+        if result["status"] == "error":
+            _header_table_progress.fail(result["message"])
+        else:
+            _header_table_progress.finish(result)
+    except Exception as exc:
+        logger.exception("Header-table batch job failed")
+        _header_table_progress.fail(str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -608,20 +773,177 @@ def _require_connection():
         )
 
 
+_HEADER_ALIASES = {
+    "tablename": "table_name",
+    "table": "table_name",
+    "tabname": "table_name",
+    "description": "description",
+    "tabledescription": "description",
+    "desc": "description",
+    "ddtext": "description",
+    "volumegb": "volume_gb",
+    "volume": "volume_gb",
+    "sizegb": "volume_gb",
+    "size": "volume_gb",
+    "tablesizegb": "volume_gb",
+    "tablesize": "volume_gb",
+    "volumemb": "volume_mb",
+    "sizemb": "volume_mb",
+    "tablesizemb": "volume_mb",
+    "tablevolumemb": "volume_mb",
+}
+
+
+def _normalize_header(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.strip().lower())
+
+
 def _parse_table_list(contents: bytes) -> list[dict]:
-    """Read (Table Name, Description) pairs from an uploaded Excel file.
-    Table name is column A, description is column B; row 1 is a header."""
+    """Read (table_name, description, [volume_gb], [volume_mb]) entries from
+    an uploaded Excel file. Columns are located by header name (row 1) —
+    recognizing "Table Name" / "Description" / "Volume (GB)" / "Volume (MB)"
+    and a few common variants, case/spacing-insensitive — so a file
+    re-uploaded from this app's own DB02/DB15 exports (which already carry
+    size columns) round-trips correctly. Falls back to plain column A/B
+    position for name/description if the header doesn't match anything
+    recognized, so a bare two-column list without recognizable headers still
+    works.
+
+    A row's "volume_gb"/"volume_mb" key is present only when that size
+    column was found AND the row has a value in it — a file missing one or
+    both size columns simply never sets the corresponding key, which is what
+    _ensure_table_sizes() below checks for before falling back to DB02."""
     workbook = openpyxl.load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
     sheet = workbook.active
 
+    header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+    field_index: dict[str, int] = {}
+    for i, cell in enumerate(header_row):
+        if not cell:
+            continue
+        field = _HEADER_ALIASES.get(_normalize_header(str(cell)))
+        if field and field not in field_index:
+            field_index[field] = i
+
+    name_idx = field_index.get("table_name", 0)
+    desc_idx = field_index.get("description", 1)
+    volume_gb_idx = field_index.get("volume_gb")
+    volume_mb_idx = field_index.get("volume_mb")
+
     tables = []
     for row in sheet.iter_rows(min_row=2, values_only=True):
-        if not row or not row[0]:
+        if not row or name_idx >= len(row) or not row[name_idx]:
             continue
-        name = str(row[0]).strip()
-        description = str(row[1]).strip() if len(row) > 1 and row[1] else ""
-        tables.append({"table_name": name, "description": description})
+        name = str(row[name_idx]).strip()
+        description = str(row[desc_idx]).strip() if desc_idx < len(row) and row[desc_idx] else ""
+
+        entry = {"table_name": name, "description": description}
+        if volume_gb_idx is not None and volume_gb_idx < len(row) and row[volume_gb_idx] not in (None, ""):
+            entry["volume_gb"] = _format_volume(row[volume_gb_idx])
+        if volume_mb_idx is not None and volume_mb_idx < len(row) and row[volume_mb_idx] not in (None, ""):
+            entry["volume_mb"] = _format_volume(row[volume_mb_idx])
+        tables.append(entry)
     return tables
+
+
+def _format_volume(value) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
+def _optional_size_columns(rows: list[dict]) -> list[str]:
+    """Include "Volume (GB)"/"Volume (MB)" in an export only if the rows
+    actually carry them -- e.g. DB02's top-tables result always has both,
+    but a plain saved table list might not."""
+    if not rows:
+        return []
+    return [col for col in ("Volume (GB)", "Volume (MB)") if col in rows[0]]
+
+
+_ARCHIVING_OBJECT_HEADER_ALIASES = {"archivingobject", "archobject", "archiveobject"}
+
+
+def _parse_top_archiving_objects(contents: bytes, limit: int = 20) -> list[str]:
+    """Read distinct, non-blank "Archiving Object" values from *contents*'s
+    LAST sheet, in row order, capped at *limit*. Matches the "Grouped by
+    Object" sheet's shape (see grouping.py) -- already sorted by descending
+    cumulative size, so the first N distinct values are exactly the top N
+    archiving objects. Housekeeping-program-only and "nothing found" rows
+    are naturally skipped since their Archiving Object cell is blank."""
+    workbook = openpyxl.load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
+    sheet = workbook.worksheets[-1]
+
+    header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), ())
+    archiving_object_idx = None
+    for i, cell in enumerate(header_row):
+        if cell and _normalize_header(str(cell)) in _ARCHIVING_OBJECT_HEADER_ALIASES:
+            archiving_object_idx = i
+            break
+
+    if archiving_object_idx is None:
+        return []
+
+    seen: set[str] = set()
+    objects: list[str] = []
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        if len(objects) >= limit:
+            break
+        if not row or archiving_object_idx >= len(row) or not row[archiving_object_idx]:
+            continue
+        value = str(row[archiving_object_idx]).strip().upper()
+        if value and value not in seen:
+            seen.add(value)
+            objects.append(value)
+
+    return objects
+
+
+def _ensure_table_sizes(tables: list[dict]) -> list[dict]:
+    """If any table in *tables* is missing "volume_gb" and/or "volume_mb"
+    (the uploaded file had no size column(s) at all, or left some cells
+    blank), backfill just the missing metric(s) by querying DB02's SQL
+    Editor for those tables. A metric a row already carries from the
+    uploaded file is never overwritten. A table DB02 has no size for is left
+    with an empty string rather than treated as an error — visibility on
+    *which* tables are missing a size is more useful than failing the whole
+    batch over it."""
+    missing = [
+        t["table_name"] for t in tables
+        if not t.get("volume_gb") or not t.get("volume_mb")
+    ]
+    if not missing:
+        return tables
+
+    result = db02.run_get_table_sizes(missing)
+    if result.get("status") != "ok":
+        logger.warning("DB02 table-size backfill failed: %s", result.get("message"))
+        sizes = {}
+    else:
+        sizes = result.get("sizes", {})
+
+    for t in tables:
+        fetched = sizes.get(t["table_name"].strip().upper(), {})
+        if not t.get("volume_gb"):
+            t["volume_gb"] = fetched.get("volume_gb", "")
+        if not t.get("volume_mb"):
+            t["volume_mb"] = fetched.get("volume_mb", "")
+    return tables
+
+
+def _run_db15_batch_job(tables: list[dict]):
+    try:
+        _db15_batch_progress.update(0, "Checking table sizes via DB02…")
+        tables = _ensure_table_sizes(tables)
+        result = db15.run_batch(tables, on_progress=_db15_batch_progress.update)
+        if result["status"] == "error":
+            _db15_batch_progress.fail(result["message"])
+        else:
+            _db15_batch_progress.finish(result)
+    except Exception as exc:
+        logger.exception("DB15 batch job failed")
+        _db15_batch_progress.fail(str(exc))
 
 
 def _build_workbook(rows: list[dict], columns: list[str], sheet_title: str) -> io.BytesIO:
@@ -639,23 +961,73 @@ def _build_workbook(rows: list[dict], columns: list[str], sheet_title: str) -> i
     return buffer
 
 
-def _build_multi_sheet_workbook(sheets: list[tuple[str, list[str], list[dict]]]) -> io.BytesIO:
-    """Build a workbook with one sheet per (title, columns, rows) tuple.
-    Numeric-looking cell values (e.g. Score) are written as real numbers so
-    they sort/filter correctly in Excel, instead of as text."""
+def _build_multi_sheet_workbook(sheets: list[tuple]) -> io.BytesIO:
+    """Build a workbook with one sheet per (title, columns, rows) or (title,
+    columns, rows, merge_columns) tuple. Numeric-looking cell values (e.g.
+    Score) are written as real numbers so they sort/filter correctly in
+    Excel, instead of as text.
+
+    When *merge_columns* is given, vertically-adjacent cells in those
+    columns are merged (and centered) wherever every column listed shares
+    the same value across consecutive rows -- used by the "Grouped by
+    Object" sheet so a group's Archiving Object/Housekeeping
+    Program/cumulative-size values appear once instead of repeated on every
+    member row."""
     workbook = openpyxl.Workbook()
     workbook.remove(workbook.active)
 
-    for title, columns, rows in sheets:
+    for sheet_spec in sheets:
+        title, columns, rows = sheet_spec[0], sheet_spec[1], sheet_spec[2]
+        merge_columns = sheet_spec[3] if len(sheet_spec) > 3 else None
+
         sheet = workbook.create_sheet(title)
         sheet.append(columns)
         for row in rows:
             sheet.append([_numeric_or_raw(row.get(col, "")) for col in columns])
 
+        if merge_columns:
+            _merge_repeated_rows(sheet, columns, rows, merge_columns)
+
     buffer = io.BytesIO()
     workbook.save(buffer)
     buffer.seek(0)
     return buffer
+
+
+def _merge_repeated_rows(sheet, columns: list[str], rows: list[dict], merge_columns: list[str]):
+    """Vertically merge each run of consecutive data rows that share the
+    same value across every column in *merge_columns*, left-aligning and
+    vertically centering the surviving value in the merged range. Assumes
+    row 1 is the header and data starts at row 2, matching how
+    _build_multi_sheet_workbook writes the sheet just above.
+
+    This alignment is applied to *every* row in these columns, not just the
+    ones that end up merged -- a singleton group (nothing to merge) would
+    otherwise keep Excel's default top alignment, which looks inconsistent
+    next to a merged multi-row group's vertically-centered text."""
+    col_index = {name: i + 1 for i, name in enumerate(columns)}  # openpyxl columns are 1-based
+    merge_col_numbers = [col_index[c] for c in merge_columns if c in col_index]
+    if not merge_col_numbers or not rows:
+        return
+
+    alignment = Alignment(horizontal="left", vertical="center")
+    for row_idx in range(len(rows)):
+        excel_row = row_idx + 2  # +1 for header row, +1 for 1-based
+        for col in merge_col_numbers:
+            sheet.cell(row=excel_row, column=col).alignment = alignment
+
+    def _key(row: dict) -> tuple:
+        return tuple(row.get(c, "") for c in merge_columns)
+
+    run_start = 0  # index into rows (0-based)
+    for i in range(1, len(rows) + 1):
+        if i == len(rows) or _key(rows[i]) != _key(rows[run_start]):
+            if i - run_start > 1:
+                start_excel_row = run_start + 2
+                end_excel_row = i + 1
+                for col in merge_col_numbers:
+                    sheet.merge_cells(start_row=start_excel_row, start_column=col, end_row=end_excel_row, end_column=col)
+            run_start = i
 
 
 def _numeric_or_raw(value):

@@ -16,6 +16,7 @@ around for future systems where the IDs might differ, the same way DB15 keeps
 its debug-screen/debug-grid endpoints.
 """
 
+import re
 import time
 import logging
 
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 TOP_TABLES_QUERY = """SELECT TOP {limit}
     M_CS_TABLES.TABLE_NAME "Table Name",
     DD02T.DDTEXT "Description",
-    ROUND(M_CS_TABLES.MEMORY_SIZE_IN_TOTAL / 1073741824.0, 2) VOLUME_GB
+    M_CS_TABLES.MEMORY_SIZE_IN_TOTAL MEM_BYTES
 FROM M_CS_TABLES
 JOIN DD02T ON
 DD02T.TABNAME = M_CS_TABLES.TABLE_NAME
@@ -36,6 +37,39 @@ WHERE SCHEMA_NAME IN (
     SELECT SCHEMA_NAME FROM "SYS"."TABLES" WHERE TABLE_NAME = 'T000'
 )
 ORDER BY M_CS_TABLES.MEMORY_SIZE_IN_TOTAL DESC"""
+
+# Same M_CS_TABLES size lookup as TOP_TABLES_QUERY, but filtered to a specific
+# set of table names instead of ordered by size -- used to backfill
+# "Volume (GB)"/"Volume (MB)" columns for a user-supplied table list that
+# doesn't already have them. {table_list} is a comma-separated list of
+# quoted table names, built by _sanitize_table_name() below -- never raw
+# user input.
+#
+# Both queries fetch the raw byte count once (MEM_BYTES) instead of doing
+# ROUND(.../1073741824.0, 2) and ROUND(.../1048576.0, 2) in SQL -- GB and MB
+# are both derived from it in Python in _read_result_grid() below. This
+# keeps the SQL side to the simplest possible projection (whatever the
+# actual query cost is -- dominated by the JOIN to DD02T and the ORDER BY
+# over the whole M_CS_TABLES monitoring view, not by arithmetic on a column
+# already computed for the row -- it's never made worse by adding a second
+# derived unit here). Deriving MB from the raw bytes rather than from the
+# already-rounded GB value also avoids losing all resolution for small
+# tables that round to 0.00 GB.
+TABLE_SIZES_QUERY = """SELECT
+    M_CS_TABLES.TABLE_NAME "Table Name",
+    M_CS_TABLES.MEMORY_SIZE_IN_TOTAL MEM_BYTES
+FROM M_CS_TABLES
+WHERE SCHEMA_NAME IN (
+    SELECT SCHEMA_NAME FROM "SYS"."TABLES" WHERE TABLE_NAME = 'T000'
+)
+AND M_CS_TABLES.TABLE_NAME IN ({table_list})"""
+
+# SAP table names are uppercase letters/digits/underscore, optionally
+# namespaced with a leading "/NAMESPACE/". Anything else is rejected rather
+# than escaped, since this string is interpolated directly into a raw SQL
+# statement typed into the SQL Editor -- there is no parameterized-query API
+# for it.
+_VALID_TABLE_NAME = re.compile(r"^[A-Z0-9_/]{1,30}$")
 
 # Confirmed live on 2026-09-10 via the debug_* functions below (see
 # backend/transactions/db02.py's module docstring and project memory for the
@@ -54,16 +88,24 @@ RESULT_GRID_ID = (
 )
 
 # Confirmed live column IDs on the SQL Editor's result grid.
-# VOLUME_GB is the unquoted alias for the computed size column; HANA uppercases
-# it so the grid column ID is VOLUME_GB.  A few spellings are mapped defensively
-# in case a future system normalises the alias differently.
+# MEM_BYTES is the unquoted alias for the raw byte-count column; HANA
+# uppercases it so the grid column ID is MEM_BYTES.  A few spellings are
+# mapped defensively in case a future system normalises the alias
+# differently. It maps to the internal _RAW_BYTES_FIELD sentinel rather than
+# a real column label -- _read_result_grid() below expands it into the two
+# real "Volume (GB)"/"Volume (MB)" columns.
+_RAW_BYTES_FIELD = "_mem_bytes"
+
 DB02_COLUMN_LABELS = {
     "TABLENAME": "Table Name",
     "DESCRIPTION": "Description",
-    "VOLUME_GB": "Volume (GB)",
-    "VOLUMEGB": "Volume (GB)",
-    "Volume_GB": "Volume (GB)",
+    "MEM_BYTES": _RAW_BYTES_FIELD,
+    "MEMBYTES": _RAW_BYTES_FIELD,
+    "Mem_Bytes": _RAW_BYTES_FIELD,
 }
+
+_BYTES_PER_GB = 1073741824.0
+_BYTES_PER_MB = 1048576.0
 
 
 def run_get_top_tables(limit: int = 300) -> dict:
@@ -77,60 +119,117 @@ def run_get_top_tables(limit: int = 300) -> dict:
 def _run_get_top_tables(limit: int) -> dict:
     try:
         session = sap.get_session()
-
-        # Two-step navigation: go to main menu first, then DB02.
-        # Jumping to /nDB02 while already inside DB02 doesn't always reset
-        # the navigation tree, leaving the SQL Editor in whatever state it
-        # was in after the previous run — which can make doubleClickNode
-        # toggle the editor *closed* instead of open (error 619).
-        try:
-            session.findById("wnd[0]/tbar[0]/okcd").text = "/n"
-            session.findById("wnd[0]").sendVKey(0)
-            time.sleep(SAP_SCREEN_WAIT)
-            sap.dismiss_popup()
-        except Exception:
-            pass
-
-        sap.navigate_to("DB02")
-        time.sleep(SAP_SCREEN_WAIT)
-        sap.dismiss_popup()
-
-        # Open the SQL Editor via the navigation tree — but only if it isn't
-        # already visible.  doubleClickNode is a toggle: calling it on an open
-        # node closes the editor and leaves SQL_INPUT_SHELL_ID absent.
-        try:
-            session.findById(SQL_INPUT_SHELL_ID)
-        except Exception:
-            tree = session.findById(NAV_TREE_ID)
-            tree.doubleClickNode(SQL_EDITOR_NODE_KEY)
-            sap.wait_until_ready()
-            time.sleep(SAP_SCREEN_WAIT)
-            sap.dismiss_popup()
-
-        session.findById(SQL_INPUT_SHELL_ID).text = TOP_TABLES_QUERY.format(limit=limit)
-
-        session.findById("wnd[0]").sendVKey(8)  # F8 — Execute
-        sap.wait_until_ready()
-        time.sleep(SAP_SCREEN_WAIT)
-        sap.dismiss_popup()
-
-        # Log the status bar message (contains row count or SQL error text)
-        try:
-            status_text = session.findById("wnd[0]/sbar/pane[0]").text
-            if status_text:
-                logger.info("DB02 SQL status bar: %s", status_text)
-        except Exception:
-            status_text = ""
-
-        session.findById(RESULT_TAB_ID).select()
-        sap.wait_until_ready()
-        time.sleep(SAP_SCREEN_WAIT)
-
-        rows = _read_result_grid(session)
+        _open_sql_editor(session)
+        rows = _run_sql_query(session, TOP_TABLES_QUERY.format(limit=limit))
         return {"status": "ok", "transaction": "DB02", "rows": rows}
     except Exception as exc:
         logger.exception("DB02 top-tables failed")
         return {"status": "error", "transaction": "DB02", "message": str(exc)}
+
+
+def run_get_table_sizes(table_names: list[str]) -> dict:
+    """
+    Look up each table's size (Volume, in both GB and MB) via the same HANA
+    system view run_get_top_tables() uses (M_CS_TABLES), filtered to
+    *table_names* instead of ordered by size. Used to backfill "Volume (GB)"
+    / "Volume (MB)" columns for a user-supplied table list that doesn't
+    already carry them. MB is included alongside GB because on small systems
+    many tables round to 0.00 GB, losing all size resolution.
+    """
+    return sap.run(_run_get_table_sizes, table_names)
+
+
+def _run_get_table_sizes(table_names: list[str]) -> dict:
+    sanitized = sorted({
+        name for name in (_sanitize_table_name(n) for n in table_names) if name
+    })
+    if not sanitized:
+        return {"status": "ok", "transaction": "DB02", "sizes": {}}
+
+    try:
+        session = sap.get_session()
+        _open_sql_editor(session)
+        table_list = ", ".join(f"'{name}'" for name in sanitized)
+        rows = _run_sql_query(session, TABLE_SIZES_QUERY.format(table_list=table_list))
+
+        # Result may legitimately not cover every requested table (e.g. it
+        # doesn't exist, or has no recorded size) -- absent from the dict,
+        # not an error.
+        sizes = {
+            row["Table Name"].strip().upper(): {
+                "volume_gb": row.get("Volume (GB)", ""),
+                "volume_mb": row.get("Volume (MB)", ""),
+            }
+            for row in rows
+            if row.get("Table Name")
+        }
+        return {"status": "ok", "transaction": "DB02", "sizes": sizes}
+    except Exception as exc:
+        logger.exception("DB02 table-size lookup failed")
+        return {"status": "error", "transaction": "DB02", "message": str(exc)}
+
+
+def _sanitize_table_name(name: str) -> str | None:
+    candidate = (name or "").strip().upper()
+    return candidate if _VALID_TABLE_NAME.match(candidate) else None
+
+
+def _open_sql_editor(session):
+    """Navigate to DB02 and ensure the SQL Editor pane is open and ready for
+    a query, reusing it if it's already open from a previous call."""
+    # Two-step navigation: go to main menu first, then DB02.
+    # Jumping to /nDB02 while already inside DB02 doesn't always reset
+    # the navigation tree, leaving the SQL Editor in whatever state it
+    # was in after the previous run — which can make doubleClickNode
+    # toggle the editor *closed* instead of open (error 619).
+    try:
+        session.findById("wnd[0]/tbar[0]/okcd").text = "/n"
+        session.findById("wnd[0]").sendVKey(0)
+        time.sleep(SAP_SCREEN_WAIT)
+        sap.dismiss_popup()
+    except Exception:
+        pass
+
+    sap.navigate_to("DB02")
+    time.sleep(SAP_SCREEN_WAIT)
+    sap.dismiss_popup()
+
+    # Open the SQL Editor via the navigation tree — but only if it isn't
+    # already visible.  doubleClickNode is a toggle: calling it on an open
+    # node closes the editor and leaves SQL_INPUT_SHELL_ID absent.
+    try:
+        session.findById(SQL_INPUT_SHELL_ID)
+    except Exception:
+        tree = session.findById(NAV_TREE_ID)
+        tree.doubleClickNode(SQL_EDITOR_NODE_KEY)
+        sap.wait_until_ready()
+        time.sleep(SAP_SCREEN_WAIT)
+        sap.dismiss_popup()
+
+
+def _run_sql_query(session, query: str) -> list[dict]:
+    """Type *query* into the SQL Editor, execute it (F8), switch to the
+    Result tab, and return the parsed result grid rows."""
+    session.findById(SQL_INPUT_SHELL_ID).text = query
+
+    session.findById("wnd[0]").sendVKey(8)  # F8 — Execute
+    sap.wait_until_ready()
+    time.sleep(SAP_SCREEN_WAIT)
+    sap.dismiss_popup()
+
+    # Log the status bar message (contains row count or SQL error text)
+    try:
+        status_text = session.findById("wnd[0]/sbar/pane[0]").text
+        if status_text:
+            logger.info("DB02 SQL status bar: %s", status_text)
+    except Exception:
+        pass
+
+    session.findById(RESULT_TAB_ID).select()
+    sap.wait_until_ready()
+    time.sleep(SAP_SCREEN_WAIT)
+
+    return _read_result_grid(session)
 
 
 def _read_result_grid(session, retries: int = 3, retry_wait: float = 0.4) -> list[dict]:
@@ -158,14 +257,25 @@ def _read_result_grid(session, retries: int = 3, retry_wait: float = 0.4) -> lis
                     label = DB02_COLUMN_LABELS.get(col_id, col_id)
                     try:
                         value = grid.GetCellValue(row_idx, col_id)
-                        if label == "Volume (GB)":
-                            try:
-                                value = f"{float(value):.2f}"
-                            except (ValueError, TypeError):
-                                pass
-                        row[label] = value
                     except Exception:
-                        row[label] = ""
+                        value = ""
+
+                    if label == _RAW_BYTES_FIELD:
+                        try:
+                            # Unlike the old ROUND()-computed GB values (small
+                            # 2-decimal numbers, e.g. "12.34"), the raw byte
+                            # count is a large integer that the grid displays
+                            # with thousands separators (e.g. "1,234,567"),
+                            # which float() rejects outright -- strip them
+                            # before parsing.
+                            raw_bytes = float(str(value).replace(",", "").strip())
+                            row["Volume (GB)"] = f"{raw_bytes / _BYTES_PER_GB:.2f}"
+                            row["Volume (MB)"] = f"{raw_bytes / _BYTES_PER_MB:.2f}"
+                        except (ValueError, TypeError):
+                            row["Volume (GB)"] = ""
+                            row["Volume (MB)"] = ""
+                    else:
+                        row[label] = value
                 rows.append(row)
             return rows
         except Exception as exc:
