@@ -55,6 +55,7 @@ desktop.ini
 backend/resources/dvm_guide_index.json
 
 sap_credentials.json
+sap_for_me_credentials.json
 
 input
 output

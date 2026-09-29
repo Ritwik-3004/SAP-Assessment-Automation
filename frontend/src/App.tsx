@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import LoginPanel from "./components/LoginPanel";
+import SapForMeCredentialsPanel from "./components/SapForMeCredentialsPanel";
 import BatchArchivingPanel from "./components/BatchArchivingPanel";
 import GenerateTableListPanel from "./components/GenerateTableListPanel";
 import HeaderTablePanel from "./components/HeaderTablePanel";
@@ -67,6 +68,8 @@ export default function App() {
             onConnected={handleConnected}
             onDisconnected={handleDisconnected}
           />
+
+          <SapForMeCredentialsPanel />
 
           {connection.connected && (
             <nav className="tx-nav">

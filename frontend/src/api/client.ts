@@ -51,6 +51,9 @@ export const api = {
   loadCredentials: () => get<{ system?: string; client?: string; username?: string; password?: string; language?: string }>("/api/sap/credentials"),
   saveCredentials: (body: { system: string; client: string; username: string; password: string; language: string }) =>
     post<{ saved: boolean }>("/api/sap/credentials", body),
+  loadSapForMeCredentials: () => get<{ email?: string; password?: string }>("/api/sap-for-me/credentials"),
+  saveSapForMeCredentials: (body: { email: string; password: string }) =>
+    post<{ saved: boolean }>("/api/sap-for-me/credentials", body),
 
   taana: (body: { table_name?: string; max_rows: number }) =>
     post<import("../types").TransactionResult>("/api/transactions/taana", body),

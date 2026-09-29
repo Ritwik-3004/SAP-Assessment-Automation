@@ -9,6 +9,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 INPUT_DIR = _PROJECT_ROOT / "input"
 OUTPUT_DIR = _PROJECT_ROOT / "output"
 CREDENTIALS_FILE = _PROJECT_ROOT / "sap_credentials.json"
+SAP_FOR_ME_CREDENTIALS_FILE = _PROJECT_ROOT / "sap_for_me_credentials.json"
 
 # SAP Logon landscape file path (used to discover configured systems)
 SAP_LANDSCAPE_PATHS = [
@@ -32,3 +33,7 @@ API_PORT = int(os.getenv("API_PORT", "8000"))
 # Claude API (used to score archiving objects for relevance per table)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 SCORING_MODEL = os.getenv("SCORING_MODEL", "claude-haiku-4-5")
+
+# SAP for Me portal scraping (housekeeping-program fallback lookup). Headless
+# by default; flip to "false" to watch the browser while debugging selectors.
+SAP_FOR_ME_HEADLESS = os.getenv("SAP_FOR_ME_HEADLESS", "true").lower() != "false"

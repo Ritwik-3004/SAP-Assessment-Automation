@@ -6,27 +6,29 @@ up via a standalone housekeeping/cleanup program, report, or transaction.
 For those tables, this module looks for such a recommendation instead of
 just leaving the table with nothing.
 
-Two-stage lookup, per the user's plan:
-  1. SAP's official DVM Guide (implemented here) -- the same per-table
-     excerpt already used to ground archiving-object scoring in scoring.py
-     (dvm_guide.get_reference()), read by an LLM specifically for a
-     housekeeping/cleanup recommendation rather than an archiving object.
-  2. SAP for Me portal search ("<table name> housekeeping programs") +
-     article scraping + LLM extraction -- NOT YET IMPLEMENTED, pending SAP
-     for Me portal access (currently requested, not yet granted).
-     search_sap_for_me() below is a stub that always returns None until
-     that access lands. find_housekeeping_programs() already treats it as
-     a fallback after the DVM Guide, so wiring in the real scraper later
-     needs no changes to scoring.py or main.py.
+Two-stage lookup:
+  1. SAP's official DVM Guide (dvm_guide.get_reference()) -- the same
+     per-table excerpt already used to ground archiving-object scoring in
+     scoring.py, read by an LLM specifically for a housekeeping/cleanup
+     recommendation rather than an archiving object.
+  2. SAP for Me portal search + article scraping + LLM extraction
+     (sap_for_me.py), for a table the DVM Guide doesn't cover, or covers but
+     names no program for. This stage runs as a single batched pass over
+     every such table, sharing one logged-in browser session
+     (sap_for_me.SapForMeSession) -- opening/logging in fresh per table
+     would make a lookup involving several uncovered tables prohibitively
+     slow.
 """
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Optional
 
 import anthropic
 from pydantic import BaseModel, Field
 
 import dvm_guide
+import sap_for_me
 from config import ANTHROPIC_API_KEY, SCORING_MODEL
 
 logger = logging.getLogger(__name__)
@@ -63,11 +65,19 @@ class HousekeepingResult(BaseModel):
     rationale: str = Field(default="", description="One short sentence explaining the finding.")
 
 
-def find_housekeeping_programs(table_names: list[str]) -> dict[str, dict]:
+def find_housekeeping_programs(
+    table_names: list[str],
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> dict[str, dict]:
     """
     For each table in *table_names*, look for a housekeeping/cleanup program
-    grounded in the DVM Guide, falling back to SAP for Me (once available)
-    for tables the guide doesn't cover.
+    grounded in the DVM Guide, falling back to a single batched SAP for Me
+    pass (see module docstring) for tables the guide doesn't cover.
+
+    *on_progress*, if given, is called with a short status message once per
+    table during the SAP for Me pass (that stage can be slow -- real browser
+    navigation per table -- so callers driving a progress bar should surface
+    this rather than sitting on a stale message).
 
     Returns {table_name: {"program": str, "rationale": str}}. "program" is
     empty when nothing was found -- "rationale" still explains why so the
@@ -81,35 +91,34 @@ def find_housekeeping_programs(table_names: list[str]) -> dict[str, dict]:
     with_reference = {name: ref for name, ref in references.items() if ref}
 
     results: dict[str, dict] = {}
-    for name in table_names:
-        if name not in with_reference:
-            results[name] = _search_beyond_dvm_guide(name)
+    needs_fallback: dict[str, str] = {name: "" for name in table_names if name not in with_reference}
 
-    if not with_reference:
-        return results
+    if with_reference:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            future_to_table = {
+                pool.submit(_find_one, client, name, reference): name
+                for name, reference in with_reference.items()
+            }
+            for future in as_completed(future_to_table):
+                name = future_to_table[future]
+                try:
+                    found = future.result()
+                except Exception as exc:
+                    logger.warning("Housekeeping lookup failed for table %s: %s", name, exc, exc_info=True)
+                    results[name] = {"program": "", "rationale": f"Housekeeping lookup failed: {exc}"}
+                    continue
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        future_to_table = {
-            pool.submit(_find_one, client, name, reference): name
-            for name, reference in with_reference.items()
-        }
-        for future in as_completed(future_to_table):
-            name = future_to_table[future]
-            try:
-                found = future.result()
-            except Exception as exc:
-                logger.warning("Housekeeping lookup failed for table %s: %s", name, exc, exc_info=True)
-                results[name] = {"program": "", "rationale": f"Housekeeping lookup failed: {exc}"}
-                continue
+                if found["program"]:
+                    results[name] = found
+                else:
+                    # DVM Guide didn't name one -- fall through to the SAP
+                    # for Me batch below rather than reporting "not found"
+                    # purely off the guide.
+                    needs_fallback[name] = found["rationale"]
 
-            if found["program"]:
-                results[name] = found
-            else:
-                # DVM Guide didn't name one -- fall through to SAP for Me
-                # (a no-op today) rather than reporting "not found" purely
-                # off the guide.
-                results[name] = _search_beyond_dvm_guide(name, guide_rationale=found["rationale"])
+    if needs_fallback:
+        results.update(_search_sap_for_me_batch(needs_fallback, on_progress))
 
     return results
 
@@ -133,29 +142,50 @@ def _find_one(client: anthropic.Anthropic, table_name: str, reference: str) -> d
     return {"program": "", "rationale": parsed.rationale or "The DVM Guide does not name a housekeeping program for this table."}
 
 
-def _search_beyond_dvm_guide(table_name: str, guide_rationale: str = "") -> dict:
-    """Fallback for a table the DVM Guide has no entry for (or no
-    housekeeping recommendation in). Tries SAP for Me next; until that
-    access lands, search_sap_for_me() always returns None, so this reports
-    the honest current state rather than a false negative."""
-    sap_for_me = search_sap_for_me(table_name)
-    if sap_for_me:
-        return sap_for_me
+def _search_sap_for_me_batch(
+    pending: dict[str, str],
+    on_progress: Optional[Callable[[str], None]],
+) -> dict[str, dict]:
+    """One batched SAP for Me pass over every table in *pending* (table_name
+    -> DVM-guide rationale, "" if the guide had no entry at all for it),
+    sharing a single logged-in browser session opened once for the whole
+    pass."""
+    results: dict[str, dict] = {}
 
+    try:
+        session = sap_for_me.open_session()
+    except sap_for_me.SapForMeLoginError as exc:
+        logger.warning("SAP for Me login failed: %s", exc)
+        for name, guide_rationale in pending.items():
+            results[name] = _fallback_result(guide_rationale, f"SAP for Me sign-in failed: {exc}")
+        return results
+
+    if session is None:
+        for name, guide_rationale in pending.items():
+            results[name] = _fallback_result(
+                guide_rationale,
+                "SAP for Me credentials are not configured -- set them in the app to enable this lookup.",
+            )
+        return results
+
+    try:
+        for i, (name, guide_rationale) in enumerate(pending.items(), start=1):
+            if on_progress:
+                on_progress(f"Searching SAP for Me for {name} ({i} of {len(pending)})…")
+            try:
+                found = session.lookup(name)
+            except Exception as exc:
+                logger.warning("SAP for Me lookup failed for table %s: %s", name, exc, exc_info=True)
+                found = {"program": "", "rationale": f"SAP for Me lookup failed: {exc}"}
+            if not found.get("program") and not found.get("rationale"):
+                found["rationale"] = guide_rationale or "No DVM Guide entry found for this table."
+            results[name] = found
+    finally:
+        session.close()
+
+    return results
+
+
+def _fallback_result(guide_rationale: str, reason: str) -> dict:
     rationale = guide_rationale or "No DVM Guide entry found for this table."
-    return {
-        "program": "",
-        "rationale": f"{rationale} SAP for Me lookup not yet available (pending portal access).",
-    }
-
-
-def search_sap_for_me(table_name: str) -> "dict | None":
-    """
-    STUB -- pending SAP for Me portal access approval. Once granted, this
-    should search SAP for Me for "<table_name> housekeeping programs",
-    scrape the relevant articles, and use an LLM to extract the correct
-    housekeeping program from them, returning {"program": str, "rationale":
-    str} in the same shape find_housekeeping_programs() uses elsewhere.
-    Always returns None for now.
-    """
-    return None
+    return {"program": "", "rationale": f"{rationale} {reason}"}

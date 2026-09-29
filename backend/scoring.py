@@ -138,7 +138,10 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
                 "table(s) without an archiving object…",
             )
         try:
-            housekeeping_by_table = housekeeping.find_housekeeping_programs(zero_candidate_tables)
+            hk_progress = (lambda msg: on_progress(len(tables), msg)) if on_progress else None
+            housekeeping_by_table = housekeeping.find_housekeeping_programs(
+                zero_candidate_tables, on_progress=hk_progress
+            )
         except Exception as exc:
             logger.warning("Housekeeping-program lookup failed: %s", exc, exc_info=True)
 

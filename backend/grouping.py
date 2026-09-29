@@ -83,7 +83,6 @@ def build_object_groups(recommended_rows: list[dict]) -> list[dict]:
                 "Cumulative Size (GB)": f"{cumulative_gb:.2f}",
                 "Cumulative Size (MB)": f"{cumulative_mb:.2f}",
                 "Table Count": str(table_count),
-                "Rationale": member.get("Rationale", ""),
             })
 
     return output

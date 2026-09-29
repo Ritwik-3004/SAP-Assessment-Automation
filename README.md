@@ -206,16 +206,29 @@ looks for one instead of just leaving the table with nothing:
    — confirmed live: table `E071`'s guide excerpt names both archiving object
    `BC_E071K` *and* a separate Unicode-migration deletion report, and the model
    correctly returns only the latter.
-2. **SAP for Me portal search (planned, not yet implemented):** `search_sap_for_me()`
-   in `housekeeping.py` is a stub that always returns `None` for now, pending SAP for Me
-   portal access. Once granted, it should search for `"<table name> housekeeping
-   programs"`, scrape the relevant articles, and use an LLM to extract the correct
-   program — `find_housekeeping_programs()` already calls it as the fallback after the
-   DVM Guide, so no other code needs to change once it's implemented.
+2. **SAP for Me portal search (implemented):** for a table the DVM Guide doesn't
+   cover (or covers but names no program for), `backend/sap_for_me.py` drives a
+   headless Chrome browser (via Selenium) to search SAP for Me for `"<table name>
+   housekeeping program"`, keeps only **SAP Knowledge Base Article** and **SAP Note**
+   results (falling back to **SAP Community** only if neither of those turns up
+   anything), reads the top 3, and sends their text to Claude to extract a specific
+   program, grounded and cited the same way the DVM Guide path is. This requires SAP for
+   Me sign-in credentials — enter and save them once in the sidebar's "SAP for Me
+   Credentials" panel (stored in `sap_for_me_credentials.json` at the project root,
+   git-ignored, same plaintext-JSON pattern as `sap_credentials.json`); every scoring
+   run that needs this fallback logs in once and reuses that single browser session
+   across every table needing it, since logging in per table would be far too slow.
+   Requires a local Chrome install (Selenium's built-in Selenium Manager auto-downloads
+   a matching chromedriver the first time it runs — no separate browser-install step).
+   Selenium, not Playwright, specifically because this backend's virtualenv is 32-bit
+   Python (for the SAP GUI COM scripting) and Playwright's `greenlet` dependency has no
+   prebuilt wheel for that. To debug/iterate on the portal's selectors directly, run
+   `python backend/debug_sap_for_me.py TABLE_NAME` — it runs headed (visible browser)
+   and prints what it found at each step.
 
 A table with neither an archiving object nor a housekeeping program still gets a row in
 every result, with both columns blank and a Rationale explaining that nothing was found
-(and that the SAP for Me lookup isn't available yet).
+(or that SAP for Me credentials aren't configured yet, if that's why).
 
 #### Grouped by Object
 
@@ -239,6 +252,8 @@ object/program to tackle first. `backend/grouping.py`'s `build_object_groups()`:
   those columns, not just the ones that end up merged, so a singleton group's cell
   looks consistent with a merged multi-row group's instead of falling back to Excel's
   default alignment.
+- The sheet deliberately has no Rationale column — it's already on the "Recommended"
+  sheet, and repeating it per group member here would just be noise.
 
 ## Progress polling for long-running batches
 
@@ -399,6 +414,10 @@ API_PORT=8000
 # Required only for "Score & Recommend Objects" (backend/scoring.py)
 ANTHROPIC_API_KEY=sk-ant-...
 SCORING_MODEL=claude-haiku-4-5
+
+# SAP for Me scraper (backend/sap_for_me.py) runs headless Chrome by default;
+# set to false to watch the browser while debugging
+SAP_FOR_ME_HEADLESS=true
 ```
 
 ## API Reference
@@ -417,6 +436,8 @@ Key endpoints:
 | GET | `/api/sap/info` | Current connection state including system + user (used by the frontend on page load to restore session) |
 | GET | `/api/sap/credentials` | Return saved connection details from `sap_credentials.json` |
 | POST | `/api/sap/credentials` | Save connection details (including password) to `sap_credentials.json` |
+| GET | `/api/sap-for-me/credentials` | Return saved SAP for Me sign-in details from `sap_for_me_credentials.json` |
+| POST | `/api/sap-for-me/credentials` | Save SAP for Me email + password to `sap_for_me_credentials.json` |
 | GET | `/api/files/input` | List `.xlsx`/`.xls` files in the `input/` folder, newest first |
 | GET | `/api/files/output` | List `.xlsx`/`.xls` files in the `output/` folder, newest first |
 | POST | `/api/files/input/save` | Save table list rows to `input/list_of_tables.xlsx` |

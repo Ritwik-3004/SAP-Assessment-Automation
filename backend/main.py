@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from sap_connector import sap
 from progress import ProgressTracker
-from config import INPUT_DIR, OUTPUT_DIR, CREDENTIALS_FILE
+from config import INPUT_DIR, OUTPUT_DIR, CREDENTIALS_FILE, SAP_FOR_ME_CREDENTIALS_FILE
 import scoring
 import grouping
 import transactions.taana as taana
@@ -74,10 +74,12 @@ _header_table_progress = ProgressTracker()
 # Column order for the "Grouped by Object" sheet/endpoint — mirrors the
 # "Recommended" row shape (grouping.build_object_groups() only adds fields,
 # never renames the existing ones) plus the three new per-group columns.
+# Rationale is intentionally omitted here -- it's already on the
+# "Recommended" sheet and would just be noise repeated per group member.
 GROUPED_COLUMNS = [
     "Archiving Object", "Object Description", "Housekeeping Program",
     "Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
-    "Cumulative Size (GB)", "Cumulative Size (MB)", "Table Count", "Rationale",
+    "Cumulative Size (GB)", "Cumulative Size (MB)", "Table Count",
 ]
 
 # Group-level columns in GROUPED_COLUMNS -- constant across every member row
@@ -85,7 +87,7 @@ GROUPED_COLUMNS = [
 # into one cell per group in the exported sheet, so a group with several
 # tables doesn't repeat the same Archiving Object/Housekeeping
 # Program/cumulative-size value on every row. Table Name/Table
-# Description/Volume/Rationale are per-table and are never merged.
+# Description/Volume are per-table and are never merged.
 GROUPED_MERGE_COLUMNS = [
     "Archiving Object", "Object Description", "Housekeeping Program",
     "Cumulative Size (GB)", "Cumulative Size (MB)", "Table Count",
@@ -187,6 +189,11 @@ class SaveCredentialsRequest(BaseModel):
     language: str = "EN"
 
 
+class SapForMeCredentialsRequest(BaseModel):
+    email: str
+    password: str
+
+
 # ---------------------------------------------------------------------------
 # SAP session endpoints
 # ---------------------------------------------------------------------------
@@ -260,6 +267,26 @@ def load_credentials():
         return {}
     try:
         return json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+@app.post("/api/sap-for-me/credentials")
+def save_sap_for_me_credentials(req: SapForMeCredentialsRequest):
+    """Persist SAP for Me sign-in details (used by housekeeping.py's SAP for
+    Me fallback to auto-login) to a local JSON file."""
+    data = {"email": req.email, "password": req.password}
+    SAP_FOR_ME_CREDENTIALS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return {"saved": True}
+
+
+@app.get("/api/sap-for-me/credentials")
+def load_sap_for_me_credentials():
+    """Return previously saved SAP for Me sign-in details, or an empty object if none."""
+    if not SAP_FOR_ME_CREDENTIALS_FILE.exists():
+        return {}
+    try:
+        return json.loads(SAP_FOR_ME_CREDENTIALS_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
