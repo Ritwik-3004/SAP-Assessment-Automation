@@ -154,8 +154,18 @@ class SapForMeSession:
         if SAP_FOR_ME_HEADLESS:
             options.add_argument("--headless=new")
         options.add_argument("--window-size=1400,1000")
-        self._driver = webdriver.Chrome(options=options)
-        self._login()
+        try:
+            self._driver = webdriver.Chrome(options=options)
+        except Exception as exc:
+            # Corporate Chrome/Edge policy "RemoteDebuggingAllowed=0" makes this fail
+            # with "DevToolsActivePort file doesn't exist" (blank browser window).
+            reason = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            raise SapForMeLoginError(f"could not start the browser ({reason})") from exc
+        try:
+            self._login()
+        except Exception:
+            self.close()
+            raise
 
     def _login(self):
         driver = self._driver
@@ -169,7 +179,11 @@ class SapForMeSession:
             _click_by_text(driver, wait, "Continue")
             wait.until(EC.url_contains("me.sap.com/home"))
         except Exception as exc:
-            raise SapForMeLoginError(f"SAP for Me sign-in failed: {exc}") from exc
+            logger.warning("SAP for Me sign-in failed at %s: %s", driver.current_url, exc, exc_info=True)
+            reason = (str(exc).splitlines() or [type(exc).__name__])[0]
+            raise SapForMeLoginError(
+                f"SAP for Me sign-in failed on page {driver.current_url!r}: {type(exc).__name__}: {reason}"
+            ) from exc
 
     def close(self):
         if self._driver:

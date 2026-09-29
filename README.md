@@ -226,9 +226,22 @@ looks for one instead of just leaving the table with nothing:
    `python backend/debug_sap_for_me.py TABLE_NAME` — it runs headed (visible browser)
    and prints what it found at each step.
 
+   **Known limitation — managed browsers can block this.** On machines where IT sets the
+   Chrome/Edge policy `RemoteDebuggingAllowed = 0` (true of the current Deloitte laptop),
+   no automation tool can attach to the browser: Chrome opens as a blank `data:,` window
+   with a "controlled by automated test software" banner, and the launch fails with
+   `session not created: DevToolsActivePort file doesn't exist` (no launch flag fixes it).
+   The lookup fails gracefully — the browser window is closed, scoring still completes
+   with the DVM Guide results, and the affected tables get a blank Housekeeping Program
+   with a Rationale such as "SAP for Me sign-in failed: could not start the browser (…)".
+   Check `HKLM\SOFTWARE\Policies\Google\Chrome` for that value; the fix is an IT exemption,
+   not a code change. The scraper has therefore not yet been verified against the live
+   portal, so its selectors may need adjusting on first successful run.
+
 A table with neither an archiving object nor a housekeeping program still gets a row in
 every result, with both columns blank and a Rationale explaining that nothing was found
-(or that SAP for Me credentials aren't configured yet, if that's why).
+(or why the SAP for Me lookup couldn't run, e.g. credentials not configured or the
+browser couldn't start).
 
 #### Grouped by Object
 
