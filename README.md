@@ -14,9 +14,13 @@ Browser (React + Vite)  ←→  FastAPI (Python)  ←→  SAP GUI (COM scripting
 | Requirement | Notes |
 |---|---|
 | SAP GUI for Windows | Must be installed (standard SAP Logon) |
-| SAP GUI Scripting enabled | Options → Accessibility & Scripting → Scripting tab → **Enable Scripting** |
-| Python 3.11+ | `python --version` |
+| SAP GUI Scripting enabled (client) | Options → Accessibility & Scripting → Scripting tab → **Enable Scripting** |
+| SAP GUI Scripting allowed (server) | Profile parameter `sapgui/user_scripting = TRUE` (RZ11, set by Basis) and authorization object `S_SCR` for your user. If Connect times out while the login window looks normal, check this first. |
+| Python 3.11+ | `python --version`. The project's `.venv` is **32-bit** Python 3.12, which suits the SAP GUI COM scripting (and is why Selenium is used instead of Playwright). |
 | Node.js 18+ | `node --version` |
+| `ANTHROPIC_API_KEY` | In `backend/.env`; needed for scoring and housekeeping lookups |
+| Chrome for Testing + chromedriver | Only for the SAP for Me housekeeping lookup; needs IT approval. See [setup](#housekeepingcleanup-program-lookup-for-tables-with-no-archiving-object) |
+| SAP for Me account | Email and password saved in the app's sidebar; internet access to me.sap.com, and SAP's terms must permit automated access |
 
 ### Enable SAP GUI Scripting
 
@@ -210,33 +214,47 @@ looks for one instead of just leaving the table with nothing:
    cover (or covers but names no program for), `backend/sap_for_me.py` drives a
    headless Chrome browser (via Selenium) to search SAP for Me for `"<table name>
    housekeeping program"`, keeps only **SAP Knowledge Base Article** and **SAP Note**
-   results (falling back to **SAP Community** only if neither of those turns up
-   anything), reads the top 3, and sends their text to Claude to extract a specific
+   results (a SAP Community fallback is not implemented yet), reads the top 3, and
+   sends their text to Claude to extract a specific
    program, grounded and cited the same way the DVM Guide path is. This requires SAP for
    Me sign-in credentials — enter and save them once in the sidebar's "SAP for Me
    Credentials" panel (stored in `sap_for_me_credentials.json` at the project root,
    git-ignored, same plaintext-JSON pattern as `sap_credentials.json`); every scoring
    run that needs this fallback logs in once and reuses that single browser session
    across every table needing it, since logging in per table would be far too slow.
-   Requires a local Chrome install (Selenium's built-in Selenium Manager auto-downloads
-   a matching chromedriver the first time it runs — no separate browser-install step).
+   Requires **Chrome for Testing** and its matching chromedriver (see setup below).
    Selenium, not Playwright, specifically because this backend's virtualenv is 32-bit
    Python (for the SAP GUI COM scripting) and Playwright's `greenlet` dependency has no
    prebuilt wheel for that. To debug/iterate on the portal's selectors directly, run
    `python backend/debug_sap_for_me.py TABLE_NAME` — it runs headed (visible browser)
    and prints what it found at each step.
 
-   **Known limitation — managed browsers can block this.** On machines where IT sets the
-   Chrome/Edge policy `RemoteDebuggingAllowed = 0` (true of the current Deloitte laptop),
-   no automation tool can attach to the browser: Chrome opens as a blank `data:,` window
-   with a "controlled by automated test software" banner, and the launch fails with
-   `session not created: DevToolsActivePort file doesn't exist` (no launch flag fixes it).
-   The lookup fails gracefully — the browser window is closed, scoring still completes
-   with the DVM Guide results, and the affected tables get a blank Housekeeping Program
-   with a Rationale such as "SAP for Me sign-in failed: could not start the browser (…)".
-   Check `HKLM\SOFTWARE\Policies\Google\Chrome` for that value; the fix is an IT exemption,
-   not a code change. The scraper has therefore not yet been verified against the live
-   portal, so its selectors may need adjusting on first successful run.
+   **One-time setup — Chrome for Testing (each user).** Managed Chrome/Edge installs
+   often have the IT policy `RemoteDebuggingAllowed = 0`, which stops any automation tool
+   from controlling them. The scraper therefore uses Google's separate *Chrome for
+   Testing* build, which needs IT's approval on the machine:
+   1. From the [Chrome for Testing downloads page](https://googlechromelabs.github.io/chrome-for-testing/),
+      download the Stable **`chrome`** and **`chromedriver`** zips for **win64**. The two
+      must be the same version.
+   2. Extract both into `C:\tools\cft`, giving
+      `C:\tools\cft\chrome-win64\chrome.exe` and
+      `C:\tools\cft\chromedriver-win64\chromedriver.exe`.
+   3. Add these to `backend/.env`:
+      ```env
+      SAP_FOR_ME_CHROME_PATH=C:\tools\cft\chrome-win64\chrome.exe
+      SAP_FOR_ME_CHROMEDRIVER_PATH=C:\tools\cft\chromedriver-win64\chromedriver.exe
+      ```
+   4. Verify with `python backend/debug_sap_for_me.py <TABLE_NAME>` (set
+      `SAP_FOR_ME_HEADLESS=false` to watch it).
+
+   If the browser can't start (paths unset or wrong, or blocked by policy — the launch
+   fails with `session not created: DevToolsActivePort file doesn't exist`), the lookup
+   fails gracefully: the window is closed, scoring still completes with the DVM Guide
+   results, and the affected tables get a blank Housekeeping Program with a Rationale such
+   as "SAP for Me sign-in failed: could not start the browser (…)". On a failed sign-in
+   the scraper also writes `output/sap_for_me_debug.png` and `.txt` (screenshot, page
+   text, console errors, failed requests) to help diagnose it. Notes on the live portal:
+   it shows a cookie dialog (the scraper clicks "Deny All"), and article pages load slowly.
 
 A table with neither an archiving object nor a housekeeping program still gets a row in
 every result, with both columns blank and a Rationale explaining that nothing was found
@@ -428,8 +446,11 @@ API_PORT=8000
 ANTHROPIC_API_KEY=sk-ant-...
 SCORING_MODEL=claude-haiku-4-5
 
-# SAP for Me scraper (backend/sap_for_me.py) runs headless Chrome by default;
-# set to false to watch the browser while debugging
+# SAP for Me scraper (backend/sap_for_me.py): Chrome for Testing + matching
+# chromedriver (see the housekeeping section for setup); headless by default,
+# set SAP_FOR_ME_HEADLESS=false to watch the browser while debugging
+SAP_FOR_ME_CHROME_PATH=C:\tools\cft\chrome-win64\chrome.exe
+SAP_FOR_ME_CHROMEDRIVER_PATH=C:\tools\cft\chromedriver-win64\chromedriver.exe
 SAP_FOR_ME_HEADLESS=true
 ```
 
