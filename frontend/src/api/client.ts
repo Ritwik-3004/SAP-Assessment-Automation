@@ -143,6 +143,19 @@ export const api = {
     return res.blob();
   },
 
+  chat: (
+    message: string,
+    scoredRows: Record<string, string>[],
+    recommended: Record<string, string>[],
+    history: { role: string; content: string }[]
+  ) =>
+    post<{ reply: string }>("/api/chat", {
+      message,
+      scored_rows: scoredRows,
+      recommended,
+      history,
+    }),
+
   getInputFiles: () => get<{ files: string[] }>("/api/files/input"),
 
   db15BatchFromInput: (filename: string) =>

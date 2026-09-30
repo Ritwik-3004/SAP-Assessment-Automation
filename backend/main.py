@@ -181,6 +181,18 @@ class SaveTablesRequest(BaseModel):
     rows: list[dict[str, str]]
 
 
+class ChatHistoryItem(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    scored_rows: list[dict[str, str]] = []
+    recommended: list[dict[str, str]] = []
+    history: list[ChatHistoryItem] = []
+
+
 class SaveCredentialsRequest(BaseModel):
     system: str
     client: str
@@ -289,6 +301,23 @@ def load_sap_for_me_credentials():
         return json.loads(SAP_FOR_ME_CREDENTIALS_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# Chat agent endpoint
+# ---------------------------------------------------------------------------
+
+@app.post("/api/chat")
+def chat_endpoint(req: ChatRequest):
+    """Natural-language chat over scored results, with live SAP DB15 tool access."""
+    import chat as chat_module
+    result = chat_module.run_chat(
+        message=req.message,
+        scored_rows=req.scored_rows,
+        recommended=req.recommended,
+        history=[{"role": h.role, "content": h.content} for h in req.history],
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
