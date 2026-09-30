@@ -195,17 +195,51 @@ class SAPConnector:
 
     def navigate_to(self, transaction: str):
         """Enter /n<transaction> in the command field and press Enter."""
+        self.dismiss_all_popups()  # clear any blocking modal before navigating
         session = self.get_session()
         session.findById("wnd[0]/tbar[0]/okcd").text = f"/n{transaction.upper()}"
         session.findById("wnd[0]").sendVKey(0)
         time.sleep(SAP_SCREEN_WAIT)
 
-    def dismiss_popup(self):
-        """Dismiss a modal popup (wnd[1]) by pressing Enter, if present."""
+    def dismiss_popup(self) -> bool:
+        """Dismiss a modal popup (wnd[1]) if present.
+
+        Tries the first toolbar button (the green tick/OK button on SAP information
+        and confirmation dialogs) before falling back to Enter.  Returns True if a
+        popup was found and dismissed.
+        """
+        try:
+            self._session.findById("wnd[1]")
+        except Exception:
+            return False  # no popup present
+
+        for btn_path in ("wnd[1]/tbar[0]/btn[0]", "wnd[1]/usr/btnSPOP-OPTION1"):
+            try:
+                self._session.findById(btn_path).press()
+                time.sleep(0.15)
+                return True
+            except Exception:
+                pass
+
+        # Fallback: send Enter to the window itself
         try:
             self._session.findById("wnd[1]").sendVKey(0)
+            time.sleep(0.15)
+            return True
         except Exception:
             pass
+
+        return False
+
+    def dismiss_all_popups(self, max_attempts: int = 5) -> int:
+        """Dismiss all stacked modal popups.  Returns the count dismissed."""
+        dismissed = 0
+        for _ in range(max_attempts):
+            if self.dismiss_popup():
+                dismissed += 1
+            else:
+                break
+        return dismissed
 
     def wait_until_ready(self, timeout: float = 10.0, interval: float = 0.2):
         """Poll session.Busy until SAP GUI finishes processing the last

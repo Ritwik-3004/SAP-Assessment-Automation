@@ -33,6 +33,9 @@ def _run(object_filter: Optional[str]) -> dict:
         session = sap.get_session()
         sap.navigate_to("AOBJ")
         time.sleep(SAP_SCREEN_WAIT)
+        # Dismiss "Caution: The table is cross-client" and any other info dialogs
+        # that SAP shows as soon as AOBJ loads (before F8 is pressed).
+        sap.dismiss_all_popups()
 
         # Enter filter if provided
         if object_filter:
@@ -48,7 +51,8 @@ def _run(object_filter: Optional[str]) -> dict:
         session.findById("wnd[0]").sendVKey(8)
         time.sleep(SAP_SCREEN_WAIT * 2)
 
-        sap.dismiss_popup()
+        # Dismiss any post-execute popups (e.g. "no records found" info box)
+        sap.dismiss_all_popups()
 
         rows = _read_aobj_list(session)
         return {
