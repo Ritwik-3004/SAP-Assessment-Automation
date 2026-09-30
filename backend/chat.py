@@ -18,6 +18,7 @@ import anthropic
 from config import ANTHROPIC_API_KEY, SCORING_MODEL
 from sap_connector import sap
 import transactions.db15 as db15
+import transactions.aobj as aobj
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +26,10 @@ _TOOLS = [
     {
         "name": "lookup_archiving_objects",
         "description": (
-            "Query the live SAP system via transaction DB15 to find all archiving "
-            "objects for a specific table. Use this to verify a result, look up a "
-            "table not in the scored results, or explore alternatives before modifying. "
-            "Limit to at most 5 tables per response."
+            "Use when the user asks about a DATABASE TABLE — finds all archiving "
+            "objects that archive data from that table (DB15 transaction). "
+            "Input: a table name such as BKPF or BALDAT. "
+            "Do NOT use this to check whether an archiving object name is valid."
         ),
         "input_schema": {
             "type": "object",
@@ -39,6 +40,30 @@ _TOOLS = [
                 }
             },
             "required": ["table_name"],
+        },
+    },
+    {
+        "name": "check_archiving_object",
+        "description": (
+            "Use when the user asks about an ARCHIVING OBJECT NAME — checks whether "
+            "it exists in SAP and returns its description and properties (AOBJ "
+            "transaction). Accepts exact names (e.g. FI_DOCUMNT) or wildcard patterns "
+            "(e.g. FI_* to list all FI archiving objects). Use this for questions like "
+            "'does BC_SBAL exist?', 'what is MM_MATBEL?', 'list all SD_ objects', "
+            "or whenever the user mentions an archiving object name rather than a table."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "object_filter": {
+                    "type": "string",
+                    "description": (
+                        "Archiving object name or wildcard pattern, e.g. FI_DOCUMNT, "
+                        "BC_SBAL, MM_*, FI_*. Leave blank to list all objects."
+                    ),
+                }
+            },
+            "required": ["object_filter"],
         },
     },
     {
@@ -78,15 +103,23 @@ _TOOLS = [
 _SYSTEM = """\
 You are an SAP archivability assessment assistant. The user has run a batch \
 archiving-object lookup and AI scoring across SAP tables. You can:
-  1. Answer questions about the results from the context below.
-  2. Look up live SAP data (DB15) to verify or discover archiving objects.
-  3. Modify results when the user explicitly asks to change an object, score, \
-or rationale — call update_table_result to apply the change; the preview \
-updates automatically.
 
-Never guess archiving object names — look them up first when unsure. Keep \
-answers concise. When presenting SAP data use a short bulleted list. When you \
-apply a modification, confirm what changed in your reply.
+  1. Answer questions about the scored results from the context below.
+  2. Look up live SAP data using the tools below.
+  3. Modify results when the user explicitly asks to change an object, score, \
+or rationale — call update_table_result; the preview updates automatically.
+
+TOOL SELECTION RULES — follow these precisely:
+  • User asks about a TABLE (e.g. "what objects does BKPF have?", \
+"check BALDAT") → call lookup_archiving_objects with the table name.
+  • User asks about an ARCHIVING OBJECT NAME (e.g. "does FI_DOCUMNT exist?", \
+"is BC_SBAL valid?", "what is MM_MATBEL?", "list SD objects") → call \
+check_archiving_object with the object name or pattern.
+  • User asks to change / set / update a result → call update_table_result.
+  • Question answerable from the scored context below → answer directly, no tool.
+
+Never guess archiving object names. Keep answers concise. Use short bulleted \
+lists for SAP data. Confirm what changed when you apply a modification.
 
 === Scored results ({table_count} tables) ===
 {context}
@@ -177,6 +210,39 @@ def _exec_lookup(table: str) -> str:
     except Exception as exc:
         logger.exception("Chat tool: DB15 failed for %s", table)
         return f"Error running DB15 for {table}: {exc}"
+
+
+def _exec_check_archiving_object(object_filter: str) -> str:
+    if not sap.is_connected:
+        return "SAP is not connected — reconnect via the login panel first."
+    try:
+        result = aobj.run(object_filter.strip() or None)
+        if result.get("status") == "error":
+            return f"AOBJ error: {result.get('message', 'unknown error')}"
+        rows = result.get("rows", [])
+        if not rows:
+            return (
+                f"No archiving objects found matching '{object_filter}' in this SAP system. "
+                "It likely does not exist or is not configured here."
+            )
+        # Find the column that holds the object name (first column is usually it)
+        lines = [f"Found {len(rows)} archiving object(s) matching '{object_filter}':"]
+        for r in rows:
+            # Try common column names for the object identifier and description
+            name = (
+                r.get("Archiving Object") or r.get("ArchObj") or r.get("Object")
+                or next(iter(r.values()), "")
+            ).strip()
+            desc = (
+                r.get("Description") or r.get("Desc") or r.get("Text")
+                or list(r.values())[1] if len(r) > 1 else ""
+            ).strip()
+            if name:
+                lines.append("  • " + name + (f" — {desc}" if desc else ""))
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.exception("Chat tool: AOBJ failed for filter %s", object_filter)
+        return f"Error checking archiving object '{object_filter}': {exc}"
 
 
 def _exec_update(
@@ -350,6 +416,10 @@ def run_chat(
             if block.name == "lookup_archiving_objects":
                 table = (inp.get("table_name") or "").strip().upper()
                 result_text = _exec_lookup(table)
+
+            elif block.name == "check_archiving_object":
+                obj_filter = inp.get("object_filter") or ""
+                result_text = _exec_check_archiving_object(obj_filter)
 
             elif block.name == "update_table_result":
                 table = (inp.get("table_name") or "").strip().upper()
