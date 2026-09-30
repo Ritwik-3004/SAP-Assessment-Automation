@@ -190,6 +190,10 @@ Rules:
   - Keep answers concise. Use short bulleted lists for SAP data.
   - Confirm what changed when applying a modification.
   - Call at most 5 SAP tools per response.
+  - Whenever you use a tool to retrieve live SAP data, always state which transaction
+    you queried in your reply, e.g. "Checked in AOBJ: …", "DB15 shows …",
+    "SE16N returned …". This helps the user trust that the answer is live data,
+    not training-knowledge guesswork.
 
 === Scored results ({table_count} tables) ===
 {context}
