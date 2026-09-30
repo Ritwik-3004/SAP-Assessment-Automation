@@ -14,8 +14,9 @@ interface Props {
 
 const SUGGESTIONS = [
   "Check what archiving objects BALDAT has",
-  "Change the archiving object for BKPF to FI_DOCUMNT",
-  "Are there any tables with no archiving object found?",
+  "Does FI_DOCUMNT exist in SAP?",
+  "How many rows does BKPF have?",
+  "Show me the fields of table VBAK",
 ];
 
 export default function ChatPanel({ scored, onResultsUpdated }: Props) {

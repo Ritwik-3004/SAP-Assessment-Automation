@@ -19,6 +19,10 @@ from config import ANTHROPIC_API_KEY, SCORING_MODEL
 from sap_connector import sap
 import transactions.db15 as db15
 import transactions.aobj as aobj
+import transactions.se16n as se16n
+import transactions.se11 as se11
+import transactions.taana as taana
+import transactions.sara as sara
 
 logger = logging.getLogger(__name__)
 
@@ -26,18 +30,14 @@ _TOOLS = [
     {
         "name": "lookup_archiving_objects",
         "description": (
-            "Use when the user asks about a DATABASE TABLE — finds all archiving "
-            "objects that archive data from that table (DB15 transaction). "
-            "Input: a table name such as BKPF or BALDAT. "
-            "Do NOT use this to check whether an archiving object name is valid."
+            "[DB15] Use when the user asks which archiving objects cover a specific "
+            "DATABASE TABLE, e.g. 'what objects archive BKPF?', 'check BALDAT'. "
+            "Input is a table name. Do NOT use to validate an archiving object name."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "table_name": {
-                    "type": "string",
-                    "description": "SAP table name in uppercase, e.g. BKPF, BALDAT",
-                }
+                "table_name": {"type": "string", "description": "SAP table name, e.g. BKPF"},
             },
             "required": ["table_name"],
         },
@@ -45,25 +45,94 @@ _TOOLS = [
     {
         "name": "check_archiving_object",
         "description": (
-            "Use when the user asks about an ARCHIVING OBJECT NAME — checks whether "
-            "it exists in SAP and returns its description and properties (AOBJ "
-            "transaction). Accepts exact names (e.g. FI_DOCUMNT) or wildcard patterns "
-            "(e.g. FI_* to list all FI archiving objects). Use this for questions like "
-            "'does BC_SBAL exist?', 'what is MM_MATBEL?', 'list all SD_ objects', "
-            "or whenever the user mentions an archiving object name rather than a table."
+            "[AOBJ] Use when the user asks about an ARCHIVING OBJECT NAME — whether "
+            "it exists, what it does, or wants to list objects by module prefix. "
+            "Examples: 'does BC_SBAL exist?', 'what is FI_DOCUMNT?', 'list all MM_ "
+            "objects'. Accepts exact names or wildcard patterns (FI_*, MM_*)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "object_filter": {
                     "type": "string",
-                    "description": (
-                        "Archiving object name or wildcard pattern, e.g. FI_DOCUMNT, "
-                        "BC_SBAL, MM_*, FI_*. Leave blank to list all objects."
-                    ),
+                    "description": "Object name or pattern, e.g. FI_DOCUMNT, BC_SBAL, MM_*",
                 }
             },
             "required": ["object_filter"],
+        },
+    },
+    {
+        "name": "browse_table_contents",
+        "description": (
+            "[SE16N] Use when the user wants to SEE ACTUAL DATA ROWS inside a table, "
+            "e.g. 'show me rows from T001', 'how many entries does BKPF have for 2023?', "
+            "'what does a MKPF record look like?'. Accepts an optional WHERE clause "
+            "and a row limit (default 50, max 200)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "table_name": {"type": "string", "description": "SAP table name"},
+                "max_rows": {"type": "integer", "description": "Max rows to return (default 50)"},
+                "where_clause": {
+                    "type": "string",
+                    "description": "Optional WHERE clause, e.g. \"GJAHR = '2023'\"",
+                },
+            },
+            "required": ["table_name"],
+        },
+    },
+    {
+        "name": "get_table_definition",
+        "description": (
+            "[SE11] Use when the user asks about a TABLE'S STRUCTURE — what fields it "
+            "has, their data types, key fields, or what kind of data it stores. "
+            "Examples: 'what fields does BKPF have?', 'is MANDT a key field in T001?', "
+            "'describe the structure of VBAK'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "table_name": {"type": "string", "description": "SAP table name"},
+            },
+            "required": ["table_name"],
+        },
+    },
+    {
+        "name": "analyze_table",
+        "description": (
+            "[TAANA] Use when the user asks about TABLE STATISTICS — row count, size, "
+            "last archiving run, or archivability analysis. Examples: 'how many rows "
+            "does BKPF have?', 'what is the size of BSEG?', 'has VBAP ever been "
+            "archived?', 'analyze KNA1'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "table_name": {"type": "string", "description": "SAP table name or pattern"},
+                "max_rows": {"type": "integer", "description": "Max result rows (default 100)"},
+            },
+            "required": ["table_name"],
+        },
+    },
+    {
+        "name": "get_archiving_sessions",
+        "description": (
+            "[SARA] Use when the user asks about ARCHIVING HISTORY or SESSIONS for a "
+            "specific archiving object — whether data has actually been archived, when "
+            "the last run was, how many records, file sizes. Examples: 'has FI_DOCUMNT "
+            "been run before?', 'show archiving sessions for MM_MATBEL', 'when was the "
+            "last archive run for SD_VBAK?'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "archiving_object": {
+                    "type": "string",
+                    "description": "Archiving object name, e.g. FI_DOCUMNT",
+                }
+            },
+            "required": ["archiving_object"],
         },
     },
     {
@@ -101,25 +170,26 @@ _TOOLS = [
 ]
 
 _SYSTEM = """\
-You are an SAP archivability assessment assistant. The user has run a batch \
-archiving-object lookup and AI scoring across SAP tables. You can:
+You are an SAP archivability assessment assistant with access to a full set of \
+SAP transactions. The user has run a batch archiving-object lookup and AI scoring. \
+You can answer questions from the scored context, look up live SAP data, or \
+modify results on request.
 
-  1. Answer questions about the scored results from the context below.
-  2. Look up live SAP data using the tools below.
-  3. Modify results when the user explicitly asks to change an object, score, \
-or rationale — call update_table_result; the preview updates automatically.
+TOOL SELECTION — pick the right tool for each question type:
+  • "which archiving objects cover table X?" → lookup_archiving_objects (DB15)
+  • "does object Y exist / what is FI_* / list MM_ objects" → check_archiving_object (AOBJ)
+  • "show me rows / data in table X" → browse_table_contents (SE16N)
+  • "what fields / structure does table X have?" → get_table_definition (SE11)
+  • "how many rows / size / has table X been archived?" → analyze_table (TAANA)
+  • "archiving history / sessions for object Y" → get_archiving_sessions (SARA)
+  • "change / set / update a result" → update_table_result
+  • question answerable from the scored context → answer directly, no tool
 
-TOOL SELECTION RULES — follow these precisely:
-  • User asks about a TABLE (e.g. "what objects does BKPF have?", \
-"check BALDAT") → call lookup_archiving_objects with the table name.
-  • User asks about an ARCHIVING OBJECT NAME (e.g. "does FI_DOCUMNT exist?", \
-"is BC_SBAL valid?", "what is MM_MATBEL?", "list SD objects") → call \
-check_archiving_object with the object name or pattern.
-  • User asks to change / set / update a result → call update_table_result.
-  • Question answerable from the scored context below → answer directly, no tool.
-
-Never guess archiving object names. Keep answers concise. Use short bulleted \
-lists for SAP data. Confirm what changed when you apply a modification.
+Rules:
+  - Never guess archiving object names; use check_archiving_object to verify first.
+  - Keep answers concise. Use short bulleted lists for SAP data.
+  - Confirm what changed when applying a modification.
+  - Call at most 5 SAP tools per response.
 
 === Scored results ({table_count} tables) ===
 {context}
@@ -243,6 +313,114 @@ def _exec_check_archiving_object(object_filter: str) -> str:
     except Exception as exc:
         logger.exception("Chat tool: AOBJ failed for filter %s", object_filter)
         return f"Error checking archiving object '{object_filter}': {exc}"
+
+
+def _exec_browse_table(table_name: str, max_rows: int, where_clause: str | None) -> str:
+    if not sap.is_connected:
+        return "SAP is not connected — reconnect via the login panel first."
+    try:
+        result = se16n.run(table_name.upper(), max_rows=max_rows, where_clause=where_clause or None)
+        if result.get("status") == "error":
+            return f"SE16N error for {table_name}: {result.get('message', 'unknown error')}"
+        rows = result.get("rows", [])
+        if not rows:
+            return f"No rows returned for {table_name} (table may be empty or the filter returned nothing)."
+        # Summarise: show column headers + up to 10 rows as compact text
+        cols = list(rows[0].keys())
+        header = " | ".join(cols[:8])  # cap columns shown
+        lines = [f"{table_name}: {len(rows)} row(s) returned", header, "-" * len(header)]
+        for r in rows[:10]:
+            lines.append(" | ".join(str(r.get(c, "")) for c in cols[:8]))
+        if len(rows) > 10:
+            lines.append(f"... {len(rows) - 10} more rows not shown")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.exception("Chat tool: SE16N failed for %s", table_name)
+        return f"Error browsing {table_name}: {exc}"
+
+
+def _exec_get_table_definition(table_name: str) -> str:
+    if not sap.is_connected:
+        return "SAP is not connected — reconnect via the login panel first."
+    try:
+        result = se11.run(table_name.upper())
+        if result.get("status") == "error":
+            return f"SE11 error for {table_name}: {result.get('message', 'unknown error')}"
+        rows = result.get("rows", [])
+        if not rows:
+            return f"No field definitions returned for {table_name}."
+        lines = [f"{table_name} — {len(rows)} field(s):"]
+        for r in rows[:30]:
+            field = r.get("Field", r.get("field", "")).strip()
+            dtype = r.get("Data Type", r.get("data_type", r.get("DType", ""))).strip()
+            length = r.get("Length", r.get("length", "")).strip()
+            desc = r.get("Description", r.get("Short Description", "")).strip()
+            key = r.get("Key", "").strip()
+            parts = [field]
+            if key:
+                parts.append("KEY")
+            if dtype:
+                parts.append(dtype + (f"({length})" if length else ""))
+            if desc:
+                parts.append(f"— {desc}")
+            lines.append("  • " + " ".join(parts))
+        if len(rows) > 30:
+            lines.append(f"  ... {len(rows) - 30} more fields")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.exception("Chat tool: SE11 failed for %s", table_name)
+        return f"Error getting definition for {table_name}: {exc}"
+
+
+def _exec_analyze_table(table_name: str, max_rows: int) -> str:
+    if not sap.is_connected:
+        return "SAP is not connected — reconnect via the login panel first."
+    try:
+        result = taana.run(table_name=table_name.upper(), max_rows=max_rows)
+        if result.get("status") == "error":
+            return f"TAANA error for {table_name}: {result.get('message', 'unknown error')}"
+        rows = result.get("rows", [])
+        if not rows:
+            return f"No TAANA data for {table_name} — it may not be included in the analysis."
+        lines = [f"TAANA analysis for {table_name}:"]
+        for r in rows[:5]:
+            for k, v in r.items():
+                if v and str(v).strip():
+                    lines.append(f"  {k}: {v}")
+            lines.append("")
+        return "\n".join(lines).strip()
+    except Exception as exc:
+        logger.exception("Chat tool: TAANA failed for %s", table_name)
+        return f"Error analyzing {table_name}: {exc}"
+
+
+def _exec_get_archiving_sessions(archiving_object: str) -> str:
+    if not sap.is_connected:
+        return "SAP is not connected — reconnect via the login panel first."
+    try:
+        result = sara.run(archiving_object.upper())
+        if result.get("status") == "error":
+            return f"SARA error for {archiving_object}: {result.get('message', 'unknown error')}"
+        sessions = result.get("sessions", [])
+        if not sessions:
+            return (
+                f"No archiving sessions found for {archiving_object}. "
+                "The object may not have been run yet, or it is not configured on this system."
+            )
+        lines = [f"Archiving sessions for {archiving_object} ({len(sessions)} found):"]
+        for s in sessions[:10]:
+            parts = []
+            for k in ("Session", "Status", "Start Date", "Records", "File Size"):
+                v = s.get(k, "").strip()
+                if v:
+                    parts.append(f"{k}: {v}")
+            lines.append("  • " + " | ".join(parts) if parts else "  • " + str(s))
+        if len(sessions) > 10:
+            lines.append(f"  ... {len(sessions) - 10} more sessions")
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.exception("Chat tool: SARA failed for %s", archiving_object)
+        return f"Error fetching sessions for {archiving_object}: {exc}"
 
 
 def _exec_update(
@@ -420,6 +598,25 @@ def run_chat(
             elif block.name == "check_archiving_object":
                 obj_filter = inp.get("object_filter") or ""
                 result_text = _exec_check_archiving_object(obj_filter)
+
+            elif block.name == "browse_table_contents":
+                table = (inp.get("table_name") or "").strip().upper()
+                max_r = int(inp.get("max_rows") or 50)
+                where = inp.get("where_clause") or None
+                result_text = _exec_browse_table(table, max_r, where)
+
+            elif block.name == "get_table_definition":
+                table = (inp.get("table_name") or "").strip().upper()
+                result_text = _exec_get_table_definition(table)
+
+            elif block.name == "analyze_table":
+                table = (inp.get("table_name") or "").strip().upper()
+                max_r = int(inp.get("max_rows") or 100)
+                result_text = _exec_analyze_table(table, max_r)
+
+            elif block.name == "get_archiving_sessions":
+                obj = (inp.get("archiving_object") or "").strip().upper()
+                result_text = _exec_get_archiving_sessions(obj)
 
             elif block.name == "update_table_result":
                 table = (inp.get("table_name") or "").strip().upper()
