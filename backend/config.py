@@ -37,3 +37,8 @@ SCORING_MODEL = os.getenv("SCORING_MODEL", "claude-haiku-4-5")
 # SAP for Me portal scraping (housekeeping-program fallback lookup). Headless
 # by default; flip to "false" to watch the browser while debugging selectors.
 SAP_FOR_ME_HEADLESS = os.getenv("SAP_FOR_ME_HEADLESS", "true").lower() != "false"
+
+# Optional: IT-approved Chrome for Testing build + matching chromedriver. When
+# unset, Selenium uses the installed Chrome (which managed machines may block).
+SAP_FOR_ME_CHROME_PATH = os.getenv("SAP_FOR_ME_CHROME_PATH") or None
+SAP_FOR_ME_CHROMEDRIVER_PATH = os.getenv("SAP_FOR_ME_CHROMEDRIVER_PATH") or None

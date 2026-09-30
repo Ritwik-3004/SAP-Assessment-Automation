@@ -38,12 +38,16 @@ from urllib.parse import quote
 
 import anthropic
 from pydantic import BaseModel, Field
+from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from config import (
     ANTHROPIC_API_KEY,
+    OUTPUT_DIR,
+    SAP_FOR_ME_CHROME_PATH,
+    SAP_FOR_ME_CHROMEDRIVER_PATH,
     SAP_FOR_ME_CREDENTIALS_FILE,
     SAP_FOR_ME_HEADLESS,
     SCORING_MODEL,
@@ -53,22 +57,19 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://me.sap.com"
 MAX_ARTICLES = 3
-MAX_EXCERPT_CHARS = 4000
+MAX_EXCERPT_CHARS = 8000
 WANTED_TYPES = ("SAP Knowledge Base Article", "SAP Note")
-FALLBACK_TYPE = "SAP Community"
-ALL_TYPES = WANTED_TYPES + (FALLBACK_TYPE,)
+# Every resource badge the results page shows; a result's type is the first
+# of these lines that appears after its title.
+KNOWN_TYPES = WANTED_TYPES + ("SAP Community", "SAP Help", "Support Content")
 WAIT_SECONDS = 20
+ARTICLE_WAIT_SECONDS = 45
 
-# Each result card ends with its resource-type badge on its own line,
-# immediately followed by a language line (e.g. "SAP Knowledge Base
-# Article\nEnglish") -- used to split a results page's plain text into
-# per-result blocks without needing the underlying DOM structure. The match
-# consumes both lines so the language line never leaks into the next
-# result's block as a false "title".
-_BADGE_RE = re.compile(
-    r"^(" + "|".join(re.escape(t) for t in ALL_TYPES) + r")\s*\r?\n.*$",
-    re.MULTILINE,
-)
+# On the live results page (confirmed from a real dump), every SAP Note and
+# Knowledge Base Article title is "<number> - <title>", and the article opens
+# at me.sap.com/notes/<number>/E for both kinds. Other result kinds (SAP Help,
+# Support Content) have unnumbered titles and are ignored.
+_TITLE_RE = re.compile(r"^(\d{5,9}) - (.+)$")
 
 SYSTEM_PROMPT = (
     "You are an SAP data archiving expert. The database table you are given "
@@ -154,8 +155,17 @@ class SapForMeSession:
         if SAP_FOR_ME_HEADLESS:
             options.add_argument("--headless=new")
         options.add_argument("--window-size=1400,1000")
+        # Lets _dump_debug report console errors and failed requests.
+        options.set_capability("goog:loggingPrefs", {"browser": "ALL", "performance": "ALL"})
+        service = None
+        if SAP_FOR_ME_CHROME_PATH:
+            options.binary_location = SAP_FOR_ME_CHROME_PATH
+        if SAP_FOR_ME_CHROMEDRIVER_PATH:
+            from selenium.webdriver.chrome.service import Service
+
+            service = Service(executable_path=SAP_FOR_ME_CHROMEDRIVER_PATH)
         try:
-            self._driver = webdriver.Chrome(options=options)
+            self._driver = webdriver.Chrome(options=options, service=service)
         except Exception as exc:
             # Corporate Chrome/Edge policy "RemoteDebuggingAllowed=0" makes this fail
             # with "DevToolsActivePort file doesn't exist" (blank browser window).
@@ -172,17 +182,20 @@ class SapForMeSession:
         wait = WebDriverWait(driver, WAIT_SECONDS)
         try:
             driver.get(f"{BASE_URL}/")
+            _dismiss_cookie_banner(driver)
             _click_by_text(driver, wait, "Sign In")
-            _fill(driver, wait, "Email, User ID or Login Name", self._email)
+            _fill_input(driver, wait, "input[type='email'], input[type='text']", self._email)
             _click_by_text(driver, wait, "Continue")
-            _fill(driver, wait, "Password", self._password)
+            _fill_input(driver, wait, "input[type='password']", self._password)
             _click_by_text(driver, wait, "Continue")
             wait.until(EC.url_contains("me.sap.com/home"))
         except Exception as exc:
             logger.warning("SAP for Me sign-in failed at %s: %s", driver.current_url, exc, exc_info=True)
             reason = (str(exc).splitlines() or [type(exc).__name__])[0]
+            dumped = _dump_debug(driver)
+            where = f" (screenshot and page text saved: {dumped[0]}, {dumped[1]})" if dumped else ""
             raise SapForMeLoginError(
-                f"SAP for Me sign-in failed on page {driver.current_url!r}: {type(exc).__name__}: {reason}"
+                f"SAP for Me sign-in failed on page {driver.current_url!r}: {type(exc).__name__}: {reason}{where}"
             ) from exc
 
     def close(self):
@@ -209,14 +222,12 @@ class SapForMeSession:
 
         chosen = [r for r in results if r["type"] in WANTED_TYPES][:MAX_ARTICLES]
         if not chosen:
-            chosen = [r for r in results if r["type"] == FALLBACK_TYPE][:MAX_ARTICLES]
-        if not chosen:
-            return {"program": "", "rationale": "No SAP for Me articles found for this table."}
+            return {"program": "", "rationale": "No SAP Note or Knowledge Base Article found on SAP for Me for this table."}
 
         articles = []
         for result in chosen:
             try:
-                text = self._read_article(result["title"])
+                text = self._read_article(result["url"], table_name)
             except Exception as exc:
                 logger.warning("Could not read SAP for Me article '%s': %s", result["title"], exc, exc_info=True)
                 continue
@@ -232,27 +243,38 @@ class SapForMeSession:
         payload = json.dumps({"q": query, "tab": "All"})
         self._driver.get(f"{BASE_URL}/knowledge/search/{quote(payload)}")
         WebDriverWait(self._driver, WAIT_SECONDS).until(
-            lambda d: re.search(r"Results \d+-\d+ of \d+", d.find_element(By.TAG_NAME, "body").text)
+            lambda d: re.search(
+                r"Results \d+-\d+ of \d+|No results", d.find_element(By.TAG_NAME, "body").text, re.IGNORECASE
+            )
         )
         raw_text = self._driver.find_element(By.TAG_NAME, "body").text
         return _parse_results(raw_text)
 
-    def _read_article(self, title: str) -> str:
+    def _read_article(self, url: str, table_name: str) -> str:
+        """Opens an article by its direct address and returns the part of its
+        text most relevant to *table_name*."""
         driver = self._driver
-        xpath = f"//a[contains(normalize-space(string(.)), {_xpath_literal(title)})]"
-        link = driver.find_element(By.XPATH, xpath)
-        link.click()
-        WebDriverWait(driver, WAIT_SECONDS).until(EC.staleness_of(link))
-        text = driver.find_element(By.TAG_NAME, "body").text[:MAX_EXCERPT_CHARS]
-        driver.back()
-        return text
+        driver.get(url)
+        try:
+            WebDriverWait(driver, ARTICLE_WAIT_SECONDS).until(
+                lambda d: _looks_rendered(d.find_element(By.TAG_NAME, "body").text)
+            )
+        except TimeoutException:
+            pass  # use whatever rendered; the extraction step copes with thin text
+        return _relevant_excerpt(driver.find_element(By.TAG_NAME, "body").text, table_name)
 
 
 def _click_by_text(driver, wait: WebDriverWait, text: str):
-    """Clicks the first visible, enabled element (button/link/anything)
-    whose text contains *text* -- used instead of a CSS/id selector since
-    the portal's internal markup isn't inspectable from here."""
-    xpath = f"//*[contains(normalize-space(string(.)), {_xpath_literal(text)})]"
+    """Clicks the first visible, enabled button/link whose text contains
+    *text*. Deliberately limited to button-like elements: matching any
+    element would hit <html>/<body> first, since they contain the text too."""
+    lit = _xpath_literal(text)
+    xpath = (
+        f"//button[contains(normalize-space(.), {lit})]"
+        f" | //a[contains(normalize-space(.), {lit})]"
+        f" | //*[@role='button'][contains(normalize-space(.), {lit})]"
+        f" | //input[@type='submit' or @type='button'][contains(@value, {lit})]"
+    )
 
     def _find_clickable(d):
         for el in d.find_elements(By.XPATH, xpath):
@@ -261,22 +283,34 @@ def _click_by_text(driver, wait: WebDriverWait, text: str):
         return False
 
     el = wait.until(_find_clickable)
-    el.click()
+    try:
+        el.click()
+    except ElementClickInterceptedException:
+        # Some other overlay is on top; a script click bypasses hit-testing.
+        driver.execute_script("arguments[0].click();", el)
 
 
-def _fill(driver, wait: WebDriverWait, label_text: str, value: str):
-    """Fills the input associated with *label_text*, trying a <label>
-    element first (the portal's fields look label-associated in
-    screenshots), then falling back to a matching placeholder -- both
-    unverified against the live DOM."""
-    lit = _xpath_literal(label_text)
-    by_label = f"//label[contains(normalize-space(string(.)), {lit})]/following::input[1]"
-    by_placeholder = f"//input[contains(@placeholder, {lit})]"
+def _dismiss_cookie_banner(driver):
+    """SAP's TrustArc consent dialog covers the landing page and swallows
+    clicks. Choose "Deny All" (declines non-essential cookies; sign-in still
+    works) and wait for it to go. Silently does nothing if there's no banner."""
+    try:
+        _click_by_text(driver, WebDriverWait(driver, 6), "Deny All")
+        WebDriverWait(driver, 6).until(
+            lambda d: not any(e.is_displayed() for e in d.find_elements(By.ID, "truste-consent-track"))
+        )
+    except Exception:
+        pass
+
+
+def _fill_input(driver, wait: WebDriverWait, css: str, value: str):
+    """Types *value* into the first visible input matching *css*. Sign-in
+    fields are found by input type (text/email/password) rather than by
+    label, since the sign-in page's label wiring isn't verified."""
 
     def _find_input(d):
-        els = d.find_elements(By.XPATH, by_label) or d.find_elements(By.XPATH, by_placeholder)
-        for el in els:
-            if el.is_displayed():
+        for el in d.find_elements(By.CSS_SELECTOR, css):
+            if el.is_displayed() and el.is_enabled():
                 return el
         return False
 
@@ -285,27 +319,125 @@ def _fill(driver, wait: WebDriverWait, label_text: str, value: str):
     el.send_keys(value)
 
 
+def _console_problems(driver) -> list[str]:
+    try:
+        return [
+            f"[{e['level']}] {e['message'][:300]}"
+            for e in driver.get_log("browser")
+            if e["level"] in ("SEVERE", "WARNING")
+        ][:40]
+    except Exception as exc:
+        return [f"(could not read console log: {exc})"]
+
+
+def _failed_requests(driver) -> list[str]:
+    """URLs the page requested that failed or returned an HTTP error, from
+    Chrome's performance log."""
+    out: list[str] = []
+    try:
+        for entry in driver.get_log("performance"):
+            msg = json.loads(entry["message"])["message"]
+            params = msg.get("params", {})
+            if msg.get("method") == "Network.responseReceived":
+                resp = params.get("response", {})
+                if resp.get("status", 0) >= 400:
+                    out.append(f"HTTP {resp['status']}  {resp.get('url', '')[:200]}")
+            elif msg.get("method") == "Network.loadingFailed":
+                out.append(f"FAILED {params.get('errorText', '')}  (request {params.get('requestId', '')})")
+    except Exception as exc:
+        out.append(f"(could not read performance log: {exc})")
+    return out[:40]
+
+
+def _dump_debug(driver):
+    """Saves a screenshot and the visible page text next to the outputs so a
+    failed sign-in can be diagnosed without re-running. Never raises."""
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        png = OUTPUT_DIR / "sap_for_me_debug.png"
+        txt = OUTPUT_DIR / "sap_for_me_debug.txt"
+        driver.save_screenshot(str(png))
+        body = driver.find_element(By.TAG_NAME, "body").text
+        buttons = [
+            (b.text or b.get_attribute("value") or "").strip()
+            for b in driver.find_elements(By.CSS_SELECTOR, "button, a, [role='button'], input[type='submit']")
+            if b.is_displayed()
+        ]
+        links = [
+            f"{(a.text or '').strip()[:100]!r} -> {a.get_attribute('href')}"
+            for a in driver.find_elements(By.CSS_SELECTOR, "a[href]")
+            if a.is_displayed() and (a.text or "").strip()
+        ][:80]
+        txt.write_text(
+            f"URL: {driver.current_url}\nTitle: {driver.title}\n\n"
+            f"Visible buttons/links: {[b for b in buttons if b]}\n\n"
+            f"--- console warnings/errors ---\n" + "\n".join(_console_problems(driver)) +
+            f"\n\n--- failed network requests (status >= 400 or failed) ---\n" + "\n".join(_failed_requests(driver)) +
+            f"\n\n--- links (text -> href) ---\n" + "\n".join(links) +
+            f"\n\n--- page text ---\n{body}",
+            encoding="utf-8",
+        )
+        return str(png), str(txt)
+    except Exception:
+        return None
+
+
 def _parse_results(raw_text: str) -> list[dict]:
-    """Splits a SAP for Me search-results page's plain text into per-result
-    (title, resource type) pairs, in the page's own relevance order. Each
-    result ends with its resource-type badge on its own line -- the title is
-    the first non-empty line after the previous badge (or after the
-    "Results X-Y of Z" line, for the first result)."""
+    """Extracts the numbered SAP Note / Knowledge Base Article results from a
+    search-results page's plain text, in the page's own relevance order, as
+    {"id", "title", "type", "url"}. A result starts at a "<number> - <title>"
+    line; its type is the first known badge line ("SAP Note", "SAP Knowledge
+    Base Article", ...) after that. Unnumbered results (SAP Help, Support
+    Content) are skipped."""
     # ".*$" (MULTILINE, not DOTALL) also consumes the rest of that same
-    # line (e.g. the trailing "in 884 ms"), so the first result's title
-    # isn't mistaken for leftover text on the "Results X-Y of Z" line.
+    # line (e.g. the trailing "in 884 ms").
     start = re.search(r"Results \d+-\d+ of \d+.*$", raw_text, re.MULTILINE)
     body = raw_text[start.end():] if start else raw_text
 
-    results = []
-    cursor = 0
-    for m in _BADGE_RE.finditer(body):
-        block = body[cursor:m.start()]
-        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
-        if lines:
-            results.append({"title": lines[0], "type": m.group(1)})
-        cursor = m.end()
+    results: list[dict] = []
+    current = None
+    for line in (ln.strip() for ln in body.splitlines()):
+        m = _TITLE_RE.match(line)
+        if m:
+            current = {
+                "id": m.group(1),
+                "title": line,
+                "type": "",
+                "url": f"{BASE_URL}/notes/{m.group(1)}/E",
+            }
+            results.append(current)
+        elif current is not None and not current["type"] and line in KNOWN_TYPES:
+            current["type"] = line
     return results
+
+
+def _looks_rendered(text: str) -> bool:
+    """True once an article page has rendered real content (the portal is a
+    single-page app, so the body text is thin until its data arrives)."""
+    return len(text) > 1200 and any(w in text for w in ("Symptom", "Solution", "Resolution", "Description"))
+
+
+def _relevant_excerpt(text: str, table_name: str) -> str:
+    """Trims a long article to the start (title/symptom) plus a window around
+    each mention of *table_name*, so a big how-to that lists dozens of tables
+    keeps the part about this one instead of being cut off by a flat limit."""
+    if len(text) <= MAX_EXCERPT_CHARS:
+        return text
+    head = 2000
+    spans = [(0, head)]
+    for m in re.finditer(re.escape(table_name), text, re.IGNORECASE):
+        spans.append((max(0, m.start() - 800), min(len(text), m.end() + 800)))
+        if len(spans) >= 8:
+            break
+    spans.sort()
+    merged = [list(spans[0])]
+    for s, e in spans[1:]:
+        if s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    pieces = [text[s:e] for s, e in merged]
+    return "\n...\n".join(pieces)[:MAX_EXCERPT_CHARS]
 
 
 def _extract_program(table_name: str, articles: list[tuple[str, str, str]]) -> dict:

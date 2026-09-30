@@ -45,9 +45,18 @@ def main():
         query = f"{table_name} housekeeping program"
         print(f"Searching: {query!r}")
         results = session._search(query)
+        print(f"Saved results-page dump: {sap_for_me._dump_debug(session._driver)}")
         print(f"Parsed {len(results)} result(s):")
         for r in results:
             print(f"  [{r['type']}] {r['title']}")
+
+        wanted = [r for r in results if r["type"] in sap_for_me.WANTED_TYPES]
+        if wanted:
+            first = wanted[0]
+            print(f"\nOpening first article: {first['title']}\n  {first['url']}")
+            excerpt = session._read_article(first["url"], table_name)
+            print(f"Article page dump: {sap_for_me._dump_debug(session._driver)}")
+            print(f"Excerpt length: {len(excerpt)} chars. First 600 chars:\n{excerpt[:600]}")
 
         print("\nRunning full lookup() (search + read top articles + LLM extraction)...")
         found = session.lookup(table_name)
