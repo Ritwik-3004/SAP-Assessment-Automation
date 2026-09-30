@@ -149,7 +149,11 @@ export const api = {
     recommended: Record<string, string>[],
     history: { role: string; content: string }[]
   ) =>
-    post<{ reply: string }>("/api/chat", {
+    post<{
+      reply: string;
+      updated_rows: Record<string, string>[] | null;
+      updated_recommended: Record<string, string>[] | null;
+    }>("/api/chat", {
       message,
       scored_rows: scoredRows,
       recommended,

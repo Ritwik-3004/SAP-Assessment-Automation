@@ -9,15 +9,16 @@ interface Message {
 
 interface Props {
   scored: ScoredResult;
+  onResultsUpdated: (rows: Record<string, string>[], recommended: Record<string, string>[]) => void;
 }
 
 const SUGGESTIONS = [
   "Check what archiving objects BALDAT has",
-  "Why did the top table score high?",
+  "Change the archiving object for BKPF to FI_DOCUMNT",
   "Are there any tables with no archiving object found?",
 ];
 
-export default function ChatPanel({ scored }: Props) {
+export default function ChatPanel({ scored, onResultsUpdated }: Props) {
   const [history, setHistory] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -48,6 +49,9 @@ export default function ChatPanel({ scored }: Props) {
         history
       );
       setHistory([...nextHistory, { role: "assistant", content: res.reply }]);
+      if (res.updated_rows && res.updated_recommended) {
+        onResultsUpdated(res.updated_rows, res.updated_recommended);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Chat failed");
       setHistory(history);

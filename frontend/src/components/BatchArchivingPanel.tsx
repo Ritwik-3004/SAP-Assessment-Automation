@@ -474,7 +474,12 @@ export default function BatchArchivingPanel() {
       )}
 
       {scored?.rows && scored.rows.length > 0 && (
-        <ChatPanel scored={scored} />
+        <ChatPanel
+          scored={scored}
+          onResultsUpdated={(rows, recommended) =>
+            setScored((prev) => prev ? { ...prev, rows, recommended } : prev)
+          }
+        />
       )}
     </div>
   );
