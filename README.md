@@ -13,8 +13,8 @@ Browser (React + Vite)  ←→  FastAPI (Python)  ←→  SAP GUI (COM scripting
 ```
 
 Main backend modules (`backend/`): `main.py` (all endpoints), `sap_connector.py` (SAP GUI
-connection), `transactions/` (one module per SAP transaction), `scoring.py` (Claude
-scoring), `dvm_guide.py` (DVM Guide lookup), `housekeeping.py` + `sap_for_me.py`
+connection), `transactions/` (one module per SAP transaction), `llm.py` (the AI model switch: Claude or
+Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeeping.py` + `sap_for_me.py`
 (housekeeping-program lookup), `grouping.py` (Grouped by Object), `chat.py` (chat
 assistant), `reference_doc.py` (reference document analysis), `progress.py` (progress
 polling), `debug_sap_for_me.py` (manual scraper diagnostics).
@@ -30,6 +30,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working |
 | Chat assistant over scored results | Implemented; documented from the code and not run end to end — see [Chat assistant](#chat-assistant) for known gaps |
+| AI model switch (Claude or Groq free tier) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared** — see [AI model selection](#ai-model-selection-claude-or-groq) |
 | Reference document analysis (Excel / PDF / PowerPoint) | Implemented; frontend builds cleanly, not yet run end to end against a real document — see [Reference document analysis](#reference-document-analysis) |
 
 ## Prerequisites
@@ -41,7 +42,8 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | SAP GUI Scripting allowed (server) | Profile parameter `sapgui/user_scripting = TRUE` (RZ11, set by Basis) and authorization object `S_SCR` for your user. If Connect times out while the login window looks normal, check this first. |
 | Python 3.11+ | `python --version`. The project's `.venv` is **32-bit** Python 3.12, which suits the SAP GUI COM scripting (and is why Selenium is used instead of Playwright). |
 | Node.js 18+ | `node --version` |
-| `ANTHROPIC_API_KEY` | In `backend/.env`; needed for scoring, housekeeping lookups and the chat assistant |
+| `ANTHROPIC_API_KEY` | In `backend/.env`; needed for every AI step while Claude is the selected model |
+| `GROQ_API_KEY` (optional) | In `backend/.env`; only needed if you switch to the Groq free tier (free key from console.groq.com). The app never asks for or stores it |
 | Chrome for Testing + chromedriver | Only for the SAP for Me housekeeping lookup; needs IT approval. See [setup](#housekeepingcleanup-program-lookup-for-tables-with-no-archiving-object) |
 | SAP for Me account | Email and password saved in the app's sidebar; internet access to me.sap.com, and SAP's terms must permit automated access |
 
@@ -332,7 +334,7 @@ Flow:
 
 1. Click **Upload Reference Document**. The backend (`backend/reference_doc.py`,
    `POST /api/reference-doc/analyze`) extracts the document's text (`openpyxl` for Excel,
-   `pypdf` for PDF, `python-pptx` for PowerPoint) and asks Claude (`SCORING_MODEL`) to pull out
+   `pypdf` for PDF, `python-pptx` for PowerPoint) and asks the selected AI model to pull out
    explicit table → archiving object pairs. Only mappings stated in the document are used;
    nothing is guessed. The first ~14,000 characters of the document are sent to Claude.
 2. Each recommended table is compared with the document and put in one of three groups:
@@ -359,13 +361,60 @@ overrides are applied in the panel's own preview and are **not** pushed back int
 scored results or the chat's view of them; very long documents are truncated before being
 sent to Claude; scanned (image-only) PDFs yield no text and are rejected.
 
+## AI model selection (Claude or Groq)
+
+The sidebar's **AI Model** panel chooses which model every AI step uses — scoring, the
+housekeeping lookup (DVM Guide and SAP for Me stages), reference-document analysis and the
+chat assistant. There is nothing to change per step: pick a model once and all of them
+follow it. The header shows the active model (e.g. "AI: Groq · GPT-OSS 120B").
+
+- **Claude** (default) — `claude-haiku-4-5` (`SCORING_MODEL`), billed to your Anthropic
+  account; needs `ANTHROPIC_API_KEY` in `backend/.env`. Behaves exactly as before.
+- **Groq (free tier)** — pick **GPT-OSS 120B** or **Qwen 3.8 27B**. The Groq API key is
+  **not** entered in the app: put `GROQ_API_KEY=gsk_...` in `backend/.env` and restart the
+  backend (the panel warns if it is missing). **Save** applies your choice (stored in
+  `llm_settings.json`, git-ignored, which holds no keys); **Test** makes one tiny call to
+  check the key and model.
+
+How it works: `backend/llm.py` is the only module that talks to an AI provider. The other
+modules call `llm.structured()` (JSON answers: scoring, housekeeping, SAP for Me),
+`llm.text()` (reference document) and `llm.run_tool_loop()` (chat, with the SAP tools); the
+selection is read from `llm_settings.json` on each call. A scoring run reads it once at the
+start, so switching mid-run can't mix two models in one result set. Endpoints:
+`GET/POST /api/llm/settings`, `GET /api/llm/usage`, `POST /api/llm/test`.
+
+**What to expect on the Groq free tier** (limits per model, from Groq's docs: 30 requests/min,
+**8,000 tokens/min**, 1,000 requests/day, **200,000 tokens/day**):
+- The per-minute token cap is the real limit. Groq mode paces itself, waits out per-minute
+  limits automatically (the progress bar says "Waiting for the Groq rate limit…"), runs 2
+  requests at a time instead of 8, and uses smaller prompts (shorter DVM Guide excerpts, SAP
+  for Me articles and reference-document text; fewer tables and history in chat).
+- Scoring runs at roughly 2–3 tables per minute, and the daily token cap allows very roughly
+  60–90 scored tables per day. A large batch will not finish in one day. Chat is usable only
+  lightly (about one tool round per minute).
+- When a **daily** limit is reached, the run **stops with a clear message** — it never
+  silently switches to Claude. Switch the model in the panel to continue. The panel shows
+  today's requests and tokens used (counted locally in `llm_usage.json`).
+- Answers can differ from Claude's: the prompts were written and tuned on Claude Haiku.
+  Compare both models on the same ~10 tables before relying on Groq results.
+- **Data handling:** in Groq mode, table names, descriptions and sizes, DVM Guide excerpts,
+  SAP for Me article text, uploaded reference documents and (via chat) SE16N/TAANA table
+  rows are sent to Groq instead of Anthropic. Check this against the client's data-handling
+  rules and Groq's free-tier data terms first.
+
+Verification status: the Groq path works with a live key (confirmed by the team after the
+first run). The request shape, strict JSON-schema output, retries, daily-limit abort and
+tool calls were also checked offline with fake clients. Still open: how Groq's answers
+compare with Claude's on the same tables, and Qwen 3.8's exact reasoning behaviour and the
+free tier's admission rules under a long batch — watch the first big run.
+
 ## Chat assistant
 
 Once **Find Archiving Objects for Tables** has scored results, an "Ask about these
 results" chat box appears under them (`frontend/src/components/ChatPanel.tsx`, shown by
 `BatchArchivingPanel.tsx`). Users can ask follow-up questions about the scored results,
 check live SAP data, or ask it to change a result; four example questions are offered as
-buttons. It needs `ANTHROPIC_API_KEY` and uses the same `SCORING_MODEL` as scoring.
+buttons. It uses whichever AI model is selected in the sidebar (see [AI model selection](#ai-model-selection-claude-or-groq)).
 
 How it works (`backend/chat.py`, endpoint `POST /api/chat`):
 
@@ -583,6 +632,9 @@ API_PORT=8000
 ANTHROPIC_API_KEY=sk-ant-...
 SCORING_MODEL=claude-haiku-4-5
 
+# Only needed if you select Groq in the app's AI Model panel
+# GROQ_API_KEY=gsk_...
+
 # SAP for Me scraper (backend/sap_for_me.py): Chrome for Testing + matching
 # chromedriver (see the housekeeping section for setup); headless by default,
 # set SAP_FOR_ME_HEADLESS=false to watch the browser while debugging
@@ -609,6 +661,10 @@ Key endpoints:
 | POST | `/api/sap/credentials` | Save connection details (including password) to `sap_credentials.json` |
 | GET | `/api/sap-for-me/credentials` | Return saved SAP for Me sign-in details from `sap_for_me_credentials.json` |
 | POST | `/api/sap-for-me/credentials` | Save SAP for Me email + password to `sap_for_me_credentials.json` |
+| GET | `/api/llm/settings` | Active AI provider/model, the Groq models offered and Groq's free-tier limits (API keys are never returned, only whether each is set in `backend/.env`) |
+| POST | `/api/llm/settings` | Choose the AI model for every AI step (body: `{provider: "anthropic"\|"groq", model}`); API keys come from `backend/.env`, not this call |
+| GET | `/api/llm/usage` | Today's request/token count for the active model |
+| POST | `/api/llm/test` | One tiny call to check the saved key and model work |
 | POST | `/api/chat` | One chat turn over scored results (body: `{message, scored_rows, recommended, history}`); returns `{reply, updated_rows, updated_recommended}` — the last two are `null` unless Claude changed a result |
 | GET | `/api/files/input` | List `.xlsx`/`.xls` files in the `input/` folder, newest first |
 | GET | `/api/files/output` | List `.xlsx`/`.xls` files in the `output/` folder, newest first |
