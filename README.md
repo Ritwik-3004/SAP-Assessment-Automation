@@ -9,6 +9,18 @@ Browser (React + Vite)  ←→  FastAPI (Python)  ←→  SAP GUI (COM scripting
     localhost:5173              localhost:8000          win32com.client
 ```
 
+## Project status
+
+| Area | Status |
+|---|---|
+| Generate Table List (DB02), Find Archiving Objects (DB15), table sizes | Working |
+| Score & Recommend Objects (Claude, grounded in the DVM Guide) | Working |
+| Housekeeping program lookup — DVM Guide stage | Working |
+| Housekeeping program lookup — SAP for Me stage | Working in `debug_sap_for_me.py` (COSP → `RK_PLAN_DEL_ZERO_RECORDS`); **not yet verified through a full scoring run in the app**. Needs Chrome for Testing + IT approval. SAP Community fallback **not implemented**. |
+| Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
+| Find Header Tables (SE16N/`ARCH_DEF`) | Working |
+| Chat assistant over scored results | Implemented; documented from the code and not run end to end — see [Chat assistant](#chat-assistant) for known gaps |
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -286,6 +298,52 @@ object/program to tackle first. `backend/grouping.py`'s `build_object_groups()`:
 - The sheet deliberately has no Rationale column — it's already on the "Recommended"
   sheet, and repeating it per group member here would just be noise.
 
+## Chat assistant
+
+Once **Find Archiving Objects for Tables** has scored results, an "Ask about these
+results" chat box appears under them (`frontend/src/components/ChatPanel.tsx`, shown by
+`BatchArchivingPanel.tsx`). Users can ask follow-up questions about the scored results,
+check live SAP data, or ask it to change a result; four example questions are offered as
+buttons. It needs `ANTHROPIC_API_KEY` and uses the same `SCORING_MODEL` as scoring.
+
+How it works (`backend/chat.py`, endpoint `POST /api/chat`):
+
+1. The frontend sends the message, the scored rows, the recommended rows and the chat
+   history. The backend gives Claude a summary of the results (best object per table, up
+   to 60 tables) and a set of tools, and lets it make up to 8 rounds of tool calls per
+   message.
+2. Claude picks a tool based on the question:
+
+   | Tool | SAP transaction | Used for |
+   |---|---|---|
+   | `lookup_archiving_objects` | DB15 | Which archiving objects cover a table |
+   | `check_archiving_object` | AOBJ | Whether an object name exists, or listing by prefix (`MM_*`) |
+   | `browse_table_contents` | SE16N | Actual rows in a table (default 50, max 200; Claude sees at most 10 rows and 8 columns) |
+   | `get_table_definition` | SE11 | A table's fields, types and key fields (first 30 fields) |
+   | `analyze_table` | TAANA | Row counts, size, archiving statistics |
+   | `get_archiving_sessions` | SARA | Whether and when an object has been run (latest 10 sessions) |
+   | `update_table_result` | — (in memory) | Change a table's archiving object, score or rationale |
+
+3. For `update_table_result`, the backend edits a copy of the rows, recomputes the
+   Recommended list (highest score per table) and returns both; the frontend swaps them
+   into the preview without re-running scoring.
+
+The SAP tools use the shared SAP GUI session, so SAP must be connected.
+
+**Known gaps** (found by reading the code; not yet fixed):
+- Rows added or promoted through chat contain only Table Name, Table Description,
+  Archiving Object, Object Description, Score and Rationale — they lack Volume (GB),
+  Volume (MB) and Housekeeping Program, so exports and the Grouped sheet can show blanks
+  for them.
+- Edits live only in the browser's state until the results are saved or downloaded.
+- There is no guard against asking a live-SAP question while a DB15 batch is running;
+  both drive the same SAP GUI session.
+- SE16N and TAANA results (real table rows from the client system) are sent to the
+  Anthropic API as part of the conversation — check this against the client's data-handling
+  rules before using those tools.
+- The scored rows sent to the chat have no Rationale field, so Claude never sees the
+  reasons behind the scores.
+
 ## Progress polling for long-running batches
 
 DB15 lookup, Scoring, and the Header Table batch lookup can all take minutes on a large
@@ -472,6 +530,7 @@ Key endpoints:
 | POST | `/api/sap/credentials` | Save connection details (including password) to `sap_credentials.json` |
 | GET | `/api/sap-for-me/credentials` | Return saved SAP for Me sign-in details from `sap_for_me_credentials.json` |
 | POST | `/api/sap-for-me/credentials` | Save SAP for Me email + password to `sap_for_me_credentials.json` |
+| POST | `/api/chat` | One chat turn over scored results (body: `{message, scored_rows, recommended, history}`); returns `{reply, updated_rows, updated_recommended}` — the last two are `null` unless Claude changed a result |
 | GET | `/api/files/input` | List `.xlsx`/`.xls` files in the `input/` folder, newest first |
 | GET | `/api/files/output` | List `.xlsx`/`.xls` files in the `output/` folder, newest first |
 | POST | `/api/files/input/save` | Save table list rows to `input/list_of_tables.xlsx` |
