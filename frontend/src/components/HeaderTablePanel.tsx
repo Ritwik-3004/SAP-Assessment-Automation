@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { api } from "../api/client";
 import ResultsTable from "./ResultsTable";
 import ProgressBar from "./ProgressBar";
+import HeaderReferencePanel from "./HeaderReferencePanel";
 import type { HeaderTableBatchResult, ProgressSnapshot } from "../types";
 
 export default function HeaderTablePanel() {
@@ -15,6 +16,8 @@ export default function HeaderTablePanel() {
 
   // ── Batch job ────────────────────────────────────────────────────────────
   const [result, setResult] = useState<HeaderTableBatchResult | null>(null);
+  // Changes with every new result so the reference-document panel below starts fresh.
+  const [runId, setRunId] = useState(0);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<ProgressSnapshot<HeaderTableBatchResult> | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -86,6 +89,7 @@ export default function HeaderTablePanel() {
         setError(final.message ?? "Header-table lookup failed");
       } else {
         setResult(final.result);
+        setRunId((n) => n + 1);
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Header-table lookup failed");
@@ -138,7 +142,10 @@ export default function HeaderTablePanel() {
         sorted by descending cumulative size, is used), or upload your own Excel file
         with an "Archiving Object" column on its last sheet. For each of the top N
         archiving objects, this looks up its header table — the segment with no parent
-        segment.
+        segment. Whenever ARCH_DEF doesn't settle it (several top-level segments, none,
+        or no entry at all), the DVM Guide and SAP for Me are consulted so that every
+        object gets a header table, marked with its source and a confidence level. You can then upload a reference document to cross-check the
+        results.
       </div>
 
       <form className="tx-form" onSubmit={handleSubmit}>
@@ -287,6 +294,15 @@ export default function HeaderTablePanel() {
               Saved to <code>output/header_tables.xlsx</code>
             </div>
           )}
+          {result.rows.some((r) => r["Confidence"] && r["Confidence"] !== "High") && (
+            <p className="tx-hint">
+              Rows marked Medium or Low confidence are best guesses made from the DVM Guide
+              and SAP for Me — see Comments for the other candidates, and use the reference
+              document below to confirm them.
+            </p>
+          )}
+
+          <HeaderReferencePanel key={runId} rows={result.rows} />
         </>
       )}
     </div>

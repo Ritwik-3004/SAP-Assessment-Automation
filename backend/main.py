@@ -29,6 +29,7 @@ from config import INPUT_DIR, OUTPUT_DIR, CREDENTIALS_FILE, SAP_FOR_ME_CREDENTIA
 import scoring
 import grouping
 import llm
+import header_tables
 import reference_doc as ref_doc_mod
 import transactions.taana as taana
 import transactions.db15 as db15
@@ -173,6 +174,10 @@ class Db15BatchFromInputRequest(BaseModel):
 class HeaderTableBatchFromOutputRequest(BaseModel):
     filename: str
     max_objects: int = 20
+
+
+# Columns of the Find Header Tables sheet/exports.
+HEADER_TABLE_COLUMNS = ["Archiving Object", "Header Table", "Source", "Confidence", "Comments"]
 
 
 class HeaderTableExportRequest(BaseModel):
@@ -797,7 +802,7 @@ def get_header_table_batch_progress():
 def export_header_tables(req: HeaderTableExportRequest):
     buffer = _build_workbook(
         req.rows,
-        columns=["Archiving Object", "Header Table"],
+        columns=HEADER_TABLE_COLUMNS,
         sheet_title="Header Tables",
     )
     return StreamingResponse(
@@ -812,7 +817,7 @@ def save_header_tables_to_output(req: HeaderTableExportRequest):
     """Save header-table rows to output/header_tables.xlsx."""
     buf = _build_workbook(
         req.rows,
-        columns=["Archiving Object", "Header Table"],
+        columns=HEADER_TABLE_COLUMNS,
         sheet_title="Header Tables",
     )
     dest = OUTPUT_DIR / "header_tables.xlsx"
@@ -849,11 +854,29 @@ def debug_arch_def_query(archiving_object: str):
 
 def _run_header_table_job(archiving_objects: list[str]):
     try:
+        # Stage 1 (holds the SAP GUI session): read ARCH_DEF for every object. Objects with
+        # exactly one top-level segment are resolved here; the rest come back as "ambiguous".
         result = se16n.run_batch_find_header_tables(archiving_objects, on_progress=_header_table_progress.update)
         if result["status"] == "error":
             _header_table_progress.fail(result["message"])
-        else:
-            _header_table_progress.finish(result)
+            return
+
+        # Stage 2 (SAP session no longer needed): settle ambiguous objects with the DVM Guide
+        # and SAP for Me. The bar stays full; the message says which object is being worked on.
+        ambiguous = result.pop("ambiguous", [])
+        if ambiguous:
+            total = _header_table_progress.snapshot()["total"]
+            try:
+                result["rows"] = header_tables.resolve(
+                    result["rows"], ambiguous,
+                    on_progress=lambda msg: _header_table_progress.update(total, msg),
+                )
+            except Exception as exc:
+                logger.exception("Header-table resolution failed")
+                result.setdefault("errors", []).append(
+                    {"archiving_object": "(several)", "message": f"Could not settle ambiguous objects: {exc}"}
+                )
+        _header_table_progress.finish(result)
     except Exception as exc:
         logger.exception("Header-table batch job failed")
         _header_table_progress.fail(str(exc))
@@ -933,6 +956,59 @@ def export_reference_doc(req: ReferenceDocSaveRequest):
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=archiving_objects_with_reference.xlsx"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reference document analysis for header tables (archiving object -> header table)
+# ---------------------------------------------------------------------------
+
+class HeaderReferenceSaveRequest(BaseModel):
+    rows: list[dict]    # the header tables as the app found them
+    final: list[dict]   # after the reference-document review (with "Reference Check")
+
+
+def _header_reference_workbook(req: HeaderReferenceSaveRequest) -> io.BytesIO:
+    return _build_multi_sheet_workbook([
+        ("Header Tables", HEADER_TABLE_COLUMNS, req.rows),
+        ("Header Tables (with Reference)", HEADER_TABLE_COLUMNS + ["Reference Check"], req.final),
+    ])
+
+
+@app.post("/api/header-reference/analyze")
+def analyze_header_reference(
+    file: UploadFile = File(...),
+    rows: str = Form(...),
+):
+    """Parse the uploaded reference document and compare its archiving object ->
+    header table mappings against the header tables the app found."""
+    contents = file.file.read()
+    try:
+        header_rows = json.loads(rows)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON in 'rows' field.")
+    result = ref_doc_mod.analyze_header_reference(contents, file.filename or "document", header_rows)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@app.post("/api/header-reference/save")
+def save_header_reference_to_output(req: HeaderReferenceSaveRequest):
+    """Save the reference-reviewed header tables to the output folder."""
+    buf = _header_reference_workbook(req)
+    dest = OUTPUT_DIR / "header_tables_with_reference.xlsx"
+    dest.write_bytes(buf.getvalue())
+    return {"saved": True, "path": str(dest)}
+
+
+@app.post("/api/header-reference/export")
+def export_header_reference(req: HeaderReferenceSaveRequest):
+    """Download the reference-reviewed header tables as an Excel file."""
+    return StreamingResponse(
+        _header_reference_workbook(req),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=header_tables_with_reference.xlsx"},
     )
 
 

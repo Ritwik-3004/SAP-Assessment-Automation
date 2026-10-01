@@ -134,6 +134,18 @@ def _xpath_literal(text: str) -> str:
     return "concat(" + ", \"'\", ".join(f"'{p}'" for p in parts) + ")"
 
 
+def _describe(exc: Exception) -> str:
+    """A readable one-line reason for *exc*. Selenium's TimeoutException (and some others) stringify
+    to just "Message:", which tells the user nothing."""
+    text = str(exc).replace("Message:", " ").strip().splitlines()
+    first = text[0].strip() if text else ""
+    if first and first.lower() != "none":
+        return first[:200]
+    if isinstance(exc, TimeoutException):
+        return "timed out waiting for the page to load"
+    return type(exc).__name__
+
+
 class SapForMeSession:
     """One authenticated Selenium/Chrome session, meant to be opened once
     and reused across every table looked up during a single scoring run.
@@ -213,21 +225,41 @@ class SapForMeSession:
         """Find a housekeeping program for *table_name*. *settings* pins which AI model
         reads the articles (defaults to the model currently chosen in the app)."""
         settings = settings or llm.load_settings()
-        query = f"{table_name} housekeeping program"
+        articles, problem = self.fetch_articles(
+            f"{table_name} housekeeping program", table_name, settings, subject="this table"
+        )
+        if not articles:
+            return {"program": "", "rationale": problem}
+        return _extract_program(table_name, articles, settings)
+
+    def fetch_articles(
+        self,
+        query: str,
+        keyword: str,
+        settings: "llm.Settings | None" = None,
+        subject: str = "this search",
+    ) -> "tuple[list[tuple[str, str, str]], str]":
+        """Search SAP for Me for *query* and read the top few SAP Notes / Knowledge Base
+        Articles, trimming each to the passages around *keyword* (and to the AI model's
+        article-size budget). Returns (articles, problem): articles is a list of
+        (title, type, text); problem is "" on success, otherwise a user-readable reason
+        no articles could be read (*subject* names what was searched for)."""
+        settings = settings or llm.load_settings()
         try:
             results = self._search(query)
         except Exception as exc:
-            logger.warning("SAP for Me search failed for %s: %s", table_name, exc, exc_info=True)
-            return {"program": "", "rationale": f"SAP for Me search failed: {exc}"}
+            logger.warning("SAP for Me search failed for %r: %s", query, exc, exc_info=True)
+            return [], f"SAP for Me search failed: {_describe(exc)}"
 
         chosen = [r for r in results if r["type"] in WANTED_TYPES][:MAX_ARTICLES]
         if not chosen:
-            return {"program": "", "rationale": "No SAP Note or Knowledge Base Article found on SAP for Me for this table."}
+            return [], f"No SAP Note or Knowledge Base Article found on SAP for Me for {subject}."
 
+        max_chars = llm.budget(settings)["article_chars"]
         articles = []
         for result in chosen:
             try:
-                text = self._read_article(result["url"], table_name, llm.budget(settings)["article_chars"])
+                text = self._read_article(result["url"], keyword, max_chars)
             except Exception as exc:
                 logger.warning("Could not read SAP for Me article '%s': %s", result["title"], exc, exc_info=True)
                 continue
@@ -235,16 +267,17 @@ class SapForMeSession:
                 articles.append((result["title"], result["type"], text))
 
         if not articles:
-            return {"program": "", "rationale": "Found SAP for Me results but could not read their content."}
-
-        return _extract_program(table_name, articles, settings)
+            return [], "Found SAP for Me results but could not read their content."
+        return articles, ""
 
     def _search(self, query: str) -> list[dict]:
         payload = json.dumps({"q": query, "tab": "All"})
-        self._driver.get(f"{BASE_URL}/knowledge/search/{quote(payload)}")
+        self._driver.get(f"{BASE_URL}/knowledge/search/{quote(payload, safe="")}")
         WebDriverWait(self._driver, WAIT_SECONDS).until(
             lambda d: re.search(
-                r"Results \d+-\d+ of \d+|No results", d.find_element(By.TAG_NAME, "body").text, re.IGNORECASE
+                r"Results \d+-\d+ of \d+|No results|did not match|0 results|no matches",
+                d.find_element(By.TAG_NAME, "body").text,
+                re.IGNORECASE,
             )
         )
         raw_text = self._driver.find_element(By.TAG_NAME, "body").text

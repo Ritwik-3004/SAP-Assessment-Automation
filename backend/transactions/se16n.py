@@ -188,11 +188,13 @@ def _find_header_table(archiving_object: str) -> dict:
         session = sap.get_session()
         _open_arch_def_selection(session)
         rows = _query_arch_def(session, archiving_object)
-        header_table = _pick_header_table(rows)
+        found = classify_header_segments(rows)
         return {
             "status": "ok",
             "archiving_object": archiving_object.upper(),
-            "header_table": header_table,
+            "header_table": found["header_table"],
+            "candidates": found["candidates"],
+            "ambiguous": found["ambiguous"],
             "row_count": len(rows),
         }
     except Exception as exc:
@@ -209,9 +211,15 @@ def run_batch_find_header_tables(archiving_objects: list[str], on_progress=None)
     *on_progress*, if given, is called as on_progress(completed_count,
     archiving_object) after each object is processed.
 
-    Returns {"status": "ok", "rows": [{"Archiving Object", "Header Table"}],
-    "errors": [...]} -- a lookup failure for one object doesn't stop the
-    rest of the batch.
+    Returns {"status": "ok", "rows": [...], "errors": [...], "ambiguous": [...]}.
+    Each row is {"Archiving Object", "Header Table", "Source", "Confidence",
+    "Comments"}: an object with exactly one top-level (blank Parent Segment)
+    segment is resolved right here (Source "ARCH_DEF", Confidence "High"). Every
+    other object -- several or no top-level segments, no ARCH_DEF entries at all, or
+    a failed lookup -- gets a blank Header Table and an entry in "ambiguous":
+    {"archiving_object", "candidates" (may be empty), "segments", "reason"}, for
+    header_tables.resolve() to settle afterwards, outside the SAP session.
+    A lookup failure for one object doesn't stop the rest of the batch.
     """
     return sap.run(_run_batch_find_header_tables, archiving_objects, on_progress)
 
@@ -222,6 +230,7 @@ def _run_batch_find_header_tables(archiving_objects: list[str], on_progress=None
 
     rows = []
     errors = []
+    ambiguous = []
     completed = 0
 
     for obj in archiving_objects:
@@ -231,12 +240,22 @@ def _run_batch_find_header_tables(archiving_objects: list[str], on_progress=None
 
         try:
             result_rows = _query_arch_def(session, obj)
-            header_table = _pick_header_table(result_rows)
-            rows.append({"Archiving Object": obj.upper(), "Header Table": header_table or ""})
+            found = classify_header_segments(result_rows)
+            if found["header_table"]:
+                rows.append(_header_row(obj, found["header_table"], "ARCH_DEF", "High", ""))
+            else:
+                # Several/no top-level segments, or no ARCH_DEF entries at all: every object
+                # must end up with a header table, so hand it to header_tables.resolve().
+                rows.append(_header_row(obj, "", "", "", ""))
+                ambiguous.append(_unresolved(
+                    obj, found["candidates"], result_rows,
+                    "" if found["candidates"] else "ARCH_DEF has no entries for this object.",
+                ))
         except Exception as exc:
             logger.exception("ARCH_DEF header-table lookup failed for %s", obj)
             errors.append({"archiving_object": obj.upper(), "message": str(exc)})
-            rows.append({"Archiving Object": obj.upper(), "Header Table": ""})
+            rows.append(_header_row(obj, "", "", "", ""))
+            ambiguous.append(_unresolved(obj, [], [], f"ARCH_DEF lookup failed: {exc}"))
         finally:
             completed += 1
             if on_progress:
@@ -255,7 +274,41 @@ def _run_batch_find_header_tables(archiving_objects: list[str], on_progress=None
             # rather than fail the rest of the batch.
             _open_arch_def_selection(session)
 
-    return {"status": "ok", "rows": rows, "errors": errors}
+    return {"status": "ok", "rows": rows, "errors": errors, "ambiguous": ambiguous}
+
+
+def _header_row(archiving_object: str, header_table: str, source: str, confidence: str, comments: str) -> dict:
+    return {
+        "Archiving Object": archiving_object.strip().upper(),
+        "Header Table": header_table,
+        "Source": source,
+        "Confidence": confidence,
+        "Comments": comments,
+    }
+
+
+def _unresolved(archiving_object: str, candidates: list[str], rows: list[dict], reason: str) -> dict:
+    """An object ARCH_DEF couldn't settle on its own. *candidates* may be empty (no ARCH_DEF
+    entries / lookup failed), in which case header_tables.resolve() finds the table from
+    the DVM Guide, SAP for Me and the AI model alone."""
+    return {
+        "archiving_object": archiving_object.strip().upper(),
+        "candidates": candidates,
+        "segments": _segment_summary(rows),
+        "reason": reason,
+    }
+
+
+def _segment_summary(rows: list[dict]) -> list[dict]:
+    """The ARCH_DEF fields worth showing to an LLM/reviewer, in grid order."""
+    return [
+        {
+            "Segment": (r.get("Segment") or "").strip(),
+            "Parent Segment": (r.get("Parent Segment") or "").strip(),
+            "Structure": (r.get("Structure") or "").strip(),
+        }
+        for r in rows
+    ]
 
 
 def _open_arch_def_selection(session):
@@ -307,21 +360,32 @@ def _set_object_filter(session, archiving_object: str):
     )
 
 
-def _pick_header_table(rows: list[dict]) -> "str | None":
-    """The header table is the segment whose Parent Segment (FATHER) is
-    blank. ARCH_DEF should have exactly one such row per archiving object;
-    if it ever has more than one, the first is used and a warning logged
-    rather than silently picking one with no trace of the ambiguity."""
-    blank_father_rows = [r for r in rows if not (r.get("Parent Segment") or "").strip()]
-    if not blank_father_rows:
-        return None
-    if len(blank_father_rows) > 1:
-        logger.warning(
-            "ARCH_DEF returned %d rows with a blank Parent Segment (expected "
-            "exactly one header table) -- using the first: %s",
-            len(blank_father_rows), blank_father_rows,
-        )
-    return blank_father_rows[0].get("Segment") or None
+def classify_header_segments(rows: list[dict]) -> dict:
+    """Decide the header table from an object's ARCH_DEF segment rows.
+
+    The header table is the segment whose Parent Segment (FATHER) is blank.
+    Returns {"header_table": str | None, "candidates": [str], "ambiguous": bool}:
+      * exactly one distinct top-level segment -> that is the header table;
+      * several top-level segments -> ambiguous, candidates = those segments;
+      * none (every segment names a parent) -> ambiguous, candidates = all segments;
+      * no rows at all -> not ambiguous, no header table (object unknown to ARCH_DEF).
+    Nothing is guessed here -- ambiguous objects are settled by header_tables.resolve().
+    """
+    def names(rs: list[dict]) -> list[str]:
+        seen: list[str] = []
+        for r in rs:
+            n = (r.get("Segment") or "").strip().upper()
+            if n and n not in seen:
+                seen.append(n)
+        return seen
+
+    top_level = names([r for r in rows if not (r.get("Parent Segment") or "").strip()])
+    if len(top_level) == 1:
+        return {"header_table": top_level[0], "candidates": top_level, "ambiguous": False}
+    if len(top_level) > 1:
+        return {"header_table": None, "candidates": top_level, "ambiguous": True}
+    every = names(rows)
+    return {"header_table": None, "candidates": every, "ambiguous": bool(every)}
 
 
 def _read_arch_def_grid(session, retries: int = 3, retry_wait: float = 0.4) -> list[dict]:

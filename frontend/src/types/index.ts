@@ -111,3 +111,23 @@ export interface LlmTestResult {
   reply?: string;
   seconds?: number;
 }
+
+/** What the generic reference-document review panel works with (see ReferenceReviewPanel). */
+export interface ReferenceReview {
+  filename: string;
+  annotated: Record<string, string>[];
+  matches: Record<string, string>[];
+  mismatches: Record<string, string>[];
+  not_in_ref: Record<string, string>[];
+}
+
+export interface HeaderReferenceResult {
+  status: "ok" | "error";
+  message?: string;
+  filename: string;
+  ref_mappings: Record<string, string>;
+  annotated_rows: Record<string, string>[];
+  matches: Record<string, string>[];
+  mismatches: Record<string, string>[];
+  not_in_ref: Record<string, string>[];
+}

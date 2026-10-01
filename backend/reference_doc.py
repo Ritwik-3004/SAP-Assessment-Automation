@@ -213,3 +213,118 @@ def analyze_reference_doc(
         "mismatches": mismatches,
         "not_in_ref": not_in_ref,
     }
+
+
+# ---------------------------------------------------------------------------
+# Header tables: reference document maps ARCHIVING OBJECT -> HEADER TABLE
+# ---------------------------------------------------------------------------
+
+def _parse_mapping_json(raw: str) -> dict[str, str]:
+    """Parse the model's {"KEY": "VALUE"} answer (tolerating ``` fences); {} if unusable."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        raw = raw[4:].strip() if raw.lower().startswith("json") else raw.strip()
+    try:
+        data = json.loads(raw)
+        return {str(k).strip().upper(): str(v).strip().upper() for k, v in data.items() if str(v).strip()}
+    except Exception:
+        logger.warning("Could not parse header-table mapping response: %.200s", raw)
+        return {}
+
+
+def _extract_header_mappings_via_llm(text: str, object_names: list[str]) -> dict[str, str]:
+    """Ask the active AI model for archiving object → header table pairs in *text*.
+    Returns {ARCHIVING_OBJECT: HEADER_TABLE} (both uppercased). Raises llm.LLMError."""
+    settings = llm.load_settings()
+    char_limit = llm.budget(settings)["reference_chars"]
+    objects_hint = ", ".join(object_names[:60])
+
+    prompt = f"""You are analysing a reference document from an SAP archiving assessment project.
+The document contains past experience mapping SAP ARCHIVING OBJECTS to their HEADER TABLE
+(the main/root table of the archiving object, e.g. EKKO for MM_EKKO, BKPF for FI_DOCUMNT).
+
+Extract every explicit mapping of an archiving object to its header table you can find.
+Return ONLY a JSON object like:
+{{"MM_EKKO": "EKKO", "FI_DOCUMNT": "BKPF", "SD_VBAK": "VBAK"}}
+
+We are particularly interested in these archiving objects (but extract any you find):
+{objects_hint}
+
+Rules:
+- Use exact SAP uppercase naming.
+- Only include mappings explicitly stated in the document - never guess.
+- Give ONE header table per archiving object; if several are mentioned, use the one the
+  document calls the header (or the most recently mentioned).
+- Return ONLY the JSON object, no extra text.
+
+Document:
+{text[:char_limit]}
+"""
+    raw = llm.text("", prompt, max_tokens=2000, settings=settings)
+    return _parse_mapping_json(raw)
+
+
+def analyze_header_reference(contents: bytes, filename: str, rows: list[dict]) -> dict:
+    """
+    Compare the app's header-table *rows* ({"Archiving Object", "Header Table", ...}) with an
+    uploaded SME reference document (Excel, PDF or PowerPoint).
+
+    Same result shape as analyze_reference_doc(), keyed on Archiving Object / Header Table:
+    each annotated row gets "Reference Check" and "Ref Doc Header Table" (the app's own
+    "Comments" column is left alone). A blank current Header Table with a reference value
+    counts as a mismatch, so the reference document can fill it in.
+
+    {"status": "ok", "filename", "ref_mappings", "annotated_rows", "matches", "mismatches",
+     "not_in_ref"}  -- or {"status": "error", "message"}.
+    """
+    try:
+        text = _extract_text(contents, filename)
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+    except Exception as exc:
+        return {"status": "error", "message": f"Could not read file: {exc}"}
+
+    if not text.strip():
+        return {"status": "error", "message": "Could not extract any text from the document."}
+
+    object_names = [r.get("Archiving Object", "").upper() for r in rows if r.get("Archiving Object")]
+    try:
+        ref_mappings = _extract_header_mappings_via_llm(text, object_names)
+    except llm.LLMError as exc:
+        return {"status": "error", "message": str(exc)}
+
+    matches: list[dict] = []
+    mismatches: list[dict] = []
+    not_in_ref: list[dict] = []
+    annotated: list[dict] = []
+
+    for row in rows:
+        obj = row.get("Archiving Object", "").upper()
+        current = row.get("Header Table", "").upper()
+        out = dict(row)
+
+        ref = ref_mappings.get(obj)
+        if ref is None:
+            out["Reference Check"] = ""
+            out["Ref Doc Header Table"] = ""
+            not_in_ref.append(out)
+        elif ref == current:
+            out["Reference Check"] = "Matches reference document"
+            out["Ref Doc Header Table"] = ""
+            matches.append(out)
+        else:
+            out["Reference Check"] = f"Reference document suggests: {ref}"
+            out["Ref Doc Header Table"] = ref
+            mismatches.append(out)
+        annotated.append(out)
+
+    return {
+        "status": "ok",
+        "filename": filename,
+        "ref_mappings": ref_mappings,
+        "annotated_rows": annotated,
+        "matches": matches,
+        "mismatches": mismatches,
+        "not_in_ref": not_in_ref,
+    }

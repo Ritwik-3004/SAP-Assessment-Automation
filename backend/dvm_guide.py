@@ -123,3 +123,32 @@ def load_index() -> dict[str, str]:
 
 def get_reference(table_name: str) -> "str | None":
     return load_index().get(table_name.upper())
+
+
+def sections_naming(object_name: str, limit: int = 3, window: int = 600) -> list[dict]:
+    """Guide sections whose text mentions the archiving object *object_name*, as
+    [{"tables": [...], "excerpt": str}] -- each excerpt is a window around the first mention.
+
+    The guide is organised by table, not by archiving object, so this is a lossy reverse
+    lookup (many hits are side tables that merely reference the object); callers should
+    treat it as supporting evidence only. Tables that share one section appear together.
+    Sections that explicitly say "archiving object X" are listed first."""
+    name = (object_name or "").strip().upper()
+    if not name:
+        return []
+    token = re.compile(r"(?<![A-Z0-9_])" + re.escape(name) + r"(?![A-Z0-9_])", re.IGNORECASE)
+    explicit = re.compile(r"archiving object[s]?\s+" + re.escape(name) + r"(?![A-Z0-9_])", re.IGNORECASE)
+
+    by_text: dict[str, list[str]] = {}
+    for table, text in load_index().items():
+        by_text.setdefault(text, []).append(table)
+
+    hits = []
+    for text, tables in by_text.items():
+        m = token.search(text)
+        if not m:
+            continue
+        start, end = max(0, m.start() - window), min(len(text), m.end() + window)
+        hits.append((0 if explicit.search(text) else 1, {"tables": sorted(tables), "excerpt": text[start:end]}))
+    hits.sort(key=lambda h: h[0])
+    return [h[1] for h in hits[:limit]]

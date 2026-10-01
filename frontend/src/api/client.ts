@@ -196,6 +196,37 @@ export const api = {
     return res.blob();
   },
 
+  analyzeHeaderReference: async (file: File, rows: Record<string, string>[]) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("rows", JSON.stringify(rows));
+    const res = await fetch(`${BASE}/api/header-reference/analyze`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.json() as Promise<import("../types").HeaderReferenceResult>;
+  },
+
+  saveHeaderReference: (rows: Record<string, string>[], final: Record<string, string>[]) =>
+    post<{ saved: boolean; path: string }>("/api/header-reference/save", { rows, final }),
+
+  exportHeaderReference: async (rows: Record<string, string>[], final: Record<string, string>[]) => {
+    const res = await fetch(`${BASE}/api/header-reference/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows, final }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.blob();
+  },
+
   getInputFiles: () => get<{ files: string[] }>("/api/files/input"),
 
   db15BatchFromInput: (filename: string) =>
