@@ -2,25 +2,34 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:          #f5f6fa;
+  /* Deloitte Green. --primary is a FILL colour (buttons, bars, active markers); white text on it
+     fails contrast, so text on it is --primary-text (black) and green used AS text is --accent-text. */
+  --bg:          #f5f5f5;
   --surface:     #ffffff;
-  --border:      #dde1ea;
-  --text:        #1a1d26;
-  --text-muted:  #6b7280;
-  --primary:     #0066cc;
-  --primary-dk:  #0052a3;
-  --danger:      #dc2626;
-  --danger-dk:   #b91c1c;
-  --success:     #16a34a;
-  --tab-bg:      #eef1f8;
+  --border:      #e6e6e6;
+  --text:        #282728;
+  --text-muted:  #555555;
+  --primary:     #86bc25;
+  --primary-dk:  #75a521;
+  --primary-text:#000000;
+  --accent-text: #4c7a09;
+  --primary-tint:        #f0f7e0;
+  --primary-tint-border: #cfe3a4;
+  --neon:        #86eb22;
+  --blue:        #00a3e0;
+  --danger:      #da291c;
+  --danger-dk:   #b71f14;
+  --success:     #4c7a09;
+  --tab-bg:      #efefef;
   --tab-active:  #ffffff;
-  --header-bg:   #0f1c3f;
-  --header-text: #e8eaf2;
+  --row-hover:   #f7f7f7;
+  --header-bg:   #282728;
+  --header-text: #e6e6e6;
   --shadow:      0 1px 4px rgba(0,0,0,.08);
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "Open Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
   color: var(--text);
   background: var(--bg);
@@ -34,7 +43,8 @@ body {
   background: var(--header-bg);
   color: var(--header-text);
   padding: 0 24px;
-  height: 54px;
+  height: 58px;
+  border-top: 4px solid var(--primary);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -42,7 +52,7 @@ body {
 }
 
 .header-brand { display: flex; align-items: center; gap: 10px; }
-.header-logo  { font-size: 22px; color: #4a9eff; }
+.header-logo  { font-size: 22px; color: var(--neon); }
 .header-title { font-size: 16px; font-weight: 600; letter-spacing: .3px; }
 
 .status-badge {
@@ -51,9 +61,9 @@ body {
   border-radius: 20px;
   font-weight: 500;
 }
-.status-badge.connected    { background: #16a34a22; color: #4ade80; border: 1px solid #16a34a55; }
-.status-badge.disconnected { background: #dc262622; color: #f87171; border: 1px solid #dc262655; }
-.status-badge.model-badge  { background: #4a9eff22; color: #4a9eff; border: 1px solid #4a9eff55; margin-right: 8px; }
+.status-badge.connected    { background: #86eb2224; color: var(--neon); border: 1px solid #86eb2255; }
+.status-badge.disconnected { background: #da291c26; color: #ff8a80; border: 1px solid #da291c66; }
+.status-badge.model-badge  { background: #3fc3ec22; color: #3fc3ec; border: 1px solid #3fc3ec55; margin-right: 8px; }
 
 .app-main {
   display: flex;
@@ -95,7 +105,7 @@ body {
 .conn-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
-  background: var(--success);
+  background: var(--primary);
   flex-shrink: 0;
 }
 
@@ -174,9 +184,9 @@ body {
 
 .nav-item:hover  { background: var(--tab-bg); }
 .nav-item.active {
-  background: #e8f0ff;
+  background: var(--primary-tint);
   border-left-color: var(--primary);
-  color: var(--primary);
+  color: var(--accent-text);
   font-weight: 500;
 }
 
@@ -190,7 +200,21 @@ body {
 /* ── Welcome screen ───────────────────────────────────────── */
 .welcome {
   max-width: 560px;
+  position: relative;
 }
+.welcome::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  right: 0;
+  width: 190px;
+  height: 190px;
+  border-radius: 50%;
+  background: repeating-radial-gradient(circle at center, transparent 0 22px, rgba(134, 188, 37, .35) 22px 23px);
+  opacity: .5;
+  pointer-events: none;
+}
+.welcome > * { position: relative; }
 .welcome h1 {
   font-size: 22px;
   font-weight: 700;
@@ -245,7 +269,7 @@ body {
 }
 
 .tx-error {
-  color: var(--danger);
+  color: var(--danger-dk);
   font-size: 13px;
   background: #fef2f2;
   border: 1px solid #fecaca;
@@ -267,7 +291,7 @@ body {
 
 .btn:disabled { opacity: .55; cursor: not-allowed; }
 
-.btn-primary  { background: var(--primary);  color: #fff; }
+.btn-primary  { background: var(--primary);  color: var(--primary-text); }
 .btn-primary:hover:not(:disabled)  { background: var(--primary-dk); }
 
 .btn-danger   { background: var(--danger);   color: #fff; }
@@ -324,7 +348,7 @@ body {
   line-height: 1;
   transition: color .15s;
 }
-.btn-refresh:hover:not(:disabled) { color: var(--primary); }
+.btn-refresh:hover:not(:disabled) { color: var(--accent-text); }
 .btn-refresh:disabled { opacity: .4; cursor: not-allowed; }
 
 /* Radio list */
@@ -349,8 +373,8 @@ body {
 }
 .file-radio-item:hover { background: var(--tab-bg); }
 .file-radio-item.selected {
-  background: #e8f0ff;
-  border-color: #c7d8f8;
+  background: var(--primary-tint);
+  border-color: var(--primary-tint-border);
 }
 .file-radio-item input[type="radio"] {
   accent-color: var(--primary);
@@ -361,7 +385,7 @@ body {
   color: var(--text);
 }
 .file-radio-item.selected .file-radio-name {
-  color: var(--primary);
+  color: var(--accent-text);
   font-weight: 500;
 }
 
@@ -409,7 +433,7 @@ body {
 }
 .btn-clear-upload:hover {
   border-color: var(--primary);
-  color: var(--primary);
+  color: var(--accent-text);
 }
 
 /* ── AI model panel ───────────────────────────────────────── */
@@ -432,8 +456,8 @@ body {
 .saved-notice {
   font-size: 12px;
   color: var(--success);
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
+  background: var(--primary-tint);
+  border: 1px solid var(--primary-tint-border);
   border-radius: 6px;
   padding: 8px 12px;
 }
@@ -487,7 +511,7 @@ body {
 }
 
 .results-table tbody tr:last-child td { border-bottom: none; }
-.results-table tbody tr:hover { background: #f9fafb; }
+.results-table tbody tr:hover { background: var(--row-hover); }
 
 .table-footer {
   display: flex;
@@ -601,14 +625,14 @@ body {
   border-radius: 16px;
   padding: 5px 12px;
   font-size: 12px;
-  color: var(--primary);
+  color: var(--accent-text);
   cursor: pointer;
   transition: border-color .12s, background .12s;
 }
 
 .chat-suggestion:hover:not(:disabled) {
   border-color: var(--primary);
-  background: #e8f0fb;
+  background: var(--primary-tint);
 }
 
 .chat-message { display: flex; }
@@ -627,7 +651,7 @@ body {
 
 .chat-message.user .chat-bubble {
   background: var(--primary);
-  color: #fff;
+  color: var(--primary-text);
   border-bottom-right-radius: 3px;
 }
 
@@ -747,7 +771,7 @@ body {
   align-items: flex-start;
   gap: 12px;
   padding: 14px 18px;
-  background: #f0f4ff;
+  background: var(--primary-tint);
   border-bottom: 1px solid var(--border);
 }
 
@@ -826,9 +850,9 @@ body {
   font-weight: 500;
 }
 
-.ref-doc-badge-match   { background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
-.ref-doc-badge-mismatch { background: #fef9c3; color: #854d0e; border: 1px solid #fde047; }
-.ref-doc-badge-unknown { background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db; }
+.ref-doc-badge-match   { background: #e6f2cc; color: #3a5a06; border: 1px solid #c5de8f; }
+.ref-doc-badge-mismatch { background: #fdf0cf; color: #7a5200; border: 1px solid #f0d58a; }
+.ref-doc-badge-unknown { background: #f1f1f1; color: #555555; border: 1px solid #dcdcdc; }
 
 .ref-doc-filename {
   font-size: 12px;
@@ -857,14 +881,14 @@ body {
 .btn-link {
   background: none;
   border: none;
-  color: var(--primary);
+  color: var(--accent-text);
   font-size: 12px;
   cursor: pointer;
   padding: 0;
   text-decoration: underline;
 }
 
-.btn-link:hover { color: var(--primary-dk); }
+.btn-link:hover { color: #3a5e07; }
 
 .ref-doc-collapsible {
   padding: 10px 18px;
@@ -882,13 +906,13 @@ body {
 
 .ref-doc-collapsible summary:hover { color: var(--text); }
 
-.ref-doc-row-match    { background: #f0fdf4; }
+.ref-doc-row-match    { background: #f6faea; }
 .ref-doc-row-mismatch { background: #fffbeb; }
-.ref-doc-row-selected { background: #eff6ff; }
+.ref-doc-row-selected { background: var(--primary-tint); }
 
 .ref-doc-row-mismatch:hover,
 .ref-doc-row-selected:hover { filter: brightness(0.97); }
 
-.ref-doc-ref-obj { color: #854d0e; font-weight: 500; }
+.ref-doc-ref-obj { color: #7a5200; font-weight: 500; }
 
 .ref-doc-comment { color: var(--text-muted); font-size: 12px; max-width: 260px; }
