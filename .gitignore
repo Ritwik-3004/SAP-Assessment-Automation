@@ -56,6 +56,8 @@ backend/resources/dvm_guide_index.json
 
 sap_credentials.json
 sap_for_me_credentials.json
+llm_settings.json
+llm_usage.json
 
 input
 output

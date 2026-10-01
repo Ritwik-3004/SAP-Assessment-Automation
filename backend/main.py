@@ -28,6 +28,7 @@ from progress import ProgressTracker
 from config import INPUT_DIR, OUTPUT_DIR, CREDENTIALS_FILE, SAP_FOR_ME_CREDENTIALS_FILE
 import scoring
 import grouping
+import llm
 import reference_doc as ref_doc_mod
 import transactions.taana as taana
 import transactions.db15 as db15
@@ -207,6 +208,11 @@ class SapForMeCredentialsRequest(BaseModel):
     password: str
 
 
+class LlmSettingsRequest(BaseModel):
+    provider: str
+    model: str = ""
+
+
 # ---------------------------------------------------------------------------
 # SAP session endpoints
 # ---------------------------------------------------------------------------
@@ -302,6 +308,41 @@ def load_sap_for_me_credentials():
         return json.loads(SAP_FOR_ME_CREDENTIALS_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# AI model selection (Claude or Groq) -- applies to every AI step in the app
+# ---------------------------------------------------------------------------
+
+@app.get("/api/llm/settings")
+def get_llm_settings():
+    """Active AI provider/model plus the options the UI can offer. API keys are never
+    returned, only whether each is set in backend/.env."""
+    return llm.public_settings()
+
+
+@app.post("/api/llm/settings")
+def save_llm_settings(req: LlmSettingsRequest):
+    """Choose the AI model used by scoring, housekeeping lookups, SAP for Me
+    extraction, reference-document analysis and chat. API keys are not accepted
+    here: they come from backend/.env."""
+    try:
+        llm.save_settings(req.provider, req.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return llm.public_settings()
+
+
+@app.get("/api/llm/usage")
+def get_llm_usage():
+    """Today's request/token count for the active model (and Groq's free-tier limits)."""
+    return llm.usage()
+
+
+@app.post("/api/llm/test")
+def test_llm():
+    """Make one tiny call to check the saved key/model work."""
+    return llm.test_connection()
 
 
 # ---------------------------------------------------------------------------

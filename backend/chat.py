@@ -13,9 +13,7 @@ import logging
 from copy import deepcopy
 from typing import Any
 
-import anthropic
-
-from config import ANTHROPIC_API_KEY, SCORING_MODEL
+import llm
 from sap_connector import sap
 import transactions.db15 as db15
 import transactions.aobj as aobj
@@ -204,7 +202,7 @@ Rules:
 # Context builder
 # ---------------------------------------------------------------------------
 
-def _build_context(scored_rows: list[dict]) -> tuple[str, int]:
+def _build_context(scored_rows: list[dict], max_tables: int = 60) -> tuple[str, int]:
     by_table: dict[str, list[dict]] = {}
     for row in scored_rows:
         tbl = (row.get("Table Name") or "").strip().upper()
@@ -212,7 +210,7 @@ def _build_context(scored_rows: list[dict]) -> tuple[str, int]:
             by_table.setdefault(tbl, []).append(row)
 
     lines = []
-    for tbl, rows in list(by_table.items())[:60]:
+    for tbl, rows in list(by_table.items())[:max_tables]:
         try:
             best = max(rows, key=lambda r: float(r.get("Score") or 0))
         except (TypeError, ValueError):
@@ -232,8 +230,8 @@ def _build_context(scored_rows: list[dict]) -> tuple[str, int]:
             line += f" note={rationale!r}"
         lines.append(line)
 
-    if len(by_table) > 60:
-        lines.append(f"... and {len(by_table) - 60} more tables (ask about specific ones)")
+    if len(by_table) > max_tables:
+        lines.append(f"... and {len(by_table) - max_tables} more tables (ask about specific ones)")
 
     return ("\n".join(lines) if lines else "(no scored results)"), len(by_table)
 
@@ -541,110 +539,83 @@ def run_chat(
             "updated_recommended": list | None,  # present when rows were modified
         }
     """
-    if not ANTHROPIC_API_KEY:
+    settings = llm.load_settings()
+    problem = llm.not_configured_message(settings)
+    if problem:
         return {
-            "reply": (
-                "ANTHROPIC_API_KEY is not configured. "
-                "Add it to backend/.env to enable the chat assistant."
-            ),
+            "reply": f"The chat assistant can't run yet. {problem}",
             "updated_rows": None,
             "updated_recommended": None,
         }
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    limits = llm.budget(settings)
 
     # Work on a deep copy so the caller's data is never mutated here
     current_rows: list[dict] = deepcopy(scored_rows)
     was_modified = False
 
-    context_text, table_count = _build_context(current_rows)
+    context_text, table_count = _build_context(current_rows, limits["chat_context_tables"])
     system = _SYSTEM.format(context=context_text, table_count=table_count)
 
     messages: list[dict[str, Any]] = []
-    for h in history:
+    for h in history[-limits["chat_history_messages"]:]:
         if h.get("role") in ("user", "assistant") and h.get("content"):
             messages.append({"role": h["role"], "content": str(h["content"])})
     messages.append({"role": "user", "content": message})
 
-    for _ in range(8):
-        response = client.messages.create(
-            model=SCORING_MODEL,
-            max_tokens=1500,
-            system=system,
-            messages=messages,
-            tools=_TOOLS,
+    def execute_tool(name: str, inp: dict) -> str:
+        nonlocal was_modified
+
+        if name == "lookup_archiving_objects":
+            return _exec_lookup((inp.get("table_name") or "").strip().upper())
+
+        if name == "check_archiving_object":
+            return _exec_check_archiving_object(inp.get("object_filter") or "")
+
+        if name == "browse_table_contents":
+            return _exec_browse_table(
+                (inp.get("table_name") or "").strip().upper(),
+                int(inp.get("max_rows") or 50),
+                inp.get("where_clause") or None,
+            )
+
+        if name == "get_table_definition":
+            return _exec_get_table_definition((inp.get("table_name") or "").strip().upper())
+
+        if name == "analyze_table":
+            return _exec_analyze_table(
+                (inp.get("table_name") or "").strip().upper(), int(inp.get("max_rows") or 100)
+            )
+
+        if name == "get_archiving_sessions":
+            return _exec_get_archiving_sessions((inp.get("archiving_object") or "").strip().upper())
+
+        if name == "update_table_result":
+            result_text, changed = _exec_update(
+                current_rows,
+                (inp.get("table_name") or "").strip().upper(),
+                inp.get("archiving_object"),
+                inp.get("score"),
+                inp.get("rationale"),
+            )
+            if changed:
+                was_modified = True
+            return result_text
+
+        return f"Unknown tool: {name}"
+
+    try:
+        reply = llm.run_tool_loop(
+            system, messages, _TOOLS, execute_tool,
+            max_rounds=limits["chat_max_rounds"], settings=settings,
         )
+    except llm.LLMError as exc:
+        reply = str(exc)
 
-        if response.stop_reason != "tool_use":
-            text = "".join(
-                b.text for b in response.content if hasattr(b, "text")
-            ).strip()
-            updated_recommended = _recompute_recommended(current_rows) if was_modified else None
-            return {
-                "reply": text or "(no response)",
-                "updated_rows": current_rows if was_modified else None,
-                "updated_recommended": updated_recommended,
-            }
-
-        tool_results = []
-        assistant_content = list(response.content)
-        for block in assistant_content:
-            if block.type != "tool_use":
-                continue
-
-            logger.info("Chat tool call: %s(%s)", block.name, block.input)
-            inp = block.input
-
-            if block.name == "lookup_archiving_objects":
-                table = (inp.get("table_name") or "").strip().upper()
-                result_text = _exec_lookup(table)
-
-            elif block.name == "check_archiving_object":
-                obj_filter = inp.get("object_filter") or ""
-                result_text = _exec_check_archiving_object(obj_filter)
-
-            elif block.name == "browse_table_contents":
-                table = (inp.get("table_name") or "").strip().upper()
-                max_r = int(inp.get("max_rows") or 50)
-                where = inp.get("where_clause") or None
-                result_text = _exec_browse_table(table, max_r, where)
-
-            elif block.name == "get_table_definition":
-                table = (inp.get("table_name") or "").strip().upper()
-                result_text = _exec_get_table_definition(table)
-
-            elif block.name == "analyze_table":
-                table = (inp.get("table_name") or "").strip().upper()
-                max_r = int(inp.get("max_rows") or 100)
-                result_text = _exec_analyze_table(table, max_r)
-
-            elif block.name == "get_archiving_sessions":
-                obj = (inp.get("archiving_object") or "").strip().upper()
-                result_text = _exec_get_archiving_sessions(obj)
-
-            elif block.name == "update_table_result":
-                table = (inp.get("table_name") or "").strip().upper()
-                obj = inp.get("archiving_object")
-                sc = inp.get("score")
-                rat = inp.get("rationale")
-                result_text, changed = _exec_update(current_rows, table, obj, sc, rat)
-                if changed:
-                    was_modified = True
-
-            else:
-                result_text = f"Unknown tool: {block.name}"
-
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": result_text,
-            })
-
-        messages.append({"role": "assistant", "content": assistant_content})
-        messages.append({"role": "user", "content": tool_results})
+    if reply is None:
+        reply = "Too many tool calls without finishing. Please try rephrasing."
 
     return {
-        "reply": "Too many tool calls without finishing. Please try rephrasing.",
+        "reply": reply or "(no response)",
         "updated_rows": current_rows if was_modified else None,
         "updated_recommended": _recompute_recommended(current_rows) if was_modified else None,
     }

@@ -76,3 +76,38 @@ export interface ReferenceDocResult {
   mismatches: Record<string, string>[];
   not_in_ref: Record<string, string>[];
 }
+
+export interface LlmLimits {
+  rpm: number;
+  tpm: number;
+  rpd: number;
+  tpd: number;
+}
+
+export interface LlmSettings {
+  provider: "anthropic" | "groq";
+  model: string;
+  label: string;
+  claude_model: string;
+  claude_key_configured: boolean;
+  groq_key_configured: boolean;
+  groq_models: { id: string; label: string }[];
+  groq_limits: LlmLimits;
+}
+
+export interface LlmUsage {
+  provider: "anthropic" | "groq";
+  model: string;
+  date: string;
+  requests: number;
+  tokens: number;
+  limits: LlmLimits | null;
+}
+
+export interface LlmTestResult {
+  ok: boolean;
+  label: string;
+  message?: string;
+  reply?: string;
+  seconds?: number;
+}

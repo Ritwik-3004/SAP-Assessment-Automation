@@ -1,6 +1,7 @@
 """
-Score archiving objects for relevance per table, using the Claude API, and
-derive a recommended (highest-scoring) object per table.
+Score archiving objects for relevance per table, using the AI model selected in
+the app (Claude or Groq, see llm.py), and derive a recommended (highest-scoring)
+object per table.
 
 Takes the output of db15.run_batch() -- rows shaped
 {"Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
@@ -28,16 +29,13 @@ import logging
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import anthropic
 from pydantic import BaseModel, Field
 
 import dvm_guide
 import housekeeping
-from config import ANTHROPIC_API_KEY, SCORING_MODEL
+import llm
 
 logger = logging.getLogger(__name__)
-
-MAX_WORKERS = 8
 
 SYSTEM_PROMPT = (
     "You are an SAP data archiving expert helping decide which SAP archiving "
@@ -76,7 +74,13 @@ class ScoringResponse(BaseModel):
 def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
     """
     Score every (table, archiving object) row for relevance, and derive the
-    recommended (highest-scoring) object per table.
+    recommended (highest-scoring) object per table, using the AI model currently
+    chosen in the app (Claude or Groq, see llm.py). The model is read once here,
+    so switching it mid-run can't mix two models in one result set.
+
+    While a Groq rate-limit wait is in progress, *on_progress* also receives a
+    "Waiting for the Groq rate limit…" message. A limit/auth error stops the run
+    with {"status": "error", "message": ...} instead of leaving blank scores.
 
     *on_progress*, if given, is called as on_progress(completed_count,
     table_name) once per distinct table as its scoring resolves (including
@@ -91,12 +95,29 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
     a housekeeping program still gets a row, with both columns blank and a
     Rationale explaining nothing was found.
     """
-    if not ANTHROPIC_API_KEY:
-        return {
-            "status": "error",
-            "message": "ANTHROPIC_API_KEY is not set. Add it to backend/.env and restart the backend.",
-        }
+    settings = llm.load_settings()
+    problem = llm.not_configured_message(settings)
+    if problem:
+        return {"status": "error", "message": problem}
 
+    # Progress callback shared by scoring, the housekeeping stage and Groq rate-limit
+    # waits; "state" remembers the latest completed-count so wait messages don't
+    # move the progress bar.
+    state = {"completed": 0}
+
+    def report(completed: int, message: str) -> None:
+        state["completed"] = completed
+        if on_progress:
+            on_progress(completed, message)
+
+    llm.set_wait_hook(lambda msg: report(state["completed"], msg))
+    try:
+        return _score(rows, report, settings)
+    finally:
+        llm.set_wait_hook(None)
+
+
+def _score(rows: list[dict], on_progress, settings: "llm.Settings") -> dict:
     tables: "OrderedDict[str, dict]" = OrderedDict()
     for row in rows:
         table_name = row.get("Table Name", "")
@@ -115,18 +136,11 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
                 {"object": obj, "description": row.get("Object Description", "")}
             )
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
     try:
-        scores_by_table = _score_all_tables(client, tables, on_progress)
-    except (
-        anthropic.AuthenticationError,
-        anthropic.RateLimitError,
-        anthropic.APIStatusError,
-        anthropic.APIConnectionError,
-    ) as exc:
-        logger.exception("Scoring failed")
-        return {"status": "error", "message": str(exc)}
+        scores_by_table = _score_all_tables(settings, tables, on_progress)
+    except llm.LLMError as exc:
+        logger.warning("Scoring stopped: %s", exc)
+        return {"status": "error", "message": f"Scoring stopped: {exc}"}
 
     zero_candidate_tables = [name for name, entry in tables.items() if not entry["candidates"]]
     housekeeping_by_table: dict[str, dict] = {}
@@ -140,7 +154,7 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
         try:
             hk_progress = (lambda msg: on_progress(len(tables), msg)) if on_progress else None
             housekeeping_by_table = housekeeping.find_housekeeping_programs(
-                zero_candidate_tables, on_progress=hk_progress
+                zero_candidate_tables, on_progress=hk_progress, settings=settings
             )
         except Exception as exc:
             logger.warning("Housekeeping-program lookup failed: %s", exc, exc_info=True)
@@ -214,11 +228,15 @@ def score_archiving_objects(rows: list[dict], on_progress=None) -> dict:
 
 
 def _score_all_tables(
-    client: anthropic.Anthropic, tables: "OrderedDict[str, dict]", on_progress=None
+    settings: "llm.Settings", tables: "OrderedDict[str, dict]", on_progress=None
 ) -> dict:
     """Returns {table_name: {archiving_object: {"score": int, "rationale": str}}}.
     Reports progress once per distinct table in *tables* (zero-candidate
-    tables included), so completed count always reaches len(tables)."""
+    tables included), so completed count always reaches len(tables).
+
+    Raises llm.LLMError if the model can't be used at all (bad/missing key, a rate
+    limit that won't clear, a daily limit) -- carrying on would only fill the
+    results with blank "Scoring failed" rows."""
     results: dict[str, dict] = {}
     completed = 0
 
@@ -253,15 +271,19 @@ def _score_all_tables(
     if not multi_candidate_tables:
         return results
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+    with ThreadPoolExecutor(max_workers=llm.max_workers(settings)) as pool:
         future_to_table = {
-            pool.submit(_score_one_table, client, table_name, tables[table_name]): table_name
+            pool.submit(_score_one_table, settings, table_name, tables[table_name]): table_name
             for table_name in multi_candidate_tables
         }
         for future in as_completed(future_to_table):
             table_name = future_to_table[future]
             try:
                 results[table_name] = future.result()
+            except (llm.LLMAuthError, llm.LLMNotConfiguredError, llm.LLMRateLimitError):
+                for pending in future_to_table:
+                    pending.cancel()
+                raise
             except Exception as exc:
                 logger.warning("Scoring failed for table %s: %s", table_name, exc, exc_info=True)
                 results[table_name] = {
@@ -273,7 +295,7 @@ def _score_all_tables(
     return results
 
 
-def _score_one_table(client: anthropic.Anthropic, table_name: str, entry: dict) -> dict:
+def _score_one_table(settings: "llm.Settings", table_name: str, entry: dict) -> dict:
     candidate_lines = "\n".join(
         f"- {cand['object']}: {cand['description']}" for cand in entry["candidates"]
     )
@@ -281,6 +303,7 @@ def _score_one_table(client: anthropic.Anthropic, table_name: str, entry: dict) 
     reference = dvm_guide.get_reference(table_name)
     reference_block = ""
     if reference:
+        reference = reference[: llm.budget(settings)["dvm_excerpt_chars"]]
         reference_block = (
             "Reference excerpt from SAP's official Data Management Guide for "
             "SAP Business Suite, covering this specific table:\n"
@@ -303,15 +326,9 @@ def _score_one_table(client: anthropic.Anthropic, table_name: str, entry: dict) 
     # covers even a ~60-candidate table at this prompt's terseness.
     max_tokens = min(16000, max(2048, 250 * len(entry["candidates"]) + 500))
 
-    response = client.messages.parse(
-        model=SCORING_MODEL,
-        max_tokens=max_tokens,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
-        output_format=ScoringResponse,
+    parsed: ScoringResponse = llm.structured(
+        SYSTEM_PROMPT, user_content, ScoringResponse, max_tokens=max_tokens, settings=settings
     )
-
-    parsed: ScoringResponse = response.parsed_output
     return {
         c.archiving_object: {"score": c.score, "rationale": c.rationale}
         for c in parsed.candidates

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import LoginPanel from "./components/LoginPanel";
 import SapForMeCredentialsPanel from "./components/SapForMeCredentialsPanel";
+import ModelSettingsPanel from "./components/ModelSettingsPanel";
 import BatchArchivingPanel from "./components/BatchArchivingPanel";
 import GenerateTableListPanel from "./components/GenerateTableListPanel";
 import HeaderTablePanel from "./components/HeaderTablePanel";
@@ -19,6 +20,7 @@ type Tab = (typeof TASKS)[number]["id"];
 export default function App() {
   const [connection, setConnection] = useState<ConnectionState>({ connected: false });
   const [activeTab, setActiveTab] = useState<Tab>("TOP_TABLES");
+  const [modelLabel, setModelLabel] = useState("");
 
   // On mount, ask the backend whether a SAP session is already open (e.g. after
   // a page refresh) and restore the connected state so the user doesn't have to
@@ -53,6 +55,11 @@ export default function App() {
           <span className="header-title">SAP Assessment Automation</span>
         </div>
         <div className="header-status">
+          {modelLabel && (
+            <span className="status-badge model-badge" title="AI model used for every AI step">
+              AI: {modelLabel}
+            </span>
+          )}
           {connection.connected ? (
             <span className="status-badge connected">Connected — {connection.system}</span>
           ) : (
@@ -68,6 +75,8 @@ export default function App() {
             onConnected={handleConnected}
             onDisconnected={handleDisconnected}
           />
+
+          <ModelSettingsPanel onChanged={setModelLabel} />
 
           <SapForMeCredentialsPanel />
 

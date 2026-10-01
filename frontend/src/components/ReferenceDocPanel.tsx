@@ -171,7 +171,7 @@ export default function ReferenceDocPanel({ scored }: Props) {
           ) : (
             <div className="ref-doc-analyzing">
               <span className="ref-doc-spinner" />
-              Analysing document with Claude…
+              Analysing document with the selected AI model…
             </div>
           )}
           {error && <p className="tx-error" style={{ marginTop: "8px" }}>{error}</p>}

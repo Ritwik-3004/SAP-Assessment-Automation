@@ -24,16 +24,13 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
-import anthropic
 from pydantic import BaseModel, Field
 
 import dvm_guide
+import llm
 import sap_for_me
-from config import ANTHROPIC_API_KEY, SCORING_MODEL
 
 logger = logging.getLogger(__name__)
-
-MAX_WORKERS = 8
 
 SYSTEM_PROMPT = (
     "You are an SAP data archiving expert. The database table you are given "
@@ -68,6 +65,7 @@ class HousekeepingResult(BaseModel):
 def find_housekeeping_programs(
     table_names: list[str],
     on_progress: Optional[Callable[[str], None]] = None,
+    settings: Optional[llm.Settings] = None,
 ) -> dict[str, dict]:
     """
     For each table in *table_names*, look for a housekeeping/cleanup program
@@ -82,22 +80,27 @@ def find_housekeeping_programs(
     Returns {table_name: {"program": str, "rationale": str}}. "program" is
     empty when nothing was found -- "rationale" still explains why so the
     caller never has to show a blank cell with no context.
+
+    *settings* pins which AI model (Claude or Groq, see llm.py) is used for the whole
+    lookup; it defaults to the model currently chosen in the app.
     """
-    if not ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY not set -- skipping housekeeping-program lookup.")
+    settings = settings or llm.load_settings()
+    problem = llm.not_configured_message(settings)
+    if problem:
+        logger.warning("%s -- skipping housekeeping-program lookup.", problem)
         return {}
 
+    ref_chars = llm.budget(settings)["dvm_excerpt_chars"]
     references = {name: dvm_guide.get_reference(name) for name in table_names}
-    with_reference = {name: ref for name, ref in references.items() if ref}
+    with_reference = {name: ref[:ref_chars] for name, ref in references.items() if ref}
 
     results: dict[str, dict] = {}
     needs_fallback: dict[str, str] = {name: "" for name in table_names if name not in with_reference}
 
     if with_reference:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        with ThreadPoolExecutor(max_workers=llm.max_workers(settings)) as pool:
             future_to_table = {
-                pool.submit(_find_one, client, name, reference): name
+                pool.submit(_find_one, settings, name, reference): name
                 for name, reference in with_reference.items()
             }
             for future in as_completed(future_to_table):
@@ -118,25 +121,20 @@ def find_housekeeping_programs(
                     needs_fallback[name] = found["rationale"]
 
     if needs_fallback:
-        results.update(_search_sap_for_me_batch(needs_fallback, on_progress))
+        results.update(_search_sap_for_me_batch(needs_fallback, on_progress, settings))
 
     return results
 
 
-def _find_one(client: anthropic.Anthropic, table_name: str, reference: str) -> dict:
+def _find_one(settings: llm.Settings, table_name: str, reference: str) -> dict:
     user_content = (
         f"Table: {table_name}\n\n"
         f"DVM Guide excerpt:\n---\n{reference}\n---\n\n"
         "Does this excerpt name a housekeeping/cleanup program (not an archiving object) for this table?"
     )
-    response = client.messages.parse(
-        model=SCORING_MODEL,
-        max_tokens=500,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
-        output_format=HousekeepingResult,
+    parsed: HousekeepingResult = llm.structured(
+        SYSTEM_PROMPT, user_content, HousekeepingResult, max_tokens=500, settings=settings
     )
-    parsed: HousekeepingResult = response.parsed_output
     if parsed.found and parsed.program.strip():
         return {"program": parsed.program.strip(), "rationale": parsed.rationale}
     return {"program": "", "rationale": parsed.rationale or "The DVM Guide does not name a housekeeping program for this table."}
@@ -145,6 +143,7 @@ def _find_one(client: anthropic.Anthropic, table_name: str, reference: str) -> d
 def _search_sap_for_me_batch(
     pending: dict[str, str],
     on_progress: Optional[Callable[[str], None]],
+    settings: llm.Settings,
 ) -> dict[str, dict]:
     """One batched SAP for Me pass over every table in *pending* (table_name
     -> DVM-guide rationale, "" if the guide had no entry at all for it),
@@ -173,7 +172,7 @@ def _search_sap_for_me_batch(
             if on_progress:
                 on_progress(f"Searching SAP for Me for {name} ({i} of {len(pending)})…")
             try:
-                found = session.lookup(name)
+                found = session.lookup(name, settings)
             except Exception as exc:
                 logger.warning("SAP for Me lookup failed for table %s: %s", name, exc, exc_info=True)
                 found = {"program": "", "rationale": f"SAP for Me lookup failed: {exc}"}

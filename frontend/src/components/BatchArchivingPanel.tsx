@@ -378,7 +378,7 @@ export default function BatchArchivingPanel() {
           )}
 
           <div className="tx-description" style={{ marginTop: "1.5rem" }}>
-            <strong>Score &amp; Recommend</strong> — have Claude score each candidate
+            <strong>Score &amp; Recommend</strong> — have the selected AI model score each candidate
             object per table for archiving relevance (0–100, approximate), referring to
             SAP's official Data Management Guide (DVM Guide) where it covers that table,
             then pick the highest-scoring object per table as the recommended setup.

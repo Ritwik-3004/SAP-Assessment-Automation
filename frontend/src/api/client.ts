@@ -54,6 +54,11 @@ export const api = {
   loadSapForMeCredentials: () => get<{ email?: string; password?: string }>("/api/sap-for-me/credentials"),
   saveSapForMeCredentials: (body: { email: string; password: string }) =>
     post<{ saved: boolean }>("/api/sap-for-me/credentials", body),
+  getLlmSettings: () => get<import("../types").LlmSettings>("/api/llm/settings"),
+  saveLlmSettings: (body: { provider: string; model: string }) =>
+    post<import("../types").LlmSettings>("/api/llm/settings", body),
+  getLlmUsage: () => get<import("../types").LlmUsage>("/api/llm/usage"),
+  testLlm: () => post<import("../types").LlmTestResult>("/api/llm/test", {}),
 
   taana: (body: { table_name?: string; max_rows: number }) =>
     post<import("../types").TransactionResult>("/api/transactions/taana", body),

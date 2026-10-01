@@ -10,6 +10,8 @@ INPUT_DIR = _PROJECT_ROOT / "input"
 OUTPUT_DIR = _PROJECT_ROOT / "output"
 CREDENTIALS_FILE = _PROJECT_ROOT / "sap_credentials.json"
 SAP_FOR_ME_CREDENTIALS_FILE = _PROJECT_ROOT / "sap_for_me_credentials.json"
+LLM_SETTINGS_FILE = _PROJECT_ROOT / "llm_settings.json"
+LLM_USAGE_FILE = _PROJECT_ROOT / "llm_usage.json"
 
 # SAP Logon landscape file path (used to discover configured systems)
 SAP_LANDSCAPE_PATHS = [
@@ -33,6 +35,10 @@ API_PORT = int(os.getenv("API_PORT", "8000"))
 # Claude API (used to score archiving objects for relevance per table)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 SCORING_MODEL = os.getenv("SCORING_MODEL", "claude-haiku-4-5")
+
+# Groq (free-tier alternative to Claude, chosen in the app's "AI Model" panel).
+# The key is read only from backend/.env -- the app never asks for or stores it.
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # SAP for Me portal scraping (housekeeping-program fallback lookup). Headless
 # by default; flip to "false" to watch the browser while debugging selectors.

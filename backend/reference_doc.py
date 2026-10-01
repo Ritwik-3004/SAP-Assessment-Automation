@@ -11,11 +11,10 @@ import json
 import logging
 from typing import Optional
 
-import anthropic
 import openpyxl
 from pypdf import PdfReader
 
-from config import ANTHROPIC_API_KEY, SCORING_MODEL
+import llm
 
 logger = logging.getLogger(__name__)
 
@@ -82,12 +81,14 @@ def _extract_text(contents: bytes, filename: str) -> str:
 # Claude-based mapping extraction
 # ---------------------------------------------------------------------------
 
-def _extract_mappings_via_claude(text: str, table_names: list[str]) -> dict[str, str]:
+def _extract_mappings_via_llm(text: str, table_names: list[str]) -> dict[str, str]:
     """
-    Ask Claude to extract SAP table → archiving object pairs from *text*.
-    Returns {TABLE_NAME: ARCHIVING_OBJECT} (both uppercased).
+    Ask the active AI model (Claude or Groq, see llm.py) to extract SAP table →
+    archiving object pairs from *text*. Returns {TABLE_NAME: ARCHIVING_OBJECT}
+    (both uppercased). Raises llm.LLMError if the model can't be reached.
     """
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    settings = llm.load_settings()
+    char_limit = llm.budget(settings)["reference_chars"]
 
     tables_hint = ", ".join(table_names[:60])  # keep the prompt reasonable
 
@@ -108,16 +109,10 @@ Rules:
 - Return ONLY the JSON object, no extra text.
 
 Document:
-{text[:14000]}
+{text[:char_limit]}
 """
 
-    response = client.messages.create(
-        model=SCORING_MODEL,
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    raw = response.content[0].text.strip()
+    raw = llm.text("", prompt, max_tokens=2000, settings=settings)
 
     # Strip optional markdown fences
     if raw.startswith("```"):
@@ -175,8 +170,11 @@ def analyze_reference_doc(
         if row.get("Table Name")
     ]
 
-    # 3. Extract mappings using Claude
-    ref_mappings = _extract_mappings_via_claude(text, table_names)
+    # 3. Extract mappings using the active AI model
+    try:
+        ref_mappings = _extract_mappings_via_llm(text, table_names)
+    except llm.LLMError as exc:
+        return {"status": "error", "message": str(exc)}
 
     # 4. Compare
     matches: list[dict] = []

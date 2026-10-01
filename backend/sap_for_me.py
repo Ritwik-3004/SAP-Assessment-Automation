@@ -4,8 +4,8 @@ fallback for a table the DVM Guide doesn't cover (see housekeeping.py).
 Searches SAP for Me for "<table> housekeeping program", keeps only SAP
 Knowledge Base Article / SAP Note results (falling back to SAP Community
 only if neither of those turns up anything), reads the top few articles, and
-asks Claude to extract a specific housekeeping program grounded in what they
-say.
+asks the selected AI model (see llm.py) to extract a specific housekeeping program
+grounded in what they say.
 
 The portal is a JS-heavy single-page app behind a login wall, so this drives
 a real (headless by default) Chrome browser via Selenium rather than
@@ -36,28 +36,25 @@ import logging
 import re
 from urllib.parse import quote
 
-import anthropic
 from pydantic import BaseModel, Field
 from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+import llm
 from config import (
-    ANTHROPIC_API_KEY,
     OUTPUT_DIR,
     SAP_FOR_ME_CHROME_PATH,
     SAP_FOR_ME_CHROMEDRIVER_PATH,
     SAP_FOR_ME_CREDENTIALS_FILE,
     SAP_FOR_ME_HEADLESS,
-    SCORING_MODEL,
 )
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://me.sap.com"
 MAX_ARTICLES = 3
-MAX_EXCERPT_CHARS = 8000
 WANTED_TYPES = ("SAP Knowledge Base Article", "SAP Note")
 # Every resource badge the results page shows; a result's type is the first
 # of these lines that appears after its title.
@@ -212,7 +209,10 @@ class SapForMeSession:
     def __exit__(self, *exc_info):
         self.close()
 
-    def lookup(self, table_name: str) -> dict:
+    def lookup(self, table_name: str, settings: "llm.Settings | None" = None) -> dict:
+        """Find a housekeeping program for *table_name*. *settings* pins which AI model
+        reads the articles (defaults to the model currently chosen in the app)."""
+        settings = settings or llm.load_settings()
         query = f"{table_name} housekeeping program"
         try:
             results = self._search(query)
@@ -227,7 +227,7 @@ class SapForMeSession:
         articles = []
         for result in chosen:
             try:
-                text = self._read_article(result["url"], table_name)
+                text = self._read_article(result["url"], table_name, llm.budget(settings)["article_chars"])
             except Exception as exc:
                 logger.warning("Could not read SAP for Me article '%s': %s", result["title"], exc, exc_info=True)
                 continue
@@ -237,7 +237,7 @@ class SapForMeSession:
         if not articles:
             return {"program": "", "rationale": "Found SAP for Me results but could not read their content."}
 
-        return _extract_program(table_name, articles)
+        return _extract_program(table_name, articles, settings)
 
     def _search(self, query: str) -> list[dict]:
         payload = json.dumps({"q": query, "tab": "All"})
@@ -250,9 +250,9 @@ class SapForMeSession:
         raw_text = self._driver.find_element(By.TAG_NAME, "body").text
         return _parse_results(raw_text)
 
-    def _read_article(self, url: str, table_name: str) -> str:
+    def _read_article(self, url: str, table_name: str, max_chars: int = 8000) -> str:
         """Opens an article by its direct address and returns the part of its
-        text most relevant to *table_name*."""
+        text most relevant to *table_name*, at most *max_chars* long."""
         driver = self._driver
         driver.get(url)
         try:
@@ -261,7 +261,7 @@ class SapForMeSession:
             )
         except TimeoutException:
             pass  # use whatever rendered; the extraction step copes with thin text
-        return _relevant_excerpt(driver.find_element(By.TAG_NAME, "body").text, table_name)
+        return _relevant_excerpt(driver.find_element(By.TAG_NAME, "body").text, table_name, max_chars)
 
 
 def _click_by_text(driver, wait: WebDriverWait, text: str):
@@ -417,13 +417,13 @@ def _looks_rendered(text: str) -> bool:
     return len(text) > 1200 and any(w in text for w in ("Symptom", "Solution", "Resolution", "Description"))
 
 
-def _relevant_excerpt(text: str, table_name: str) -> str:
+def _relevant_excerpt(text: str, table_name: str, max_chars: int = 8000) -> str:
     """Trims a long article to the start (title/symptom) plus a window around
     each mention of *table_name*, so a big how-to that lists dozens of tables
     keeps the part about this one instead of being cut off by a flat limit."""
-    if len(text) <= MAX_EXCERPT_CHARS:
+    if len(text) <= max_chars:
         return text
-    head = 2000
+    head = min(2000, max_chars // 3)
     spans = [(0, head)]
     for m in re.finditer(re.escape(table_name), text, re.IGNORECASE):
         spans.append((max(0, m.start() - 800), min(len(text), m.end() + 800)))
@@ -437,12 +437,16 @@ def _relevant_excerpt(text: str, table_name: str) -> str:
         else:
             merged.append([s, e])
     pieces = [text[s:e] for s, e in merged]
-    return "\n...\n".join(pieces)[:MAX_EXCERPT_CHARS]
+    return "\n...\n".join(pieces)[:max_chars]
 
 
-def _extract_program(table_name: str, articles: list[tuple[str, str, str]]) -> dict:
-    if not ANTHROPIC_API_KEY:
-        return {"program": "", "rationale": "ANTHROPIC_API_KEY not set -- cannot read SAP for Me articles."}
+def _extract_program(
+    table_name: str, articles: list[tuple[str, str, str]], settings: "llm.Settings | None" = None
+) -> dict:
+    settings = settings or llm.load_settings()
+    problem = llm.not_configured_message(settings)
+    if problem:
+        return {"program": "", "rationale": f"Cannot read SAP for Me articles: {problem}"}
 
     excerpt_blocks = "\n\n".join(
         f"Article {i + 1} ({kind}) - {title}:\n---\n{text}\n---"
@@ -452,20 +456,14 @@ def _extract_program(table_name: str, articles: list[tuple[str, str, str]]) -> d
         f"Table: {table_name}\n\n{excerpt_blocks}\n\n"
         "Do any of these articles name a housekeeping/cleanup program for this table?"
     )
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     try:
-        response = client.messages.parse(
-            model=SCORING_MODEL,
-            max_tokens=500,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-            output_format=SapForMeResult,
+        parsed: SapForMeResult = llm.structured(
+            SYSTEM_PROMPT, user_content, SapForMeResult, max_tokens=500, settings=settings
         )
     except Exception as exc:
         logger.warning("SAP for Me LLM extraction failed for %s: %s", table_name, exc, exc_info=True)
         return {"program": "", "rationale": f"SAP for Me article extraction failed: {exc}"}
 
-    parsed: SapForMeResult = response.parsed_output
     if parsed.found and parsed.program.strip():
         return {"program": parsed.program.strip(), "rationale": parsed.rationale}
     return {
