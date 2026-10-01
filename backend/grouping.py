@@ -71,11 +71,19 @@ def build_object_groups(recommended_rows: list[dict]) -> list[dict]:
         cumulative_mb = sum(_to_float(m.get("Volume (MB)", "")) for m in members)
         table_count = len(members)
 
+        # Object Description and Housekeeping Program belong to the group, not to one table: take the
+        # first non-blank value among the members. Copying each table's own value would put different
+        # values on rows of one group (e.g. a table whose description is blank after a reference-
+        # document override), and the Excel export only merges a group's cells when every group-level
+        # column is identical on all of its rows.
+        description = _group_description([m.get("Object Description", "") for m in members])
+        housekeeping = next((m.get("Housekeeping Program", "") for m in members if (m.get("Housekeeping Program") or "").strip()), "")
+
         for member in members:
             output.append({
                 "Archiving Object": member.get("Archiving Object", ""),
-                "Object Description": member.get("Object Description", ""),
-                "Housekeeping Program": member.get("Housekeeping Program", ""),
+                "Object Description": description,
+                "Housekeeping Program": housekeeping,
                 "Table Name": member.get("Table Name", ""),
                 "Table Description": member.get("Table Description", ""),
                 "Volume (GB)": member.get("Volume (GB)", ""),
@@ -86,6 +94,15 @@ def build_object_groups(recommended_rows: list[dict]) -> list[dict]:
             })
 
     return output
+
+
+def _group_description(descriptions: list) -> str:
+    """One description for the group: the first real one, else an AI-suggested one, else the first
+    non-blank value (e.g. a "(no archiving objects found)" placeholder), else blank."""
+    present = [d.strip() for d in descriptions if (d or "").strip()]
+    real = [d for d in present if not d.startswith("(")]
+    ai = [d for d in present if d.startswith("(AI-suggested)")]
+    return (real or ai or present or [""])[0]
 
 
 def _to_float(value) -> float:
