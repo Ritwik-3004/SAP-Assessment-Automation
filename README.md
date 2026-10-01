@@ -107,6 +107,16 @@ exception is the [Chat assistant](#chat-assistant): users can ask it questions t
 Claude answers by running DB15, AOBJ, SE16N, SE11, TAANA or SARA on their behalf, and its
 replies always name the transaction it queried.)
 
+## Look and feel
+
+The UI uses the Deloitte Green palette (charcoal header with the green line, green actions,
+Open Sans). All colours are tokens at the top of `frontend/src/App.css`. Two rules to keep
+when changing styles: Deloitte Green (`--primary`, `#86BC25`) is a *fill* colour, so text on it
+is black (`--primary-text`) because white fails contrast, and green used *as text* on a light
+background must be `--accent-text` (`#4C7A09`). The font is self-hosted through the
+`@fontsource/open-sans` npm package (Latin only, weights 300/400/600/700), so it also works on
+machines with no internet access.
+
 ## Backend transaction modules
 
 Each of the following has its own `backend/transactions/*.py` module and single-item
@@ -342,16 +352,28 @@ Flow:
 2. Each recommended table is compared with the document and put in one of three groups:
    - **Matched** — the document names the same object (Comments: "Matches reference document")
    - **Mismatch** — the document names a different object (Comments: "Reference document
-     suggests: X")
+     suggests: X"), **or** the app found no object for the table at all and the document
+     names one — so the document can fill the gap and the override can be applied
    - **Not in reference document** — the table isn't mentioned
 3. The panel shows the three counts, a table of mismatches with a checkbox on each row
    (plus Select all / Deselect all), and collapsible lists for the other two groups.
 4. The user clicks **Apply N overrides**, or **Keep as-is** if none are ticked. A preview
    shows the final recommended list with the Comments column. An overridden row gets
    "Updated from X per reference document"; a mismatch left unticked keeps its original
-   object and its "Reference document suggests" comment.
+   object and its "Reference document suggests" comment. An override also fixes the fields
+   that described the old object: the Score and Object Description come from the scored list
+   if that table was scored against the new object (otherwise they are left blank rather than
+   showing the old object's values), the Rationale says it was chosen from the reference
+   document, and a housekeeping program is cleared when a table receives an archiving object.
+   **Show Grouped by Object** in the preview groups the final list exactly as in the results
+   above (same grouping, cumulative sizes and ordering), so you can check the groups after
+   your overrides before saving.
 5. **Save to output folder** writes `output/archiving_objects_with_reference.xlsx` (sheets:
-   "All Scored Objects" and "Recommended (with Reference Doc)", which includes Comments).
+   "All Scored Objects", "Recommended (with Ref Doc)" — which includes Comments — and
+   **"Grouped by Object"**, built from the final list after your overrides, with the same
+   columns, order and merged group cells as in `archiving_objects_scored.xlsx`). Grouped by
+   Object is the last sheet on purpose: Find Header Tables reads an output file's last sheet,
+   so this file can be used as its input too, and then reflects the SME corrections.
    **Download Excel** gives the same file in the browser. **Back to comparison** returns to the
    previous step.
 
