@@ -165,10 +165,15 @@ export const api = {
       history,
     }),
 
-  analyzeReferenceDoc: async (file: File, recommended: Record<string, string>[]) => {
+  analyzeReferenceDoc: async (
+    file: File,
+    recommended: Record<string, string>[],
+    knownDescriptions: Record<string, string> = {},
+  ) => {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("recommended", JSON.stringify(recommended));
+    formData.append("known_descriptions", JSON.stringify(knownDescriptions));
     const res = await fetch(`${BASE}/api/reference-doc/analyze`, {
       method: "POST",
       body: formData,

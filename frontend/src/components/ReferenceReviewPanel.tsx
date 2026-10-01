@@ -33,8 +33,8 @@ export interface ReferenceReviewConfig {
   analyze: (file: File) => Promise<ReferenceReview>;
   save: (final: Row[]) => Promise<{ path: string }>;
   exportFile: (final: Row[]) => Promise<Blob>;
-  /** The row after the user accepts the reference document's value. */
-  applyOverride: (row: Row, refValue: string) => Row;
+  /** The row after the user accepts the reference document's value (*review* is the analysis result). */
+  applyOverride: (row: Row, refValue: string, review: ReferenceReview) => Row;
   /** Optional "Show Grouped by Object" view of the final list (same as Find Archiving Objects). */
   groupedView?: { fetch: (rows: Row[]) => Promise<Row[]>; caption: string };
 }
@@ -115,7 +115,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
     const preview = result.annotated.map((row) => {
       const refValue = row[c.refKey];
       if (selected.has(row[c.idKey]) && refValue) {
-        return c.applyOverride(row, refValue);
+        return c.applyOverride(row, refValue, result);
       }
       return row;
     });

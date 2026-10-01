@@ -311,12 +311,13 @@ def _segment_summary(rows: list[dict]) -> list[dict]:
     ]
 
 
-def _open_arch_def_selection(session):
-    """Navigate to SE16N and load ARCH_DEF's Selection Criteria screen."""
+def _open_arch_def_selection(session, table: str = "ARCH_DEF"):
+    """Navigate to SE16N and load *table*'s Selection Criteria screen (ARCH_DEF unless told
+    otherwise; ARCH_TXT has the same OBJECT selection field)."""
     sap.navigate_to("SE16N")
     time.sleep(SAP_SCREEN_WAIT)
 
-    session.findById(TABLE_NAME_FIELD_ID).text = "ARCH_DEF"
+    session.findById(TABLE_NAME_FIELD_ID).text = table
     session.findById("wnd[0]").sendVKey(0)  # Enter -- loads the selection screen
     sap.wait_until_ready()
     time.sleep(SAP_SCREEN_WAIT)
@@ -425,6 +426,84 @@ def _read_arch_def_grid(session, retries: int = 3, retry_wait: float = 0.4) -> l
     return []
 
 
+# ---------------------------------------------------------------------------
+# Archiving object descriptions (used by object_descriptions.py)
+# ---------------------------------------------------------------------------
+
+# The text table for archiving objects ("Description of archive objects"; columns LANGU / OBJECT / OBJTEXT,
+# confirmed on a live system 2026-10-01 for FI_DOCUMNT, which had a DE and an EN row). Re-check on another
+# system with /api/transactions/se16n/debug-arch-def-query?archiving_object=X&table=ARCH_TXT
+ARCH_TXT_TABLE = "ARCH_TXT"
+_TEXT_COLUMNS = ("OBJTEXT", "TEXT", "DESCRIPTION", "TXT", "OBJECT_TEXT")
+_LANGUAGE_COLUMNS = ("LANGU", "SPRAS", "LANGUAGE")
+
+
+def get_archiving_object_texts(archiving_objects: list[str]) -> dict:
+    """Read each object's description from the archiving-object text table via SE16N,
+    reusing one selection screen. Returns {"status": "ok", "texts": {OBJECT: text},
+    "errors": [...]}; an object with no readable text is simply absent from "texts"."""
+    return sap.run(_get_archiving_object_texts, archiving_objects)
+
+
+def _get_archiving_object_texts(archiving_objects: list[str]) -> dict:
+    texts: dict[str, str] = {}
+    errors: list[dict] = []
+    try:
+        session = sap.get_session()
+        _open_arch_def_selection(session, ARCH_TXT_TABLE)
+    except Exception as exc:
+        logger.warning("Could not open %s in SE16N: %s", ARCH_TXT_TABLE, exc)
+        return {"status": "error", "message": str(exc), "texts": texts, "errors": errors}
+
+    for obj in archiving_objects:
+        obj = (obj or "").strip().upper()
+        if not obj:
+            continue
+        try:
+            text = pick_object_text(_query_arch_def(session, obj))
+            if text:
+                texts[obj] = text
+        except Exception as exc:
+            logger.warning("Could not read the %s text for %s: %s", ARCH_TXT_TABLE, obj, exc)
+            errors.append({"archiving_object": obj, "message": str(exc)})
+
+        try:
+            session.findById("wnd[0]").sendVKey(3)  # F3 -- back to the selection screen
+            sap.wait_until_ready()
+            time.sleep(SAP_SCREEN_WAIT)
+            sap.dismiss_popup()
+            session.findById(SELECTION_TABLE_CONTROL_ID)
+        except Exception:
+            try:
+                _open_arch_def_selection(session, ARCH_TXT_TABLE)
+            except Exception:
+                break
+    return {"status": "ok", "texts": texts, "errors": errors}
+
+
+def pick_object_text(rows: list[dict]) -> str:
+    """The description from an archiving-object text table's rows: English if present,
+    otherwise the first row. Column ids are matched loosely because the table is unconfirmed."""
+    def first(row: dict, names: tuple) -> str:
+        for name in names:
+            value = (row.get(name) or "").strip()
+            if value:
+                return value
+        return ""
+
+    english = [r for r in rows if first(r, _LANGUAGE_COLUMNS).upper() in ("E", "EN")]
+    for row in english + rows:
+        text = first(row, _TEXT_COLUMNS)
+        if not text:
+            # unknown column ids: the last cell that isn't the key or the language is the text
+            others = [v.strip() for k, v in row.items()
+                      if k not in ("Archiving Object", "MANDT") and k not in _LANGUAGE_COLUMNS and (v or "").strip()]
+            text = others[-1] if others else ""
+        if text:
+            return text
+    return ""
+
+
 def debug_dump_arch_def_screen() -> dict:
     """Navigate to SE16N, load ARCH_DEF's Selection Criteria screen, and
     dump every element under wnd[0]/usr -- run this if _set_object_filter()
@@ -444,21 +523,21 @@ def _debug_dump_arch_def_screen() -> dict:
         return {"status": "error", "message": str(exc)}
 
 
-def debug_query_arch_def(archiving_object: str) -> dict:
+def debug_query_arch_def(archiving_object: str, table: str = "ARCH_DEF") -> dict:
     """Navigate to SE16N, query ARCH_DEF for *archiving_object*, and report
     every step's outcome independently -- filter readback, the status bar
     text after Execute, and each candidate grid path's found/row_count/
     column_order/first_row -- instead of only the final (possibly empty)
     result, so a failure partway through doesn't hide whether the earlier
     steps worked. Mirrors db15.py's debug_read_grid."""
-    return sap.run(_debug_query_arch_def, archiving_object)
+    return sap.run(_debug_query_arch_def, archiving_object, table)
 
 
-def _debug_query_arch_def(archiving_object: str) -> dict:
+def _debug_query_arch_def(archiving_object: str, table: str = "ARCH_DEF") -> dict:
     steps: dict = {}
     try:
         session = sap.get_session()
-        _open_arch_def_selection(session)
+        _open_arch_def_selection(session, table)
         steps["opened_selection_screen"] = "ok"
 
         try:
@@ -535,7 +614,7 @@ def _debug_query_arch_def(archiving_object: str) -> dict:
         except Exception as exc:
             steps["elements_after_error"] = str(exc)
 
-        return {"status": "ok", "archiving_object": archiving_object.upper(), "steps": steps}
+        return {"status": "ok", "table": table, "archiving_object": archiving_object.upper(), "steps": steps}
     except Exception as exc:
         logger.exception("ARCH_DEF debug query failed")
         return {"status": "error", "message": str(exc), "steps": steps}

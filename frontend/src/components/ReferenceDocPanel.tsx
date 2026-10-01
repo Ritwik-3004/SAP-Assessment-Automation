@@ -12,6 +12,18 @@ export default function ReferenceDocPanel({ scored }: Props) {
   const recommended = scored.recommended ?? [];
   const allRows = scored.rows ?? [];
 
+  /** Archiving object (upper case) → its real description, from any row of this run. Placeholders
+   *  such as "(no archiving objects found)" start with "(" and are left out. */
+  function knownDescriptions(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const r of [...allRows, ...recommended]) {
+      const obj = (r["Archiving Object"] || "").trim().toUpperCase();
+      const desc = (r["Object Description"] || "").trim();
+      if (obj && desc && !desc.startsWith("(") && !(obj in out)) out[obj] = desc;
+    }
+    return out;
+  }
+
   const config: ReferenceReviewConfig = {
     rows: recommended,
     idKey: "Table Name",
@@ -32,26 +44,35 @@ export default function ReferenceDocPanel({ scored }: Props) {
     savedPath: "output/archiving_objects_with_reference.xlsx",
     downloadName: "archiving_objects_with_reference.xlsx",
     analyze: async (file) => {
-      const res = await api.analyzeReferenceDoc(file, recommended);
+      const res = await api.analyzeReferenceDoc(file, recommended, knownDescriptions());
       return {
         filename: res.filename,
         annotated: res.annotated_recommended,
         matches: res.matches,
         mismatches: res.mismatches,
         not_in_ref: res.not_in_ref,
+        objectDescriptions: res.object_descriptions,
       };
     },
     save: (final) => api.saveReferenceDoc(allRows, final),
     exportFile: (final) => api.exportReferenceDoc(allRows, final),
-    // Taking the document's object must not leave the old object's details behind: its score
-    // and description come from the scored list when that table was scored against the new object,
-    // otherwise they are blank. A housekeeping program is cleared (a table has one or the other).
-    applyOverride: (row, refValue) => {
+    // Taking the document's object must not leave the old object's details behind. The score comes
+    // from the scored list when that table was scored against the new object, otherwise it is blank.
+    // The description belongs to the object, so it is never blank: the scored pair's, else the one
+    // resolved by the analysis (the run, the remembered list, SAP, or an "(AI-suggested)" one), else
+    // the same object's description from any row. A housekeeping program is cleared (a table has
+    // one or the other).
+    applyOverride: (row, refValue, review) => {
       const scoredPair = allRows.find(
         (r) =>
           r["Table Name"] === row["Table Name"] &&
           (r["Archiving Object"] || "").toUpperCase() === refValue.toUpperCase()
       );
+      const description =
+        scoredPair?.["Object Description"]?.trim() ||
+        review.objectDescriptions?.[refValue.toUpperCase()] ||
+        knownDescriptions()[refValue.toUpperCase()] ||
+        "(description not found)";
       const housekeeping = row["Housekeeping Program"];
       const previous = row["Archiving Object"]
         ? row["Archiving Object"]
@@ -61,7 +82,7 @@ export default function ReferenceDocPanel({ scored }: Props) {
       return {
         ...row,
         "Archiving Object": refValue,
-        "Object Description": scoredPair?.["Object Description"] ?? "",
+        "Object Description": description,
         Score: scoredPair?.Score ?? "",
         Rationale: "Chosen from the reference document.",
         "Housekeeping Program": "",

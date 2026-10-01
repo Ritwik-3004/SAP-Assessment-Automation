@@ -30,6 +30,7 @@ import scoring
 import grouping
 import llm
 import header_tables
+import object_descriptions
 import reference_doc as ref_doc_mod
 import transactions.taana as taana
 import transactions.db15 as db15
@@ -839,14 +840,14 @@ def debug_arch_def_screen():
 
 
 @app.get("/api/transactions/se16n/debug-arch-def-query")
-def debug_arch_def_query(archiving_object: str):
+def debug_arch_def_query(archiving_object: str, table: str = "ARCH_DEF"):
     """Diagnostic: query ARCH_DEF for *archiving_object* and report every
     step's outcome independently (filter readback, status bar text after
     Execute, each candidate grid path's found/row_count/column_order/
     first_row) instead of only the final result — for diagnosing a wrong/
     empty result."""
     _require_connection()
-    result = se16n.debug_query_arch_def(archiving_object)
+    result = se16n.debug_query_arch_def(archiving_object, table.upper())
     if result["status"] == "error":
         raise HTTPException(status_code=500, detail=result.get("message", "debug query failed"))
     return result
@@ -895,15 +896,22 @@ class ReferenceDocSaveRequest(BaseModel):
 def analyze_reference_doc(
     file: UploadFile = File(...),
     recommended: str = Form(...),
+    known_descriptions: str = Form("{}"),
 ):
     """Parse the uploaded reference document and compare its archiving-object
-    mappings against the current scored recommendations."""
+    mappings against the current scored recommendations. *known_descriptions* is a JSON object
+    {archiving object: description} from the current run."""
     contents = file.file.read()
     try:
         recommended_rows = json.loads(recommended)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON in 'recommended' field.")
-    result = ref_doc_mod.analyze_reference_doc(contents, file.filename or "document", recommended_rows)
+    try:
+        known = json.loads(known_descriptions)
+        known = known if isinstance(known, dict) else {}
+    except Exception:
+        known = {}
+    result = ref_doc_mod.analyze_reference_doc(contents, file.filename or "document", recommended_rows, known)
     if result.get("status") == "error":
         raise HTTPException(status_code=400, detail=result["message"])
     return result
@@ -917,6 +925,9 @@ def _reference_doc_workbook(req: "ReferenceDocSaveRequest") -> io.BytesIO:
     ref_cols = ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
                 "Archiving Object", "Object Description", "Housekeeping Program",
                 "Score", "Rationale", "Comments"]
+    # A row with an object but no description gets one from the same object elsewhere in the list or
+    # from the remembered list (cheap layers only: saving never calls SAP or the AI model).
+    recommended = object_descriptions.fill_missing(req.recommended)
     return _build_multi_sheet_workbook([
         (
             "All Scored Objects",
@@ -927,12 +938,12 @@ def _reference_doc_workbook(req: "ReferenceDocSaveRequest") -> io.BytesIO:
         (
             "Recommended (with Ref Doc)",
             ref_cols,
-            req.recommended,
+            recommended,
         ),
         (
             "Grouped by Object",
             GROUPED_COLUMNS,
-            grouping.build_object_groups(req.recommended),
+            grouping.build_object_groups(recommended),
             GROUPED_MERGE_COLUMNS,
         ),
     ])
@@ -1189,6 +1200,10 @@ def _run_db15_batch_job(tables: list[dict]):
         if result["status"] == "error":
             _db15_batch_progress.fail(result["message"])
         else:
+            try:
+                object_descriptions.remember_from_rows(result.get("rows", []))
+            except Exception:
+                logger.warning("Could not remember archiving object descriptions", exc_info=True)
             _db15_batch_progress.finish(result)
     except Exception as exc:
         logger.exception("DB15 batch job failed")

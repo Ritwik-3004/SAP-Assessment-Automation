@@ -53,6 +53,7 @@ desktop.ini
 
 # Derived/cached data (regenerated automatically, not source content)
 backend/resources/dvm_guide_index.json
+backend/resources/archiving_object_descriptions.json
 
 sap_credentials.json
 sap_for_me_credentials.json

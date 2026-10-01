@@ -16,7 +16,7 @@ Main backend modules (`backend/`): `main.py` (all endpoints), `sap_connector.py`
 connection), `transactions/` (one module per SAP transaction), `header_tables.py` (settles ambiguous header
 tables), `llm.py` (the AI model switch: Claude or
 Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeeping.py` + `sap_for_me.py`
-(housekeeping-program lookup), `grouping.py` (Grouped by Object), `chat.py` (chat
+(housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (chat
 assistant), `reference_doc.py` (reference document analysis), `progress.py` (progress
 polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 
@@ -29,6 +29,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Housekeeping program lookup — DVM Guide stage | Working |
 | Housekeeping program lookup — SAP for Me stage | Working in `debug_sap_for_me.py` (COSP → `RK_PLAN_DEL_ZERO_RECORDS`); **not yet verified through a full scoring run in the app**. Needs Chrome for Testing + IT approval. SAP Community fallback **not implemented**. |
 | Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
+| Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions. **Re-test on the same objects pending**; Low-confidence rows are best guesses to be confirmed by the reference document |
 | Chat assistant over scored results | Implemented; documented from the code and not run end to end — see [Chat assistant](#chat-assistant) for known gaps |
@@ -361,10 +362,12 @@ Flow:
    shows the final recommended list with the Comments column. An overridden row gets
    "Updated from X per reference document"; a mismatch left unticked keeps its original
    object and its "Reference document suggests" comment. An override also fixes the fields
-   that described the old object: the Score and Object Description come from the scored list
-   if that table was scored against the new object (otherwise they are left blank rather than
-   showing the old object's values), the Rationale says it was chosen from the reference
-   document, and a housekeeping program is cleared when a table receives an archiving object.
+   that described the old object: the Score comes from the scored list
+   if that table was scored against the new object (otherwise it is left blank rather than
+   showing the old object's value), the Object Description is **never blank** (see
+   [Object descriptions](#object-descriptions)), the Rationale says it was chosen from the
+   reference document, and a housekeeping program is cleared when a table receives an
+   archiving object.
    **Show Grouped by Object** in the preview groups the final list exactly as in the results
    above (same grouping, cumulative sizes and ordering), so you can check the groups after
    your overrides before saving.
@@ -376,6 +379,30 @@ Flow:
    so this file can be used as its input too, and then reflects the SME corrections.
    **Download Excel** gives the same file in the browser. **Back to comparison** returns to the
    previous step.
+
+### Object descriptions
+
+A description belongs to the archiving *object*, not to a table, so it is reused wherever the
+object appears. After an override, the new object's description is found through four layers
+(`backend/object_descriptions.py`), and the cell is never blank:
+
+1. **This run** — the description the same object already has on any table (DB15 results).
+2. **Remembered list** — `backend/resources/archiving_object_descriptions.json` (git-ignored,
+   built up from every DB15 run and SAP lookup, so an object seen once is covered later).
+3. **SAP** — when SAP is connected, the archiving-object text table is read through SE16N
+   (`se16n.get_archiving_object_texts`, English preferred, falling back to the first row). The
+   table is **`ARCH_TXT`** ("Description of archive objects", columns `LANGU`/`OBJECT`/`OBJTEXT`),
+   confirmed on a live system for `FI_DOCUMNT` (one German and one English row) and verified
+   end to end. If the lookup fails the stage is skipped quietly and the
+   other stages still apply. SAP texts are added to the remembered list.
+4. **AI-suggested** — the selected AI model's best guess for whatever is left, shown as
+   `(AI-suggested) <text>` and **never** added to the remembered list (it may not match SAP's
+   wording). If no model is available the value is `(description not found)`.
+
+The lookup runs once, during **Upload Reference Document** (it may call SAP and the model, so
+that step takes a few seconds longer when objects are unknown). Saving and downloading only use
+layers 1 and 2 to fill any remaining gap, so they never call SAP or the model. In the Grouped by
+Object sheet a group shows the real description in preference to an AI-suggested one.
 
 Requires `ANTHROPIC_API_KEY`. PowerPoint support needs `python-pptx` (now in
 `requirements.txt`; run `pip install -r requirements.txt` after pulling).
@@ -652,7 +679,9 @@ discovery-first pattern as DB15/DB02 — see
 screen, and `GET /api/transactions/se16n/debug-arch-def-query?archiving_object=X`
 reports every step of a query independently (filter readback, status bar text after
 Execute, each candidate grid path's found/row_count/column_order/first_row, and a full
-`wnd[0]` dump as a last resort).
+`wnd[0]` dump as a last resort). Add `&table=ARCH_TXT` to run the same query against another
+table — that is how to confirm the archiving-object text table behind
+[Object descriptions](#object-descriptions).
 
 ## Session persistence
 
@@ -688,7 +717,7 @@ SAP GUI element IDs (e.g. `wnd[0]/usr/ctxtP_TNAME`) can differ across SAP versio
 | `POST /api/transactions/db02/debug-click` | Body `{tree_id, node_key, action}` — performs `select`/`expand`/`doubleclick` on a tree node, then dumps the screen afterward so the effect is visible. |
 | `GET /api/transactions/db02/debug-probe-run?limit=20` | End-to-end dry run of the SQL Editor flow (open editor, set query text, execute, switch tabs, read the result grid), reporting each step's outcome independently. |
 | `GET /api/transactions/se16n/debug-arch-def-screen` | Navigates to SE16N, loads `ARCH_DEF`'s Selection Criteria screen, and dumps every element — use this if the "Arch. Object" filter field can't be found. |
-| `GET /api/transactions/se16n/debug-arch-def-query?archiving_object=X` | Queries `ARCH_DEF` for the given object and reports every step independently (filter readback, status bar text after Execute, each candidate grid path's found/row_count/column_order/first_row, and a full `wnd[0]` dump as a last resort) — for diagnosing a wrong or empty result. |
+| `GET /api/transactions/se16n/debug-arch-def-query?archiving_object=X[&table=T]` | Queries `ARCH_DEF` (or table `T`, e.g. `ARCH_TXT`) for the given object and reports every step independently (filter readback, status bar text after Execute, each candidate grid path's found/row_count/column_order/first_row, and a full `wnd[0]` dump as a last resort) — for diagnosing a wrong or empty result. |
 
 **Known SAP GUI ALV grid gotchas** (discovered while wiring up DB15, likely relevant to the other transactions too, since they share `sap_connector.py`'s grid-reading helper):
 - `grid.GetColumnTitles(col_id)` is not a valid method on every system's ActiveX grid control — calling it can leave the grid object unable to serve subsequent `RowCount`/`GetCellValue` calls, even though the bad call itself is caught. Prefer hardcoding known column IDs (see `DB15_COLUMN_LABELS` in `db15.py`) over relying on that method.
@@ -782,4 +811,4 @@ Key endpoints:
 | POST | `/api/header-reference/save` | Save the reference-reviewed header tables (body: `{rows, final}`) to `output/header_tables_with_reference.xlsx` |
 | POST | `/api/header-reference/export` | Same workbook as a browser download |
 | GET | `/api/transactions/se16n/debug-arch-def-screen` | Diagnostic: dump `ARCH_DEF`'s Selection Criteria screen elements |
-| GET | `/api/transactions/se16n/debug-arch-def-query` | Diagnostic: query `ARCH_DEF` for an archiving object and report every step independently |
+| GET | `/api/transactions/se16n/debug-arch-def-query` | Diagnostic: query `ARCH_DEF` (or the table given by `table`) for an archiving object and report every step independently |

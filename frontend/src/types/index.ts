@@ -75,6 +75,8 @@ export interface ReferenceDocResult {
   matches: Record<string, string>[];
   mismatches: Record<string, string>[];
   not_in_ref: Record<string, string>[];
+  /** Description for every object the document proposes (real, "(AI-suggested) …" or "(description not found)"). */
+  object_descriptions?: Record<string, string>;
 }
 
 export interface LlmLimits {
@@ -119,6 +121,8 @@ export interface ReferenceReview {
   matches: Record<string, string>[];
   mismatches: Record<string, string>[];
   not_in_ref: Record<string, string>[];
+  /** Archiving object → description, for the objects the document proposes (table → object review only). */
+  objectDescriptions?: Record<string, string>;
 }
 
 export interface HeaderReferenceResult {

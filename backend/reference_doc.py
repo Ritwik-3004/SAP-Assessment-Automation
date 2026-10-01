@@ -15,6 +15,7 @@ import openpyxl
 from pypdf import PdfReader
 
 import llm
+import object_descriptions
 
 logger = logging.getLogger(__name__)
 
@@ -135,10 +136,15 @@ def analyze_reference_doc(
     contents: bytes,
     filename: str,
     recommended: list[dict],
+    known_descriptions: Optional[dict] = None,
 ) -> dict:
     """
     Parse *contents* (the uploaded reference document), extract table→object
     mappings, then compare with *recommended* (the current scored output).
+
+    *known_descriptions* ({OBJECT: description} from the current run) feeds
+    object_descriptions.resolve(), which also tries the remembered list, SAP (if connected) and
+    the AI model, so every object the document proposes comes back with a description.
 
     A table the app found no archiving object for, which the document maps to one, is a
     mismatch (so the document can fill the gap), not a match.
@@ -153,6 +159,7 @@ def analyze_reference_doc(
         "matches": [...rows where ref doc agrees...],
         "mismatches": [...rows where ref doc differs, with "Ref Doc Object" column...],
         "not_in_ref": [...rows not mentioned in the reference document...],
+        "object_descriptions": {OBJECT: description, ...},  # for the objects the document proposes
     }
     """
     # 1. Extract text
@@ -207,6 +214,17 @@ def analyze_reference_doc(
 
         annotated.append(annotated_row)
 
+    # Every object the document proposes gets a description, so an override never leaves a blank.
+    proposed = sorted({r["Ref Doc Object"] for r in mismatches if r.get("Ref Doc Object")})
+    try:
+        descriptions = object_descriptions.resolve(
+            proposed,
+            known={**object_descriptions.known_from_rows(recommended), **(known_descriptions or {})},
+        )
+    except Exception as exc:
+        logger.warning("Could not resolve object descriptions: %s", exc, exc_info=True)
+        descriptions = {}
+
     return {
         "status": "ok",
         "filename": filename,
@@ -215,6 +233,7 @@ def analyze_reference_doc(
         "matches": matches,
         "mismatches": mismatches,
         "not_in_ref": not_in_ref,
+        "object_descriptions": descriptions,
     }
 
 
