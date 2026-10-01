@@ -3,7 +3,10 @@ SAP for Me portal scraper, used by housekeeping.py (housekeeping-program lookup 
 the DVM Guide doesn't cover) and header_tables.py (header-table lookup for an archiving
 object ARCH_DEF can't settle). It searches SAP for Me, keeps only SAP Knowledge Base
 Article / SAP Note results, reads the top few articles, and hands their text to the selected
-AI model (see llm.py). A SAP Community fallback is not implemented.
+AI model (see llm.py). When SAP for Me yields no readable Note or Knowledge Base Article, it
+falls back to searching SAP Community (community.sap.com, public, same browser) and reads the
+top few posts instead; those are labelled "SAP Community" so the model and the user can see
+the source is a forum post rather than an official SAP document.
 
 The portal is a JS-heavy single-page app behind a login wall, so this drives a real (headless
 by default) Chrome browser via Selenium rather than requests/BeautifulSoup. Logging in is the
@@ -23,6 +26,12 @@ page text is relied on rather than CSS classes: result titles read "<number> - <
 followed by its resource badge ("SAP Note" / "SAP Knowledge Base Article" / ...), and every
 Note and KBA opens at /notes/<number>/E. If the portal changes, backend/debug_sap_for_me.py
 saves a screenshot and the page text to output/ to show what broke.
+
+The SAP Community stage has NOT been run against the live site yet. It relies on the forum's
+stable address shape rather than CSS classes: a post is any link of the form
+/t5/<board>/<title>/(ba|qaq|td|m)-p/<id>, found on the search page at
+community.sap.com/t5/forums/searchpage/tab/message?q=<query>. backend/debug_sap_for_me.py
+prints what that search finds.
 """
 
 import json
@@ -56,6 +65,14 @@ KNOWN_TYPES = WANTED_TYPES + ("SAP Community", "SAP Help", "Support Content")
 WAIT_SECONDS = 20
 ARTICLE_WAIT_SECONDS = 45
 
+# SAP Community (Khoros forum, public -- no sign-in needed). Posts are discussions (td-p),
+# questions (qaq-p), blog posts (ba-p) and replies (m-p); every one has a numeric id.
+COMMUNITY_URL = "https://community.sap.com"
+COMMUNITY_TYPE = "SAP Community"
+MAX_COMMUNITY_POSTS = 3
+COMMUNITY_LINK_SELECTOR = "a[href*='-p/']"
+_COMMUNITY_POST_RE = re.compile(r"^(https://community\.sap\.com/t5/[^?#\s]*?/(?:ba|qaq|td|m)-p/(\d+))")
+
 # On the live results page (confirmed from a real dump), every SAP Note and
 # Knowledge Base Article title is "<number> - <title>", and the article opens
 # at me.sap.com/notes/<number>/E for both kinds. Other result kinds (SAP Help,
@@ -72,7 +89,10 @@ SYSTEM_PROMPT = (
     "programs. Read them and decide: do they name a SPECIFIC "
     "housekeeping/cleanup program, report, or transaction for this table? "
     "If one is named, return its name/ID and a one-sentence rationale that "
-    "cites which article (by the 'Article N' label given) it came from. If "
+    "cites which article (by the 'Article N' label given) it came from. SAP "
+    "Community posts are forum answers, less authoritative than Notes or Knowledge Base "
+    "Articles: use one only if it clearly names a program for this table, and say in the "
+    "rationale that it came from SAP Community. If "
     "none is named, or the text doesn't clearly identify one, set "
     "found=false -- never guess or invent a program name."
 )
@@ -232,6 +252,7 @@ class SapForMeSession:
         keyword: str,
         settings: "llm.Settings | None" = None,
         subject: str = "this search",
+        community_fallback: bool = True,
     ) -> "tuple[list[tuple[str, str, str]], str]":
         """Search SAP for Me for *query* and read the top few SAP Notes / Knowledge Base
         Articles, trimming each to the passages around *keyword* (and to the AI model's
@@ -239,6 +260,37 @@ class SapForMeSession:
         (title, type, text); problem is "" on success, otherwise a user-readable reason
         no articles could be read (*subject* names what was searched for)."""
         settings = settings or llm.load_settings()
+        max_chars = llm.budget(settings)["article_chars"]
+
+        articles, problem = self._fetch_sap_for_me_articles(query, keyword, subject, max_chars)
+        if articles:
+            return articles, ""
+
+        if not community_fallback:
+            return [], problem
+        # No readable Note or Knowledge Base Article: try SAP Community before giving up.
+        community, community_problem = self.fetch_community_posts(query, keyword, settings, subject)
+        if community:
+            return community, ""
+        return [], f"{problem} {community_problem}"
+
+    def fetch_community_posts(
+        self,
+        query: str,
+        keyword: str,
+        settings: "llm.Settings | None" = None,
+        subject: str = "this search",
+    ) -> "tuple[list[tuple[str, str, str]], str]":
+        """Search SAP Community for *query* and read the top few posts (labelled "SAP Community").
+        Same return shape as fetch_articles. Callers that run several queries use this directly
+        (with community_fallback=False on fetch_articles) so every query gets a chance to find a
+        Note or Knowledge Base Article before a forum post is used."""
+        settings = settings or llm.load_settings()
+        return self._fetch_community_posts(query, keyword, subject, llm.budget(settings)["article_chars"])
+
+    def _fetch_sap_for_me_articles(
+        self, query: str, keyword: str, subject: str, max_chars: int
+    ) -> "tuple[list[tuple[str, str, str]], str]":
         try:
             results = self._search(query)
         except Exception as exc:
@@ -249,7 +301,6 @@ class SapForMeSession:
         if not chosen:
             return [], f"No SAP Note or Knowledge Base Article found on SAP for Me for {subject}."
 
-        max_chars = llm.budget(settings)["article_chars"]
         articles = []
         for result in chosen:
             try:
@@ -262,6 +313,31 @@ class SapForMeSession:
 
         if not articles:
             return [], "Found SAP for Me results but could not read their content."
+        return articles, ""
+
+    def _fetch_community_posts(
+        self, query: str, keyword: str, subject: str, max_chars: int
+    ) -> "tuple[list[tuple[str, str, str]], str]":
+        """The SAP Community fallback: search the forum and read the top few posts."""
+        try:
+            posts = self._search_community(query)
+        except Exception as exc:
+            logger.warning("SAP Community search failed for %r: %s", query, exc, exc_info=True)
+            return [], f"SAP Community search failed: {_describe(exc)}"
+        if not posts:
+            return [], f"No SAP Community post found for {subject}."
+
+        articles = []
+        for post in posts[:MAX_COMMUNITY_POSTS]:
+            try:
+                text = self._read_community_post(post["url"], keyword, max_chars)
+            except Exception as exc:
+                logger.warning("Could not read SAP Community post '%s': %s", post["title"], exc, exc_info=True)
+                continue
+            if text:
+                articles.append((post["title"], COMMUNITY_TYPE, text))
+        if not articles:
+            return [], "Found SAP Community posts but could not read their content."
         return articles, ""
 
     def _search(self, query: str) -> list[dict]:
@@ -289,6 +365,38 @@ class SapForMeSession:
         except TimeoutException:
             pass  # use whatever rendered; the extraction step copes with thin text
         return _relevant_excerpt(driver.find_element(By.TAG_NAME, "body").text, table_name, max_chars)
+
+    def _search_community(self, query: str) -> list[dict]:
+        """Searches SAP Community for *query*; returns {"id", "title", "url"} per post, in the
+        site's relevance order. No sign-in is needed. An empty list means no posts matched."""
+        driver = self._driver
+        driver.get(f"{COMMUNITY_URL}/t5/forums/searchpage/tab/message?advanced=false&q={quote(query, safe='')}")
+        try:
+            WebDriverWait(driver, WAIT_SECONDS).until(
+                lambda d: d.find_elements(By.CSS_SELECTOR, COMMUNITY_LINK_SELECTOR)
+                or re.search(r"no results|0 results|did not match|no matches|nothing found",
+                             d.find_element(By.TAG_NAME, "body").text, re.IGNORECASE)
+            )
+        except TimeoutException:
+            pass  # parse whatever rendered; an empty page just yields no posts
+        links = [
+            (a.get_attribute("href") or "", a.get_attribute("textContent") or "")
+            for a in driver.find_elements(By.CSS_SELECTOR, COMMUNITY_LINK_SELECTOR)
+        ]
+        return _parse_community_links(links)
+
+    def _read_community_post(self, url: str, keyword: str, max_chars: int = 8000) -> str:
+        """Opens a SAP Community post and returns the part of its text most relevant to
+        *keyword*, at most *max_chars* long."""
+        driver = self._driver
+        driver.get(url)
+        try:
+            WebDriverWait(driver, WAIT_SECONDS).until(
+                lambda d: len(d.find_element(By.TAG_NAME, "body").text) > 600
+            )
+        except TimeoutException:
+            pass
+        return _relevant_excerpt(driver.find_element(By.TAG_NAME, "body").text, keyword, max_chars)
 
 
 def _click_by_text(driver, wait: WebDriverWait, text: str):
@@ -436,6 +544,23 @@ def _parse_results(raw_text: str) -> list[dict]:
         elif current is not None and not current["type"] and line in KNOWN_TYPES:
             current["type"] = line
     return results
+
+
+def _parse_community_links(links: "list[tuple[str, str]]") -> list[dict]:
+    """Turns the (href, text) pairs of a SAP Community search page into posts. Only links to a
+    post (/t5/<board>/<title>/(ba|qaq|td|m)-p/<id>) count; the query string and #fragment are
+    dropped, the same post is listed once (a reply link and its thread share an id), and the
+    longest link text is its title. The page's own order is kept."""
+    posts: dict[str, dict] = {}
+    for href, text in links:
+        m = _COMMUNITY_POST_RE.match((href or "").strip())
+        if not m:
+            continue
+        title = " ".join((text or "").split())
+        post = posts.setdefault(m.group(2), {"id": m.group(2), "title": "", "url": m.group(1)})
+        if len(title) > len(post["title"]):
+            post["title"] = title
+    return [p for p in posts.values() if len(p["title"]) >= 8]
 
 
 def _looks_rendered(text: str) -> bool:

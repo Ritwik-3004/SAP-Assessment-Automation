@@ -3,7 +3,7 @@ Standalone debug script for the SAP for Me scraper (sap_for_me.py) --
 NOT used by the running app. Run it manually while iterating on selectors
 against the live portal:
 
-    python backend/debug_sap_for_me.py TABLE_NAME
+    backend/.venv/Scripts/python.exe backend/debug_sap_for_me.py TABLE_NAME   (from the project root)
 
 Requires SAP for Me credentials already saved via the app (or present in
 sap_for_me_credentials.json at the project root). Runs headed (visible
@@ -56,6 +56,19 @@ def main():
             print(f"\nOpening first article: {first['title']}\n  {first['url']}")
             excerpt = session._read_article(first["url"], table_name)
             print(f"Article page dump: {sap_for_me._dump_debug(session._driver)}")
+            print(f"Excerpt length: {len(excerpt)} chars. First 600 chars:\n{excerpt[:600]}")
+
+        # The SAP Community fallback is only used when the search above finds no usable Note/KBA, but
+        # it is always probed here so its search and post reading can be checked on their own.
+        print(f"\nSearching SAP Community: {query!r}")
+        posts = session._search_community(query)
+        print(f"Parsed {len(posts)} post(s):")
+        for post in posts:
+            print(f"  {post['title']}\n    {post['url']}")
+        if posts:
+            print(f"\nOpening first post: {posts[0]['url']}")
+            excerpt = session._read_community_post(posts[0]["url"], table_name)
+            print(f"Post page dump: {sap_for_me._dump_debug(session._driver)}")
             print(f"Excerpt length: {len(excerpt)} chars. First 600 chars:\n{excerpt[:600]}")
 
         print("\nRunning full lookup() (search + read top articles + LLM extraction)...")

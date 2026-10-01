@@ -27,7 +27,8 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Generate Table List (DB02), Find Archiving Objects (DB15), table sizes | Working |
 | Score & Recommend Objects (Claude, grounded in the DVM Guide) | Working |
 | Housekeeping program lookup — DVM Guide stage | Working |
-| Housekeeping program lookup — SAP for Me stage | Working in `debug_sap_for_me.py` (COSP → `RK_PLAN_DEL_ZERO_RECORDS`); **not yet verified through a full scoring run in the app**. Needs Chrome for Testing + IT approval. SAP Community fallback **not implemented**. |
+| Housekeeping program lookup — SAP for Me stage | Working in `debug_sap_for_me.py` (COSP → `RK_PLAN_DEL_ZERO_RECORDS`); **not yet verified through a full scoring run in the app**. Needs Chrome for Testing + IT approval. |
+| SAP Community fallback (when SAP for Me has no usable Note/KBA) | Implemented for both the housekeeping and header-table lookups and checked offline with a stubbed browser. **Confirmed live (COSP, via `debug_sap_for_me.py`):** the Community search returns posts, they are recognised by their address shape (`/t5/…/(ba\|qaq\|td\|m)-p/<id>`) and a post's text reads cleanly. **Not yet seen live:** the fallback actually being used in a lookup (COSP has Notes, so it was never needed) and how good Community evidence is — for COSP the posts returned were mostly unrelated, which is why the model must see a program clearly named for the table before using one. Run `backend/.venv/Scripts/python.exe backend/debug_sap_for_me.py TABLE_NAME` to see what it finds (see [below](#housekeepingcleanup-program-lookup-for-tables-with-no-archiving-object)) |
 | Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
@@ -259,9 +260,14 @@ looks for one instead of just leaving the table with nothing:
    cover (or covers but names no program for), `backend/sap_for_me.py` drives a
    headless Chrome browser (via Selenium) to search SAP for Me for `"<table name>
    housekeeping program"`, keeps only **SAP Knowledge Base Article** and **SAP Note**
-   results (a SAP Community fallback is not implemented yet), reads the top 3, and
-   sends their text to Claude to extract a specific
-   program, grounded and cited the same way the DVM Guide path is. This requires SAP for
+   results, reads the top 3, and sends their text to the selected AI model to extract a
+   specific program, grounded and cited the same way the DVM Guide path is.
+   **SAP Community fallback:** if that search yields no Note or Knowledge Base Article (or
+   none can be read), the same browser searches SAP Community (`community.sap.com`, public,
+   no sign-in) and reads the top 3 forum posts instead. They are labelled "SAP Community" to
+   the model, which is told they are less authoritative and must clearly name a program for the
+   table before one is used; a rationale that came from a forum post says so. Notes and
+   Knowledge Base Articles always win: Community is only searched when there are none. This requires SAP for
    Me sign-in credentials — enter and save them once in the sidebar's "SAP for Me
    Credentials" panel (stored in `sap_for_me_credentials.json` at the project root,
    git-ignored, same plaintext-JSON pattern as `sap_credentials.json`); every scoring
@@ -271,8 +277,9 @@ looks for one instead of just leaving the table with nothing:
    Selenium, not Playwright, specifically because this backend's virtualenv is 32-bit
    Python (for the SAP GUI COM scripting) and Playwright's `greenlet` dependency has no
    prebuilt wheel for that. To debug/iterate on the portal's selectors directly, run
-   `python backend/debug_sap_for_me.py TABLE_NAME` — it runs headed (visible browser)
-   and prints what it found at each step.
+   `backend\.venv\Scripts\python.exe backend\debug_sap_for_me.py TABLE_NAME` (from the project root; the venv's Python is needed for the installed packages) — it runs headed (visible browser)
+   and prints what it found at each step, including a separate probe of the SAP Community
+   search and its first post.
 
    **One-time setup — Chrome for Testing (each user).** Managed Chrome/Edge installs
    often have the IT policy `RemoteDebuggingAllowed = 0`, which stops any automation tool
@@ -289,7 +296,7 @@ looks for one instead of just leaving the table with nothing:
       SAP_FOR_ME_CHROME_PATH=C:\tools\cft\chrome-win64\chrome.exe
       SAP_FOR_ME_CHROMEDRIVER_PATH=C:\tools\cft\chromedriver-win64\chromedriver.exe
       ```
-   4. Verify with `python backend/debug_sap_for_me.py <TABLE_NAME>` (set
+   4. Verify with `backend\.venv\Scripts\python.exe backend\debug_sap_for_me.py <TABLE_NAME>` (set
       `SAP_FOR_ME_HEADLESS=false` to watch it).
 
    If the browser can't start (paths unset or wrong, or blocked by policy — the launch
@@ -609,7 +616,10 @@ Objects** tab automates this via `SE16N` against the control table `ARCH_DEF`:
    2. *SAP for Me pass*, for anything not high-confidence: search `"<object> header table"`,
       read the top SAP Notes / Knowledge Base Articles (one browser session for all objects,
       same setup as the housekeeping lookup), and ask the model again with that evidence plus
-      the Guide's (Source `SAP for Me` or `DVM Guide + SAP for Me`).
+      the Guide's (Source `SAP for Me` or `DVM Guide + SAP for Me`). Both search phrases are
+      tried against Notes / Knowledge Base Articles first; only if neither finds one are
+      **SAP Community** posts searched (with the same two phrases), and the Source then reads
+      `SAP Community` or `DVM Guide + SAP Community`.
    The first pass always runs: with nothing to read, the model answers from its own SAP
    knowledge (Source `AI model knowledge`), which is never reported as more than **Low**
    confidence, so the SAP for Me check still follows. SAP for Me tries `"<object> header
@@ -631,7 +641,7 @@ Objects** tab automates this via `SE16N` against the control table `ARCH_DEF`:
    tie-breaker, but its results for `"<object> header table"` have not yet been judged on a
    live run.
 5. **Results** have five columns: Archiving Object, Header Table, **Source** (`ARCH_DEF`,
-   `DVM Guide`, `SAP for Me`, …), **Confidence** (High / Medium / Low) and **Comments**.
+   `DVM Guide`, `SAP for Me`, `SAP Community`, …), **Confidence** (High / Medium / Low) and **Comments**.
    Click **Save to output folder** to write `output/header_tables.xlsx`, or **Download
    Excel** for the file directly. Resolving ambiguous objects takes extra time (an AI call
    each, plus a browser search and up to 3 article loads for the unsure ones) — the progress

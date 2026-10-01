@@ -49,7 +49,8 @@ SYSTEM_PROMPT = (
     "being archived (for example EKKO for purchasing documents, BKPF for accounting "
     "documents), as opposed to an item, text, change-log or helper table. Base the answer "
     "on the evidence provided (excerpts from SAP's Data Management Guide, SAP Notes and "
-    "Knowledge Base Articles) and on the segment structure. Set confidence to 'high' only "
+    "Knowledge Base Articles, or, failing those, SAP Community forum posts, which are less "
+    "authoritative) and on the segment structure. Set confidence to 'high' only "
     "if the evidence states or clearly implies the header table, 'medium' for a sound "
     "inference, and 'low' if you are guessing or relying on memory alone. Always answer "
     "with a single table name."
@@ -180,20 +181,33 @@ def _sap_for_me_pass(pending: list[dict], state: dict, on_progress, settings: ll
                 on_progress(f"Searching SAP for Me for {obj} header table ({i} of {len(pending)})…")
             try:
                 articles, problems = [], []
-                for query in (f"{obj} header table", f"{obj} archiving object tables"):
-                    articles, problem = session.fetch_articles(query, obj, settings, subject=obj)
+                queries = (f"{obj} header table", f"{obj} archiving object tables")
+                # Notes / Knowledge Base Articles for both queries first; SAP Community posts only if
+                # neither query found one.
+                for query in queries:
+                    articles, problem = session.fetch_articles(
+                        query, obj, settings, subject=obj, community_fallback=False
+                    )
                     if articles:
                         break
                     problems.append(problem)
                 if not articles:
-                    s["note"] = (s["note"] + " " + (problems[0] if problems else "")).strip()
+                    for query in queries:
+                        articles, problem = session.fetch_community_posts(query, obj, settings, subject=obj)
+                        if articles:
+                            break
+                        problems.append(problem)
+                if not articles:
+                    # first SAP for Me problem plus the first SAP Community one (problems: 2 SAP for Me, 2 Community)
+                    reasons = [problems[i] for i in (0, 2) if i < len(problems)]
+                    s["note"] = (s["note"] + " " + " ".join(reasons)).strip()
                     continue
                 article_text = "\n\n".join(
                     f"Article {n + 1} ({kind}) - {title}:\n---\n{text}\n---"
                     for n, (title, kind, text) in enumerate(articles)
                 )
                 s["choice"] = _decide(item, s["dvm"], article_text, settings)
-                s["web"] = True
+                s["web"] = "SAP Community" if all(kind == "SAP Community" for _, kind, _ in articles) else "SAP for Me"
             except Exception as exc:
                 logger.warning("SAP for Me header-table lookup failed for %s: %s", obj, exc, exc_info=True)
                 s["note"] = (s["note"] + f" SAP for Me lookup failed: {sap_for_me._describe(exc)}").strip()
@@ -277,7 +291,8 @@ def _write_rows(items: list[dict], index: dict, state: dict) -> None:
             table, confidence, rationale = s["choice"]
             had_dvm = bool(s["dvm"])
             if s["web"]:
-                source = "DVM Guide + SAP for Me" if had_dvm else "SAP for Me"
+                web = s["web"] if isinstance(s["web"], str) else "SAP for Me"
+                source = f"DVM Guide + {web}" if had_dvm else web
             else:
                 source = "DVM Guide" if had_dvm else "AI model knowledge"
             confidence_label = confidence.capitalize()
