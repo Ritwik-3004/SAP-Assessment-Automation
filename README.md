@@ -101,7 +101,7 @@ Archiving Objects for Tables"); the transaction(s) behind it are an implementati
 detail documented here for developers, not exposed in the app itself. (The one
 exception is the [Chat assistant](#chat-assistant): users can ask it questions that
 Claude answers by running DB15, AOBJ, SE16N, SE11, TAANA or SARA on their behalf, and its
-replies may mention those transactions.)
+replies always name the transaction it queried.)
 
 ## Backend transaction modules
 
