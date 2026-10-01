@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import ResultsTable from "./ResultsTable";
 import type { ReferenceReview } from "../types";
 
 type Row = Record<string, string>;
@@ -34,6 +35,8 @@ export interface ReferenceReviewConfig {
   exportFile: (final: Row[]) => Promise<Blob>;
   /** The row after the user accepts the reference document's value. */
   applyOverride: (row: Row, refValue: string) => Row;
+  /** Optional "Show Grouped by Object" view of the final list (same as Find Archiving Objects). */
+  groupedView?: { fetch: (rows: Row[]) => Promise<Row[]>; caption: string };
 }
 
 export default function ReferenceReviewPanel({ config }: { config: ReferenceReviewConfig }) {
@@ -52,6 +55,11 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
+  // Grouped by Object view of the preview (only when the config provides one)
+  const [groupedRows, setGroupedRows] = useState<Row[] | null>(null);
+  const [showGrouped, setShowGrouped] = useState(false);
+  const [groupedLoading, setGroupedLoading] = useState(false);
+
   // ── File pick ────────────────────────────────────────────────────────────
 
   async function handleFile(file: File) {
@@ -61,6 +69,8 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
     setSelected(new Set());
     setPreviewRows(null);
     setSavedPath(null);
+    setGroupedRows(null);
+    setShowGrouped(false);
 
     try {
       const res = await c.analyze(file);
@@ -111,7 +121,33 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
     });
 
     setPreviewRows(preview);
+    setGroupedRows(null);
+    setShowGrouped(false);
     setPhase("preview");
+  }
+
+  // ── Grouped by Object ────────────────────────────────────────────────────
+
+  async function handleToggleGrouped() {
+    if (!c.groupedView || !previewRows) return;
+    if (showGrouped) {
+      setShowGrouped(false);
+      return;
+    }
+    if (groupedRows) {
+      setShowGrouped(true);
+      return;
+    }
+    setGroupedLoading(true);
+    setError("");
+    try {
+      setGroupedRows(await c.groupedView.fetch(previewRows));
+      setShowGrouped(true);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Grouping failed");
+    } finally {
+      setGroupedLoading(false);
+    }
   }
 
   // ── Save / export ────────────────────────────────────────────────────────
@@ -383,6 +419,15 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
             <button className="btn btn-secondary" onClick={handleExport} disabled={exporting}>
               {exporting ? "Preparing…" : "Download Excel"}
             </button>
+            {c.groupedView && (
+              <button
+                className="btn btn-secondary"
+                onClick={handleToggleGrouped}
+                disabled={groupedLoading}
+              >
+                {groupedLoading ? "Grouping…" : showGrouped ? "Hide Grouped by Object" : "Show Grouped by Object"}
+              </button>
+            )}
             <button
               className="btn btn-secondary"
               onClick={() => setPhase("results")}
@@ -394,6 +439,12 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
           {savedPath && (
             <div className="saved-notice">
               Saved to <code>{c.savedPath}</code>
+            </div>
+          )}
+
+          {c.groupedView && showGrouped && groupedRows && (
+            <div style={{ marginTop: 12 }}>
+              <ResultsTable rows={groupedRows} caption={c.groupedView.caption} />
             </div>
           )}
         </>

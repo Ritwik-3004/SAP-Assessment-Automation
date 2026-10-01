@@ -909,13 +909,15 @@ def analyze_reference_doc(
     return result
 
 
-@app.post("/api/reference-doc/save")
-def save_reference_doc_to_output(req: ReferenceDocSaveRequest):
-    """Save the reference-doc-annotated recommended list to the output folder."""
+def _reference_doc_workbook(req: "ReferenceDocSaveRequest") -> io.BytesIO:
+    """The reference-reviewed archiving-object workbook: the scored list, the recommended list
+    with the reference-document comments, and -- as in archiving_objects_scored.xlsx -- a last
+    "Grouped by Object" sheet built from the post-override recommended list. It stays last because
+    Find Header Tables reads the last sheet of an output file as the size-sorted grouped list."""
     ref_cols = ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
                 "Archiving Object", "Object Description", "Housekeeping Program",
                 "Score", "Rationale", "Comments"]
-    buf = _build_multi_sheet_workbook([
+    return _build_multi_sheet_workbook([
         (
             "All Scored Objects",
             ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
@@ -923,11 +925,23 @@ def save_reference_doc_to_output(req: ReferenceDocSaveRequest):
             req.rows,
         ),
         (
-            "Recommended (with Reference Doc)",
+            "Recommended (with Ref Doc)",
             ref_cols,
             req.recommended,
         ),
+        (
+            "Grouped by Object",
+            GROUPED_COLUMNS,
+            grouping.build_object_groups(req.recommended),
+            GROUPED_MERGE_COLUMNS,
+        ),
     ])
+
+
+@app.post("/api/reference-doc/save")
+def save_reference_doc_to_output(req: ReferenceDocSaveRequest):
+    """Save the reference-doc-annotated recommended list to the output folder."""
+    buf = _reference_doc_workbook(req)
     dest = OUTPUT_DIR / "archiving_objects_with_reference.xlsx"
     dest.write_bytes(buf.getvalue())
     return {"saved": True, "path": str(dest)}
@@ -936,24 +950,8 @@ def save_reference_doc_to_output(req: ReferenceDocSaveRequest):
 @app.post("/api/reference-doc/export")
 def export_reference_doc(req: ReferenceDocSaveRequest):
     """Download the reference-doc-annotated recommended list as an Excel file."""
-    ref_cols = ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
-                "Archiving Object", "Object Description", "Housekeeping Program",
-                "Score", "Rationale", "Comments"]
-    buf = _build_multi_sheet_workbook([
-        (
-            "All Scored Objects",
-            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
-             "Archiving Object", "Object Description", "Housekeeping Program", "Score"],
-            req.rows,
-        ),
-        (
-            "Recommended (with Reference Doc)",
-            ref_cols,
-            req.recommended,
-        ),
-    ])
     return StreamingResponse(
-        buf,
+        _reference_doc_workbook(req),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=archiving_objects_with_reference.xlsx"},
     )

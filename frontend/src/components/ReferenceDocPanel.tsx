@@ -43,12 +43,37 @@ export default function ReferenceDocPanel({ scored }: Props) {
     },
     save: (final) => api.saveReferenceDoc(allRows, final),
     exportFile: (final) => api.exportReferenceDoc(allRows, final),
-    applyOverride: (row, refValue) => ({
-      ...row,
-      "Archiving Object": refValue,
-      Comments: `Updated from ${row["Archiving Object"]} per reference document`,
-      "Ref Doc Object": "",
-    }),
+    // Taking the document's object must not leave the old object's details behind: its score
+    // and description come from the scored list when that table was scored against the new object,
+    // otherwise they are blank. A housekeeping program is cleared (a table has one or the other).
+    applyOverride: (row, refValue) => {
+      const scoredPair = allRows.find(
+        (r) =>
+          r["Table Name"] === row["Table Name"] &&
+          (r["Archiving Object"] || "").toUpperCase() === refValue.toUpperCase()
+      );
+      const housekeeping = row["Housekeeping Program"];
+      const previous = row["Archiving Object"]
+        ? row["Archiving Object"]
+        : housekeeping
+        ? `(housekeeping program ${housekeeping})`
+        : "(no archiving object)";
+      return {
+        ...row,
+        "Archiving Object": refValue,
+        "Object Description": scoredPair?.["Object Description"] ?? "",
+        Score: scoredPair?.Score ?? "",
+        Rationale: "Chosen from the reference document.",
+        "Housekeeping Program": "",
+        Comments: `Updated from ${previous} per reference document`,
+        "Ref Doc Object": "",
+      };
+    },
+    groupedView: {
+      fetch: async (rows) => (await api.groupByObject(rows)).rows,
+      caption:
+        "Grouped by Object — tables sharing an archiving object/housekeeping program, sorted by cumulative size (largest first; tables with neither are grouped last)",
+    },
   };
 
   return <ReferenceReviewPanel config={config} />;

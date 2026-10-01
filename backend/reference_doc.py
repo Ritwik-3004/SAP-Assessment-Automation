@@ -140,6 +140,9 @@ def analyze_reference_doc(
     Parse *contents* (the uploaded reference document), extract table→object
     mappings, then compare with *recommended* (the current scored output).
 
+    A table the app found no archiving object for, which the document maps to one, is a
+    mismatch (so the document can fill the gap), not a match.
+
     Returns
     -------
     {
@@ -189,7 +192,7 @@ def analyze_reference_doc(
 
         if table in ref_mappings:
             ref_obj = ref_mappings[table]
-            if ref_obj == current_obj or not current_obj:
+            if ref_obj == current_obj:
                 annotated_row["Comments"] = "Matches reference document"
                 annotated_row["Ref Doc Object"] = ""
                 matches.append(annotated_row)
