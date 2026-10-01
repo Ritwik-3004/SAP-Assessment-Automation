@@ -1,34 +1,28 @@
 """
-SAP for Me portal scraper -- the second-stage housekeeping/cleanup-program
-fallback for a table the DVM Guide doesn't cover (see housekeeping.py).
-Searches SAP for Me for "<table> housekeeping program", keeps only SAP
-Knowledge Base Article / SAP Note results (falling back to SAP Community
-only if neither of those turns up anything), reads the top few articles, and
-asks the selected AI model (see llm.py) to extract a specific housekeeping program
-grounded in what they say.
+SAP for Me portal scraper, used by housekeeping.py (housekeeping-program lookup for a table
+the DVM Guide doesn't cover) and header_tables.py (header-table lookup for an archiving
+object ARCH_DEF can't settle). It searches SAP for Me, keeps only SAP Knowledge Base
+Article / SAP Note results, reads the top few articles, and hands their text to the selected
+AI model (see llm.py). A SAP Community fallback is not implemented.
 
-The portal is a JS-heavy single-page app behind a login wall, so this drives
-a real (headless by default) Chrome browser via Selenium rather than
-requests/BeautifulSoup. Logging in is the expensive part, so one
-SapForMeSession is meant to be opened once per scoring run and reused across
-every table that needs this fallback -- housekeeping.py owns that lifecycle
-(open once via open_session(), call .lookup() per table, close() when done).
+The portal is a JS-heavy single-page app behind a login wall, so this drives a real (headless
+by default) Chrome browser via Selenium rather than requests/BeautifulSoup. Logging in is the
+expensive part, so one SapForMeSession is meant to be opened once per run and reused across
+every item that needs it -- callers own that lifecycle (open once via open_session(), call
+.lookup() / .fetch_articles() per item, close() when done).
 
-Selenium (not Playwright) specifically: this project's backend runs on a
-32-bit Python virtualenv (needed for the SAP GUI COM scripting elsewhere in
-the app), and Playwright's `greenlet` dependency has no prebuilt wheel for
-32-bit Windows. Selenium's Python bindings are pure-Python and its built-in
-Selenium Manager auto-downloads a matching chromedriver for whatever local
-Chrome install it finds, so no compiler and no separate browser-install step
-are needed.
+Browser: Chrome for Testing plus its matching chromedriver, set in backend/.env
+(SAP_FOR_ME_CHROME_PATH / SAP_FOR_ME_CHROMEDRIVER_PATH). Managed Chrome/Edge installs often
+set the IT policy RemoteDebuggingAllowed=0, which stops any automation tool from attaching.
+Selenium (not Playwright) because this project's backend runs on a 32-bit Python virtualenv
+(needed for the SAP GUI COM scripting elsewhere in the app) and Playwright's `greenlet`
+dependency has no prebuilt wheel for 32-bit Windows.
 
-Selectors here are built from screenshots of the live portal, not a live DOM
-inspection (no portal access from this environment) -- expect these to need
-adjustment against the real site; see backend/debug_sap_for_me.py. Result
-cards are read by parsing the results page's plain text rather than depending
-on exact CSS structure, since each result's resource-type badge ("SAP
-Knowledge Base Article" / "SAP Note" / "SAP Community") is reliably plain
-text right after its title/snippet even if the surrounding markup changes.
+The sign-in, search and article steps have been run against the live portal; the portal's
+page text is relied on rather than CSS classes: result titles read "<number> - <title>", each
+followed by its resource badge ("SAP Note" / "SAP Knowledge Base Article" / ...), and every
+Note and KBA opens at /notes/<number>/E. If the portal changes, backend/debug_sap_for_me.py
+saves a screenshot and the page text to output/ to show what broke.
 """
 
 import json

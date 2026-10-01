@@ -383,10 +383,11 @@ export default function BatchArchivingPanel() {
             SAP's official Data Management Guide (DVM Guide) where it covers that table,
             then pick the highest-scoring object per table as the recommended setup.
             Every table is included below even if none was found — for a table with no
-            archiving object, this also checks the DVM Guide for a housekeeping/cleanup
-            program instead (shown in its own column, never mixed with Archiving Object;
-            a SAP for Me portal search is planned as a further fallback once access is
-            granted). "Show Grouped by Object" then rolls tables sharing the same
+            archiving object, this looks for a housekeeping/cleanup program instead: first
+            in the DVM Guide, then by searching the SAP Notes and Knowledge Base Articles on
+            SAP for Me (needs your SAP for Me credentials in the sidebar; if it can't run,
+            the Rationale says why). The program is shown in its own column, never mixed
+            with Archiving Object. "Show Grouped by Object" then rolls tables sharing the same
             archiving object or housekeeping program into one view with a cumulative
             size, sorted largest-first (tables with neither found are grouped last).
             Scores and rationale are AI-generated best-effort judgments, not
