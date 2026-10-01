@@ -13,7 +13,8 @@ Browser (React + Vite)  ←→  FastAPI (Python)  ←→  SAP GUI (COM scripting
 ```
 
 Main backend modules (`backend/`): `main.py` (all endpoints), `sap_connector.py` (SAP GUI
-connection), `transactions/` (one module per SAP transaction), `llm.py` (the AI model switch: Claude or
+connection), `transactions/` (one module per SAP transaction), `header_tables.py` (settles ambiguous header
+tables), `llm.py` (the AI model switch: Claude or
 Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeeping.py` + `sap_for_me.py`
 (housekeeping-program lookup), `grouping.py` (Grouped by Object), `chat.py` (chat
 assistant), `reference_doc.py` (reference document analysis), `progress.py` (progress
@@ -28,7 +29,8 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Housekeeping program lookup — DVM Guide stage | Working |
 | Housekeeping program lookup — SAP for Me stage | Working in `debug_sap_for_me.py` (COSP → `RK_PLAN_DEL_ZERO_RECORDS`); **not yet verified through a full scoring run in the app**. Needs Chrome for Testing + IT approval. SAP Community fallback **not implemented**. |
 | Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
-| Find Header Tables (SE16N/`ARCH_DEF`) | Working |
+| Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
+| Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions. **Re-test on the same objects pending**; Low-confidence rows are best guesses to be confirmed by the reference document |
 | Chat assistant over scored results | Implemented; documented from the code and not run end to end — see [Chat assistant](#chat-assistant) for known gaps |
 | AI model switch (Claude or Groq free tier) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared** — see [AI model selection](#ai-model-selection-claude-or-groq) |
 | Reference document analysis (Excel / PDF / PowerPoint) | Implemented; frontend builds cleanly, not yet run end to end against a real document — see [Reference document analysis](#reference-document-analysis) |
@@ -537,16 +539,69 @@ Objects** tab automates this via `SE16N` against the control table `ARCH_DEF`:
    in row order, so housekeeping-program-only and "nothing found" rows are naturally
    skipped.
 3. Click **Submit**. For each object, the backend navigates to SE16N, enters
-   `ARCH_DEF`, sets the "Arch. Object" filter, executes, and reads the result grid; the
-   row whose "Parent Segment" is blank names the header table in its "Segment" column
-   (`se16n.find_header_table()`/`run_batch_find_header_tables()` in
-   `backend/transactions/se16n.py`) — reusing one SE16N screen across all N objects
-   (pressing Back between each) rather than re-navigating from scratch every time. Not
-   every archiving object resolves to one (a blank Header Table is a valid result, not
-   an error).
-4. Click **Save to output folder** to write `output/header_tables.xlsx`, or **Download
-   Excel** to get the file directly — a simple 2-column result (Archiving Object,
-   Header Table).
+   `ARCH_DEF`, sets the "Arch. Object" filter, executes, and reads the result grid —
+   reusing one SE16N screen across all N objects (pressing Back between each)
+   (`run_batch_find_header_tables()` in `backend/transactions/se16n.py`). It keeps every
+   segment of each object, not just one, and classifies it:
+   - **Exactly one top-level segment** (blank "Parent Segment") → that "Segment" is the
+     header table, chosen automatically (Source `ARCH_DEF`, Confidence `High`).
+   - **Several top-level segments, or none** → the object is *ambiguous*; the candidate
+     tables are settled in a second stage below (previously the first one was silently
+     picked).
+   - **No ARCH_DEF entries at all, or the SE16N lookup failed** → there are no candidates, so
+     the object also goes to the second stage, which then has to name the table itself.
+     Either way **every object is meant to end with a header table** — nothing is left blank
+     for the reference-document step.
+4. **Settling ambiguous objects** (`backend/header_tables.py`, after the SAP GUI part is
+   finished, so SAP isn't held up). For each ambiguous object:
+   1. *DVM Guide pass.* The Guide section of each candidate table, plus the few sections that
+      mention the archiving object, go to the selected AI model, which must pick one of the
+      candidates and say how sure it is. A `high` answer stops here (Source `DVM Guide`).
+   2. *SAP for Me pass*, for anything not high-confidence: search `"<object> header table"`,
+      read the top SAP Notes / Knowledge Base Articles (one browser session for all objects,
+      same setup as the housekeeping lookup), and ask the model again with that evidence plus
+      the Guide's (Source `SAP for Me` or `DVM Guide + SAP for Me`).
+   The first pass always runs: with nothing to read, the model answers from its own SAP
+   knowledge (Source `AI model knowledge`), which is never reported as more than **Low**
+   confidence, so the SAP for Me check still follows. SAP for Me tries `"<object> header
+   table"` and then `"<object> archiving object tables"`. If the evidence is inconclusive
+   the best guess is still filled in, marked **Low** confidence with the other candidates
+   (if any) in Comments — a reviewer can then correct it. When ARCH_DEF gave candidates the
+   model can only choose among them (an answer outside them is rejected); when it gave none,
+   the answer must at least look like a table name. If SAP for Me can't run (no
+   credentials, browser can't start) the object keeps its best guess and Comments say why.
+   A header table is left blank only when the AI model is unavailable *and* ARCH_DEF gave no
+   candidates — a table name can't be invented without a model — and Comments say so.
+
+   **How useful is the DVM Guide here?** Only as supporting evidence. It is organised by
+   table, not by archiving object, never states "the header table of X is Y" consistently,
+   has no sections for several major header tables (MKPF, LIKP, VBRK, BSEG), and many
+   sections are clipped at 6,000 characters. It does say so explicitly for some objects
+   (e.g. MM_EKKO → EKKO, FI_DOCUMNT → BKPF, BC_SBAL → BALHDR, WORKITEM → SWWWIHEAD), so it
+   helps choose between candidates ARCH_DEF already gave us. SAP for Me is the stronger
+   tie-breaker, but its results for `"<object> header table"` have not yet been judged on a
+   live run.
+5. **Results** have five columns: Archiving Object, Header Table, **Source** (`ARCH_DEF`,
+   `DVM Guide`, `SAP for Me`, …), **Confidence** (High / Medium / Low) and **Comments**.
+   Click **Save to output folder** to write `output/header_tables.xlsx`, or **Download
+   Excel** for the file directly. Resolving ambiguous objects takes extra time (an AI call
+   each, plus a browser search and up to 3 article loads for the unsure ones) — the progress
+   bar stays full while its message shows which object is being worked on.
+6. **Reference document review** (below the results; same flow as the one in Find
+   Archiving Objects). Upload an SME-written reference document (Excel, PDF or PowerPoint)
+   listing each archiving object's header table. The selected AI model extracts the
+   pairs and the app compares them with its own list into **matched**, **mismatched** and
+   **not in the reference document**. Tick the mismatches to override with the document's
+   value (a blank or low-confidence header table with a reference value counts as a
+   mismatch, so the document can fill gaps), press *Apply*, review the preview (a
+   *Reference Check* column records "Matches reference document", "Reference document
+   suggests: X" or "Updated from X per reference document"; overridden rows become Source
+   `Reference document`, Confidence `High`), then **Save to output folder**
+   (`output/header_tables_with_reference.xlsx`: sheets "Header Tables" and "Header Tables
+   (with Reference)") or **Download Excel**. Backend: `analyze_header_reference()` in
+   `backend/reference_doc.py`; UI: `HeaderReferencePanel.tsx`, which shares its
+   upload/compare/override/preview component (`ReferenceReviewPanel.tsx`) with the
+   archiving-object review.
 
 ### SE16N/ARCH_DEF navigation notes
 
@@ -700,6 +755,9 @@ Key endpoints:
 | POST | `/api/transactions/header-tables/batch` | Upload an Excel file; starts the SE16N/ARCH_DEF header-table lookup for the top N archiving objects on its last sheet in the background |
 | POST | `/api/transactions/header-tables/batch-from-output` | Start the header-table lookup using a file already in the `output/` folder (body: `{filename, max_objects}`) |
 | GET | `/api/transactions/header-tables/batch/progress` | Poll for header-table lookup progress; `result` is populated once `status` is `"done"` |
-| POST | `/api/transactions/header-tables/export` | Export header-table rows (JSON) to a downloadable 2-column `.xlsx` |
+| POST | `/api/transactions/header-tables/export` | Export header-table rows (JSON) to a downloadable `.xlsx` (Archiving Object, Header Table, Source, Confidence, Comments) |
+| POST | `/api/header-reference/analyze` | Multipart upload: `file` (Excel/PDF/PowerPoint) + `rows` (JSON string of the header-table rows); returns matches, mismatches, not-in-reference rows and the annotated rows |
+| POST | `/api/header-reference/save` | Save the reference-reviewed header tables (body: `{rows, final}`) to `output/header_tables_with_reference.xlsx` |
+| POST | `/api/header-reference/export` | Same workbook as a browser download |
 | GET | `/api/transactions/se16n/debug-arch-def-screen` | Diagnostic: dump `ARCH_DEF`'s Selection Criteria screen elements |
 | GET | `/api/transactions/se16n/debug-arch-def-query` | Diagnostic: query `ARCH_DEF` for an archiving object and report every step independently |
