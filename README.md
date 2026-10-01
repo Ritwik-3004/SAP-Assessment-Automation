@@ -7,7 +7,17 @@ A desktop-local web application for SAP archivability analysis. A Python/FastAPI
 ```
 Browser (React + Vite)  ←→  FastAPI (Python)  ←→  SAP GUI (COM scripting)  ←→  SAP System
     localhost:5173              localhost:8000          win32com.client
+                                    │
+                                    ├──→  Claude API (scoring, housekeeping extraction, chat)
+                                    └──→  Chrome for Testing (Selenium)  ←→  SAP for Me (me.sap.com)
 ```
+
+Main backend modules (`backend/`): `main.py` (all endpoints), `sap_connector.py` (SAP GUI
+connection), `transactions/` (one module per SAP transaction), `scoring.py` (Claude
+scoring), `dvm_guide.py` (DVM Guide lookup), `housekeeping.py` + `sap_for_me.py`
+(housekeeping-program lookup), `grouping.py` (Grouped by Object), `chat.py` (chat
+assistant), `progress.py` (progress polling), `debug_sap_for_me.py` (manual scraper
+diagnostics).
 
 ## Project status
 
@@ -30,7 +40,7 @@ Browser (React + Vite)  ←→  FastAPI (Python)  ←→  SAP GUI (COM scripting
 | SAP GUI Scripting allowed (server) | Profile parameter `sapgui/user_scripting = TRUE` (RZ11, set by Basis) and authorization object `S_SCR` for your user. If Connect times out while the login window looks normal, check this first. |
 | Python 3.11+ | `python --version`. The project's `.venv` is **32-bit** Python 3.12, which suits the SAP GUI COM scripting (and is why Selenium is used instead of Playwright). |
 | Node.js 18+ | `node --version` |
-| `ANTHROPIC_API_KEY` | In `backend/.env`; needed for scoring and housekeeping lookups |
+| `ANTHROPIC_API_KEY` | In `backend/.env`; needed for scoring, housekeeping lookups and the chat assistant |
 | Chrome for Testing + chromedriver | Only for the SAP for Me housekeeping lookup; needs IT approval. See [setup](#housekeepingcleanup-program-lookup-for-tables-with-no-archiving-object) |
 | SAP for Me account | Email and password saved in the app's sidebar; internet access to me.sap.com, and SAP's terms must permit automated access |
 
@@ -83,7 +93,10 @@ user to pick one — end users doing an archivability assessment shouldn't need 
 which SAP tcode does the work (they could just as easily run it by hand in SAP GUI if
 that were the point). Each sidebar item names the *task* ("Generate Table List", "Find
 Archiving Objects for Tables"); the transaction(s) behind it are an implementation
-detail documented here for developers, not exposed in the app itself.
+detail documented here for developers, not exposed in the app itself. (The one
+exception is the [Chat assistant](#chat-assistant): users can ask it questions that
+Claude answers by running DB15, AOBJ, SE16N, SE11, TAANA or SARA on their behalf, and its
+replies may mention those transactions.)
 
 ## Backend transaction modules
 
@@ -370,7 +383,13 @@ message)` callback, called once per table/object resolved — for scoring that m
 per table as its `ThreadPoolExecutor` future completes (or immediately for the
 zero/single-candidate shortcuts), not once per underlying API call.
 
-`GET /api/transactions/db02/top-tables` is unchanged (still a single blocking
+Scoring has one extra phase after the bar reaches 100%: the housekeeping-program lookup
+for tables with no archiving object. If any table needs the SAP for Me stage, the bar
+stays full while its message cycles through "Searching SAP for Me for TABLE (i of n)…"
+(`housekeeping.find_housekeeping_programs(on_progress=…)`), since each table involves
+real browser navigation and can take a while.
+
+`POST /api/transactions/db02/top-tables` is unchanged (still a single blocking
 request) — a single SQL query execution has no sub-step to poll, so its panel shows
 an indeterminate animated bar (`<ProgressBar mode="indeterminate" />`) instead of a
 real percentage.
@@ -459,7 +478,7 @@ If the SAP session is still live but the browser shows "Not Connected", click **
 
 Click **Save** (next to **Connect** in the login form) to persist all connection fields — including the password — to `sap_credentials.json` at the project root. The next time the page loads (or the backend restarts), the form is pre-filled automatically from that file, so you only need to click **Connect**.
 
-The credentials file is stored locally on the machine running the backend; it is not transmitted anywhere. Add it to `.gitignore` if this repository is shared.
+The credentials file is stored locally on the machine running the backend; it is not transmitted anywhere. It is plain JSON (the password is not encrypted) and is already listed in `.gitignore`, as is `sap_for_me_credentials.json`, which holds the SAP for Me email and password in the same way (saved from the "SAP for Me Credentials" panel).
 
 ## Adjusting Screen Element IDs
 
