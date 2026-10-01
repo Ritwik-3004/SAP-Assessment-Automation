@@ -82,7 +82,7 @@ export default function ReferenceDocPanel({ scored }: Props) {
       if (selected.has(tableName) && refObj) {
         return {
           ...row,
-          Archiving Object: refObj,
+          "Archiving Object": refObj,
           Comments: `Updated from ${row["Archiving Object"]} per reference document`,
           "Ref Doc Object": "",
         };

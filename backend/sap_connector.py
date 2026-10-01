@@ -371,7 +371,20 @@ class SAPConnector:
             logger.info("SAP GUI not running — launching %s", SAPLOGON_EXE)
             subprocess.Popen([SAPLOGON_EXE])
             self._gui = self._wait_for_sapgui()
-        self._engine = self._gui.GetScriptingEngine
+        try:
+            self._engine = self._gui.GetScriptingEngine
+        except pywintypes.com_error as exc:
+            # Error 605: scripting engine could not be instantiated — scripting
+            # is almost always disabled in SAP GUI Options.
+            code = exc.args[2][1] if len(exc.args) >= 3 and exc.args[2] else None
+            if code == 605:
+                raise RuntimeError(
+                    "SAP GUI Scripting is not enabled. "
+                    "In SAP Logon open Options (gear icon or Customize Local Layout) → "
+                    "Accessibility & Scripting → Scripting → tick 'Enable Scripting', "
+                    "then click OK and try connecting again."
+                ) from exc
+            raise
 
     @staticmethod
     def _wait_for_sapgui(timeout: float = 30.0, interval: float = 1.0):
