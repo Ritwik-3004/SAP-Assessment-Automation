@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import ResultsTable from "./ResultsTable";
 import ProgressBar from "./ProgressBar";
 import ChatPanel from "./ChatPanel";
+import ReferenceDocPanel from "./ReferenceDocPanel";
 import type { Db15BatchResult, ProgressSnapshot, ScoredResult } from "../types";
 
 export default function BatchArchivingPanel() {
@@ -471,6 +472,10 @@ export default function BatchArchivingPanel() {
             />
           )}
         </>
+      )}
+
+      {scored?.rows && scored.rows.length > 0 && (
+        <ReferenceDocPanel scored={scored} />
       )}
 
       {scored?.rows && scored.rows.length > 0 && (

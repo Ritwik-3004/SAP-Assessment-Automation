@@ -160,6 +160,37 @@ export const api = {
       history,
     }),
 
+  analyzeReferenceDoc: async (file: File, recommended: Record<string, string>[]) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("recommended", JSON.stringify(recommended));
+    const res = await fetch(`${BASE}/api/reference-doc/analyze`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.json() as Promise<import("../types").ReferenceDocResult>;
+  },
+
+  saveReferenceDoc: (rows: Record<string, string>[], recommended: Record<string, string>[]) =>
+    post<{ saved: boolean; path: string }>("/api/reference-doc/save", { rows, recommended }),
+
+  exportReferenceDoc: async (rows: Record<string, string>[], recommended: Record<string, string>[]) => {
+    const res = await fetch(`${BASE}/api/reference-doc/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows, recommended }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.blob();
+  },
+
   getInputFiles: () => get<{ files: string[] }>("/api/files/input"),
 
   db15BatchFromInput: (filename: string) =>

@@ -65,3 +65,14 @@ export interface ProgressSnapshot<T> {
   message?: string | null;
   result: T | null;
 }
+
+export interface ReferenceDocResult {
+  status: "ok" | "error";
+  message?: string;
+  filename: string;
+  ref_mappings: Record<string, string>;
+  annotated_recommended: Record<string, string>[];
+  matches: Record<string, string>[];
+  mismatches: Record<string, string>[];
+  not_in_ref: Record<string, string>[];
+}

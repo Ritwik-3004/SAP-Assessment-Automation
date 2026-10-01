@@ -18,7 +18,7 @@ from typing import Optional
 
 import openpyxl
 from openpyxl.styles import Alignment
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -28,6 +28,7 @@ from progress import ProgressTracker
 from config import INPUT_DIR, OUTPUT_DIR, CREDENTIALS_FILE, SAP_FOR_ME_CREDENTIALS_FILE
 import scoring
 import grouping
+import reference_doc as ref_doc_mod
 import transactions.taana as taana
 import transactions.db15 as db15
 import transactions.db02 as db02
@@ -815,6 +816,83 @@ def _run_header_table_job(archiving_objects: list[str]):
     except Exception as exc:
         logger.exception("Header-table batch job failed")
         _header_table_progress.fail(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Reference document analysis
+# ---------------------------------------------------------------------------
+
+class ReferenceDocSaveRequest(BaseModel):
+    rows: list[dict]
+    recommended: list[dict]
+
+
+@app.post("/api/reference-doc/analyze")
+def analyze_reference_doc(
+    file: UploadFile = File(...),
+    recommended: str = Form(...),
+):
+    """Parse the uploaded reference document and compare its archiving-object
+    mappings against the current scored recommendations."""
+    contents = file.file.read()
+    try:
+        recommended_rows = json.loads(recommended)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON in 'recommended' field.")
+    result = ref_doc_mod.analyze_reference_doc(contents, file.filename or "document", recommended_rows)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@app.post("/api/reference-doc/save")
+def save_reference_doc_to_output(req: ReferenceDocSaveRequest):
+    """Save the reference-doc-annotated recommended list to the output folder."""
+    ref_cols = ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
+                "Archiving Object", "Object Description", "Housekeeping Program",
+                "Score", "Rationale", "Comments"]
+    buf = _build_multi_sheet_workbook([
+        (
+            "All Scored Objects",
+            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
+             "Archiving Object", "Object Description", "Housekeeping Program", "Score"],
+            req.rows,
+        ),
+        (
+            "Recommended (with Reference Doc)",
+            ref_cols,
+            req.recommended,
+        ),
+    ])
+    dest = OUTPUT_DIR / "archiving_objects_with_reference.xlsx"
+    dest.write_bytes(buf.getvalue())
+    return {"saved": True, "path": str(dest)}
+
+
+@app.post("/api/reference-doc/export")
+def export_reference_doc(req: ReferenceDocSaveRequest):
+    """Download the reference-doc-annotated recommended list as an Excel file."""
+    ref_cols = ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
+                "Archiving Object", "Object Description", "Housekeeping Program",
+                "Score", "Rationale", "Comments"]
+    buf = _build_multi_sheet_workbook([
+        (
+            "All Scored Objects",
+            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)",
+             "Archiving Object", "Object Description", "Housekeeping Program", "Score"],
+            req.rows,
+        ),
+        (
+            "Recommended (with Reference Doc)",
+            ref_cols,
+            req.recommended,
+        ),
+    ])
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=archiving_objects_with_reference.xlsx"},
+    )
 
 
 # ---------------------------------------------------------------------------
