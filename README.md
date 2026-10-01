@@ -16,8 +16,8 @@ Main backend modules (`backend/`): `main.py` (all endpoints), `sap_connector.py`
 connection), `transactions/` (one module per SAP transaction), `scoring.py` (Claude
 scoring), `dvm_guide.py` (DVM Guide lookup), `housekeeping.py` + `sap_for_me.py`
 (housekeeping-program lookup), `grouping.py` (Grouped by Object), `chat.py` (chat
-assistant), `progress.py` (progress polling), `debug_sap_for_me.py` (manual scraper
-diagnostics).
+assistant), `reference_doc.py` (reference document analysis), `progress.py` (progress
+polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 
 ## Project status
 
@@ -30,6 +30,7 @@ diagnostics).
 | Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working |
 | Chat assistant over scored results | Implemented; documented from the code and not run end to end — see [Chat assistant](#chat-assistant) for known gaps |
+| Reference document analysis (Excel / PDF / PowerPoint) | Implemented; frontend builds cleanly, not yet run end to end against a real document — see [Reference document analysis](#reference-document-analysis) |
 
 ## Prerequisites
 
@@ -51,6 +52,10 @@ diagnostics).
 3. Navigate to **Accessibility & Scripting** → **Scripting**
 4. Check **Enable Scripting**
 5. Optionally uncheck **Notify when a script attaches** (avoids popups during automation)
+
+If scripting is disabled, Connect fails with COM error 605 (`The 'Sapgui Component' could
+not be instantiated`). The backend catches this and returns a readable message pointing
+to the setting above instead of the raw COM error.
 
 ## Quick Start
 
@@ -311,6 +316,49 @@ object/program to tackle first. `backend/grouping.py`'s `build_object_groups()`:
 - The sheet deliberately has no Rationale column — it's already on the "Recommended"
   sheet, and repeating it per group member here would just be noise.
 
+## Reference document analysis
+
+After scoring, a **Reference Document Analysis** panel appears (above the chat box) in
+**Find Archiving Objects for Tables** (`frontend/src/components/ReferenceDocPanel.tsx`).
+It lets the user cross-check the recommendations against a document from past project
+experience — Excel (`.xlsx`/`.xls`), PDF, or PowerPoint (`.pptx`/`.ppt`).
+
+**Priority is unchanged:** the DVM Guide comes first, then SAP for Me, and the reference
+document last. The original recommendation is never overwritten automatically — where the
+reference document disagrees, the difference is recorded in a **Comments** column and the
+user decides what to do.
+
+Flow:
+
+1. Click **Upload Reference Document**. The backend (`backend/reference_doc.py`,
+   `POST /api/reference-doc/analyze`) extracts the document's text (`openpyxl` for Excel,
+   `pypdf` for PDF, `python-pptx` for PowerPoint) and asks Claude (`SCORING_MODEL`) to pull out
+   explicit table → archiving object pairs. Only mappings stated in the document are used;
+   nothing is guessed. The first ~14,000 characters of the document are sent to Claude.
+2. Each recommended table is compared with the document and put in one of three groups:
+   - **Matched** — the document names the same object (Comments: "Matches reference document")
+   - **Mismatch** — the document names a different object (Comments: "Reference document
+     suggests: X")
+   - **Not in reference document** — the table isn't mentioned
+3. The panel shows the three counts, a table of mismatches with a checkbox on each row
+   (plus Select all / Deselect all), and collapsible lists for the other two groups.
+4. The user clicks **Apply N overrides**, or **Keep as-is** if none are ticked. A preview
+   shows the final recommended list with the Comments column. An overridden row gets
+   "Updated from X per reference document"; a mismatch left unticked keeps its original
+   object and its "Reference document suggests" comment.
+5. **Save to output folder** writes `output/archiving_objects_with_reference.xlsx` (sheets:
+   "All Scored Objects" and "Recommended (with Reference Doc)", which includes Comments).
+   **Download Excel** gives the same file in the browser. **Back to comparison** returns to the
+   previous step.
+
+Requires `ANTHROPIC_API_KEY`. PowerPoint support needs `python-pptx` (now in
+`requirements.txt`; run `pip install -r requirements.txt` after pulling).
+
+**Known gaps:** the comparison only checks the recommended list, not every candidate;
+overrides are applied in the panel's own preview and are **not** pushed back into the main
+scored results or the chat's view of them; very long documents are truncated before being
+sent to Claude; scanned (image-only) PDFs yield no text and are rejected.
+
 ## Chat assistant
 
 Once **Find Archiving Objects for Tables** has scored results, an "Ask about these
@@ -341,7 +389,19 @@ How it works (`backend/chat.py`, endpoint `POST /api/chat`):
    Recommended list (highest score per table) and returns both; the frontend swaps them
    into the preview without re-running scoring.
 
+4. **Source attribution:** whenever Claude uses a SAP tool, its reply states which
+   transaction it queried (e.g. "Checked in AOBJ: …", "DB15 shows …"), so users can see an
+   answer came from live SAP data rather than the model's own recollection. This is a rule
+   in the system prompt in `backend/chat.py`.
+
 The SAP tools use the shared SAP GUI session, so SAP must be connected.
+
+**Popup handling:** AOBJ shows an information dialog ("Caution: The table is cross-client")
+as soon as it opens, which blocks the screen until its green tick is pressed. The shared
+`dismiss_popup()` in `sap_connector.py` now presses the dialog's toolbar button
+(`wnd[1]/tbar[0]/btn[0]`) first, falling back to Enter, and `dismiss_all_popups()` clears
+stacked dialogs. `navigate_to()` clears any leftover popup before entering a transaction,
+and `aobj.py` clears popups right after opening AOBJ and again after executing.
 
 **Known gaps** (found by reading the code; not yet fixed):
 - Rows added or promoted through chat contain only Table Name, Table Description,
@@ -556,6 +616,9 @@ Key endpoints:
 | POST | `/api/files/output/save-archiving` | Save archiving-objects rows to `output/archiving_objects_by_table.xlsx` |
 | POST | `/api/files/output/save-scored` | Save scored rows + recommended list + grouped list to `output/archiving_objects_scored.xlsx` |
 | POST | `/api/files/output/save-header-tables` | Save header-table rows to `output/header_tables.xlsx` |
+| POST | `/api/reference-doc/analyze` | Multipart upload: `file` (Excel/PDF/PowerPoint) + `recommended` (JSON string of the recommended rows); returns matches, mismatches, not-in-reference rows and the annotated recommended list |
+| POST | `/api/reference-doc/save` | Save the reference-annotated results (body: `{rows, recommended}`) to `output/archiving_objects_with_reference.xlsx` |
+| POST | `/api/reference-doc/export` | Same workbook as a browser download |
 | POST | `/api/transactions/taana` | Run TAANA |
 | POST | `/api/transactions/db15` | Run DB15 for a single table |
 | POST | `/api/transactions/se16n` | Run SE16N |
