@@ -30,7 +30,7 @@ export interface ReferenceReviewConfig {
   previewTitle: string;
   savedPath: string;
   downloadName: string;
-  analyze: (file: File) => Promise<ReferenceReview>;
+  analyze: (files: File[]) => Promise<ReferenceReview>;
   save: (final: Row[]) => Promise<{ path: string }>;
   exportFile: (final: Row[]) => Promise<Blob>;
   /** The row after the user accepts the reference document's value (*review* is the analysis result). */
@@ -62,7 +62,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
 
   // ── File pick ────────────────────────────────────────────────────────────
 
-  async function handleFile(file: File) {
+  async function handleFiles(files: File[]) {
     setPhase("analyzing");
     setError("");
     setResult(null);
@@ -73,7 +73,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
     setShowGrouped(false);
 
     try {
-      const res = await c.analyze(file);
+      const res = await c.analyze(files);
       setResult(res);
       setPhase("results");
     } catch (err: unknown) {
@@ -83,8 +83,8 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (f) handleFile(f);
+    const picked = Array.from(e.target.files ?? []);
+    if (picked.length) handleFiles(picked);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -210,11 +210,16 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
           {phase === "idle" ? (
             <>
               <p className="ref-doc-upload-hint">{c.uploadHint}</p>
+              <p className="ref-doc-upload-hint">
+                You can select several documents at once. If two documents name different values for the
+                same item, the one listed first is used and the comment says what the others suggested.
+              </p>
               <label className="btn btn-secondary ref-doc-upload-btn">
-                Upload Reference Document
+                Upload Reference Document(s)
                 <input
                   ref={fileInputRef}
                   type="file"
+                  multiple
                   accept=".xlsx,.xls,.pdf,.pptx,.ppt"
                   onChange={handleFileChange}
                   style={{ display: "none" }}
@@ -224,7 +229,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
           ) : (
             <div className="ref-doc-analyzing">
               <span className="ref-doc-spinner" />
-              Analysing document with the selected AI model…
+              Analysing document(s) with the selected AI model…
             </div>
           )}
           {error && <p className="tx-error" style={{ marginTop: "8px" }}>{error}</p>}
@@ -246,6 +251,12 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
             </span>
             <span className="ref-doc-filename">📄 {result.filename}</span>
           </div>
+
+          {result.warnings && result.warnings.length > 0 && (
+            <p className="tx-error" style={{ margin: "8px 18px" }}>
+              Skipped: {result.warnings.join("; ")}
+            </p>
+          )}
 
           {/* Mismatches */}
           {mismatches.length > 0 && (
@@ -360,7 +371,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
                 setSelected(new Set());
               }}
             >
-              Upload different document
+              Upload different document(s)
             </button>
           </div>
         </>

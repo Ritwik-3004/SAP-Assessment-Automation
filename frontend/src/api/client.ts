@@ -166,12 +166,12 @@ export const api = {
     }),
 
   analyzeReferenceDoc: async (
-    file: File,
+    files: File[],
     recommended: Record<string, string>[],
     knownDescriptions: Record<string, string> = {},
   ) => {
     const formData = new FormData();
-    formData.append("file", file);
+    files.forEach((f) => formData.append("files", f));
     formData.append("recommended", JSON.stringify(recommended));
     formData.append("known_descriptions", JSON.stringify(knownDescriptions));
     const res = await fetch(`${BASE}/api/reference-doc/analyze`, {
@@ -201,9 +201,9 @@ export const api = {
     return res.blob();
   },
 
-  analyzeHeaderReference: async (file: File, rows: Record<string, string>[]) => {
+  analyzeHeaderReference: async (files: File[], rows: Record<string, string>[]) => {
     const formData = new FormData();
-    formData.append("file", file);
+    files.forEach((f) => formData.append("files", f));
     formData.append("rows", JSON.stringify(rows));
     const res = await fetch(`${BASE}/api/header-reference/analyze`, {
       method: "POST",

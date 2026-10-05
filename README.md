@@ -348,8 +348,9 @@ object/program to tackle first. `backend/grouping.py`'s `build_object_groups()`:
 
 After scoring, a **Reference Document Analysis** panel appears (above the chat box) in
 **Find Archiving Objects for Tables** (`frontend/src/components/ReferenceDocPanel.tsx`).
-It lets the user cross-check the recommendations against a document from past project
-experience — Excel (`.xlsx`/`.xls`), PDF, or PowerPoint (`.pptx`/`.ppt`).
+It lets the user cross-check the recommendations against one or more documents from past
+project experience — Excel (`.xlsx`/`.xls`), PDF, or PowerPoint (`.pptx`/`.ppt`). The same
+panel is used for the header-table review in **Find Header Tables**.
 
 **Priority is unchanged:** the DVM Guide comes first, then SAP for Me, and the reference
 document last. The original recommendation is never overwritten automatically — where the
@@ -358,11 +359,17 @@ user decides what to do.
 
 Flow:
 
-1. Click **Upload Reference Document**. The backend (`backend/reference_doc.py`,
+1. Click **Upload Reference Document(s)** and select one or several files. The backend (`backend/reference_doc.py`,
    `POST /api/reference-doc/analyze`) extracts the document's text (`openpyxl` for Excel,
    `pypdf` for PDF, `python-pptx` for PowerPoint) and asks the selected AI model to pull out
    explicit table → archiving object pairs. Only mappings stated in the document are used;
-   nothing is guessed. The first ~14,000 characters of the document are sent to Claude.
+   nothing is guessed. Only the first part of each document (a character budget set by the model in
+   use) is sent to the model.
+   **Several documents** are read in the order the browser lists them and merged: the first
+   document to mention a table (or archiving object) wins. If a later document names a different
+   value, the Comments say so ("… (from a.xlsx). Other documents differ: X in b.pdf"). A file that
+   can't be read or has no text is skipped and reported under the summary; the analysis fails only
+   if no document is usable.
 2. Each recommended table is compared with the document and put in one of three groups:
    - **Matched** — the document names the same object (Comments: "Matches reference document")
    - **Mismatch** — the document names a different object (Comments: "Reference document
@@ -794,7 +801,7 @@ Key endpoints:
 | POST | `/api/files/output/save-archiving` | Save archiving-objects rows to `output/archiving_objects_by_table.xlsx` |
 | POST | `/api/files/output/save-scored` | Save scored rows + recommended list + grouped list to `output/archiving_objects_scored.xlsx` |
 | POST | `/api/files/output/save-header-tables` | Save header-table rows to `output/header_tables.xlsx` |
-| POST | `/api/reference-doc/analyze` | Multipart upload: `file` (Excel/PDF/PowerPoint) + `recommended` (JSON string of the recommended rows); returns matches, mismatches, not-in-reference rows and the annotated recommended list |
+| POST | `/api/reference-doc/analyze` | Multipart upload: `files` (one or more Excel/PDF/PowerPoint) + `recommended` (JSON string of the recommended rows); returns matches, mismatches, not-in-reference rows and the annotated recommended list |
 | POST | `/api/reference-doc/save` | Save the reference-annotated results (body: `{rows, recommended}`) to `output/archiving_objects_with_reference.xlsx` |
 | POST | `/api/reference-doc/export` | Same workbook as a browser download |
 | POST | `/api/transactions/taana` | Run TAANA |
@@ -823,7 +830,7 @@ Key endpoints:
 | POST | `/api/transactions/header-tables/batch-from-output` | Start the header-table lookup using a file already in the `output/` folder (body: `{filename, max_objects}`) |
 | GET | `/api/transactions/header-tables/batch/progress` | Poll for header-table lookup progress; `result` is populated once `status` is `"done"` |
 | POST | `/api/transactions/header-tables/export` | Export header-table rows (JSON) to a downloadable `.xlsx` (Archiving Object, Header Table, Source, Confidence, Comments) |
-| POST | `/api/header-reference/analyze` | Multipart upload: `file` (Excel/PDF/PowerPoint) + `rows` (JSON string of the header-table rows); returns matches, mismatches, not-in-reference rows and the annotated rows |
+| POST | `/api/header-reference/analyze` | Multipart upload: `files` (one or more Excel/PDF/PowerPoint) + `rows` (JSON string of the header-table rows); returns matches, mismatches, not-in-reference rows and the annotated rows |
 | POST | `/api/header-reference/save` | Save the reference-reviewed header tables (body: `{rows, final}`) to `output/header_tables_with_reference.xlsx` |
 | POST | `/api/header-reference/export` | Same workbook as a browser download |
 | GET | `/api/transactions/se16n/debug-arch-def-screen` | Diagnostic: dump `ARCH_DEF`'s Selection Criteria screen elements |

@@ -135,13 +135,70 @@ Document:
         return {}
 
 
+
+# ---------------------------------------------------------------------------
+# Several documents at once
+# ---------------------------------------------------------------------------
+
+def _read_documents(files: list[tuple[bytes, str]], extract) -> dict:
+    """Read every uploaded document and merge what *extract* (text -> {KEY: VALUE}) finds.
+
+    Documents are taken in upload order and the FIRST one to mention a key wins; a later
+    document that names a different value for it is recorded as a conflict, not applied.
+    A document that can't be read is skipped with a warning. Raises llm.LLMError if the AI
+    model can't be used.
+
+    Returns {"mappings": {KEY: VALUE}, "sources": {KEY: filename}, "conflicts": {KEY: [(VALUE,
+    filename)]}, "used": [filename], "warnings": [str]}, or {"error": str} if no document was usable."""
+    mappings: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    conflicts: dict[str, list[tuple[str, str]]] = {}
+    used: list[str] = []
+    warnings: list[str] = []
+
+    for contents, filename in files:
+        try:
+            text = _extract_text(contents, filename)
+        except ValueError as exc:
+            warnings.append(str(exc))
+            continue
+        except Exception as exc:
+            warnings.append(f"{filename}: could not be read ({exc})")
+            continue
+        if not text.strip():
+            warnings.append(f"{filename}: no text could be extracted")
+            continue
+
+        found = extract(text)
+        used.append(filename)
+        for key, value in found.items():
+            if key not in mappings:
+                mappings[key], sources[key] = value, filename
+            elif mappings[key] != value:
+                conflicts.setdefault(key, []).append((value, filename))
+
+    if not used:
+        return {"error": "; ".join(warnings) or "No documents were uploaded."}
+    return {"mappings": mappings, "sources": sources, "conflicts": conflicts, "used": used, "warnings": warnings}
+
+
+def _suggestion_note(key: str, value: str, docs: dict) -> str:
+    """"Reference document suggests: X" plus, when several documents were read, which one said
+    so and which others disagree."""
+    note = f"Reference document suggests: {value}"
+    if len(docs["used"]) > 1:
+        note += f" (from {docs['sources'][key]})"
+        others = docs["conflicts"].get(key, [])
+        if others:
+            note += ". Other documents differ: " + "; ".join(f"{v} in {f}" for v, f in others)
+    return note
+
 # ---------------------------------------------------------------------------
 # Comparison
 # ---------------------------------------------------------------------------
 
 def analyze_reference_doc(
-    contents: bytes,
-    filename: str,
+    files: list[tuple[bytes, str]],
     recommended: list[dict],
     known_descriptions: Optional[dict] = None,
 ) -> dict:
@@ -169,29 +226,19 @@ def analyze_reference_doc(
         "object_descriptions": {OBJECT: description, ...},  # for the objects the document proposes
     }
     """
-    # 1. Extract text
-    try:
-        text = _extract_text(contents, filename)
-    except ValueError as exc:
-        return {"status": "error", "message": str(exc)}
-    except Exception as exc:
-        return {"status": "error", "message": f"Could not read file: {exc}"}
-
-    if not text.strip():
-        return {"status": "error", "message": "Could not extract any text from the document."}
-
-    # 2. Get table names from current recommendations
+    # 1. Read every document and extract table -> object mappings (AI model)
     table_names = [
         _norm(row.get("Table Name", ""))
         for row in recommended
         if row.get("Table Name")
     ]
-
-    # 3. Extract mappings using the active AI model
     try:
-        ref_mappings = _extract_mappings_via_llm(text, table_names)
+        docs = _read_documents(files, lambda text: _extract_mappings_via_llm(text, table_names))
     except llm.LLMError as exc:
         return {"status": "error", "message": str(exc)}
+    if "error" in docs:
+        return {"status": "error", "message": docs["error"]}
+    ref_mappings = docs["mappings"]
 
     # 4. Compare
     matches: list[dict] = []
@@ -211,7 +258,7 @@ def analyze_reference_doc(
                 annotated_row["Ref Doc Object"] = ""
                 matches.append(annotated_row)
             else:
-                annotated_row["Comments"] = f"Reference document suggests: {ref_obj}"
+                annotated_row["Comments"] = _suggestion_note(table, ref_obj, docs)
                 annotated_row["Ref Doc Object"] = ref_obj
                 mismatches.append(annotated_row)
         else:
@@ -234,7 +281,8 @@ def analyze_reference_doc(
 
     return {
         "status": "ok",
-        "filename": filename,
+        "filename": ", ".join(docs["used"]),
+        "warnings": docs["warnings"],
         "ref_mappings": ref_mappings,
         "annotated_recommended": annotated,
         "matches": matches,
@@ -294,34 +342,28 @@ Document:
     return _parse_mapping_json(raw)
 
 
-def analyze_header_reference(contents: bytes, filename: str, rows: list[dict]) -> dict:
+def analyze_header_reference(files: list[tuple[bytes, str]], rows: list[dict]) -> dict:
     """
-    Compare the app's header-table *rows* ({"Archiving Object", "Header Table", ...}) with an
-    uploaded SME reference document (Excel, PDF or PowerPoint).
+    Compare the app's header-table *rows* ({"Archiving Object", "Header Table", ...}) with the
+    uploaded SME reference documents (Excel, PDF or PowerPoint; one or several, merged in
+    upload order with the first document to mention an object winning).
 
     Same result shape as analyze_reference_doc(), keyed on Archiving Object / Header Table:
     each annotated row gets "Reference Check" and "Ref Doc Header Table" (the app's own
     "Comments" column is left alone). A blank current Header Table with a reference value
     counts as a mismatch, so the reference document can fill it in.
 
-    {"status": "ok", "filename", "ref_mappings", "annotated_rows", "matches", "mismatches",
-     "not_in_ref"}  -- or {"status": "error", "message"}.
+    {"status": "ok", "filename", "warnings", "ref_mappings", "annotated_rows", "matches",
+     "mismatches", "not_in_ref"}  -- or {"status": "error", "message"}.
     """
-    try:
-        text = _extract_text(contents, filename)
-    except ValueError as exc:
-        return {"status": "error", "message": str(exc)}
-    except Exception as exc:
-        return {"status": "error", "message": f"Could not read file: {exc}"}
-
-    if not text.strip():
-        return {"status": "error", "message": "Could not extract any text from the document."}
-
     object_names = [_norm(r.get("Archiving Object", "")) for r in rows if r.get("Archiving Object")]
     try:
-        ref_mappings = _extract_header_mappings_via_llm(text, object_names)
+        docs = _read_documents(files, lambda text: _extract_header_mappings_via_llm(text, object_names))
     except llm.LLMError as exc:
         return {"status": "error", "message": str(exc)}
+    if "error" in docs:
+        return {"status": "error", "message": docs["error"]}
+    ref_mappings = docs["mappings"]
 
     matches: list[dict] = []
     mismatches: list[dict] = []
@@ -343,14 +385,15 @@ def analyze_header_reference(contents: bytes, filename: str, rows: list[dict]) -
             out["Ref Doc Header Table"] = ""
             matches.append(out)
         else:
-            out["Reference Check"] = f"Reference document suggests: {ref}"
+            out["Reference Check"] = _suggestion_note(obj, ref, docs)
             out["Ref Doc Header Table"] = ref
             mismatches.append(out)
         annotated.append(out)
 
     return {
         "status": "ok",
-        "filename": filename,
+        "filename": ", ".join(docs["used"]),
+        "warnings": docs["warnings"],
         "ref_mappings": ref_mappings,
         "annotated_rows": annotated,
         "matches": matches,

@@ -38,15 +38,16 @@ export default function ReferenceDocPanel({ scored }: Props) {
     extraKey: "Score",
     extraLabel: "Score",
     uploadHint:
-      "Upload a reference document containing past archiving object recommendations. " +
+      "Upload one or more reference documents containing past archiving object recommendations. " +
       "The tool will compare it against your scored results and highlight any differences.",
     previewTitle: "Preview — Final Recommendations",
     savedPath: "output/archiving_objects_with_reference.xlsx",
     downloadName: "archiving_objects_with_reference.xlsx",
-    analyze: async (file) => {
-      const res = await api.analyzeReferenceDoc(file, recommended, knownDescriptions());
+    analyze: async (files) => {
+      const res = await api.analyzeReferenceDoc(files, recommended, knownDescriptions());
       return {
         filename: res.filename,
+        warnings: res.warnings,
         annotated: res.annotated_recommended,
         matches: res.matches,
         mismatches: res.mismatches,

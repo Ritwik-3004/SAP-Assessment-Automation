@@ -70,6 +70,8 @@ export interface ReferenceDocResult {
   status: "ok" | "error";
   message?: string;
   filename: string;
+  /** Documents that were skipped (unreadable / no text) while others were used. */
+  warnings?: string[];
   ref_mappings: Record<string, string>;
   annotated_recommended: Record<string, string>[];
   matches: Record<string, string>[];
@@ -116,7 +118,9 @@ export interface LlmTestResult {
 
 /** What the generic reference-document review panel works with (see ReferenceReviewPanel). */
 export interface ReferenceReview {
+  /** The documents that were read, comma-separated. */
   filename: string;
+  warnings?: string[];
   annotated: Record<string, string>[];
   matches: Record<string, string>[];
   mismatches: Record<string, string>[];
@@ -129,6 +133,7 @@ export interface HeaderReferenceResult {
   status: "ok" | "error";
   message?: string;
   filename: string;
+  warnings?: string[];
   ref_mappings: Record<string, string>;
   annotated_rows: Record<string, string>[];
   matches: Record<string, string>[];

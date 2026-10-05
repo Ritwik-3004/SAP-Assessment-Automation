@@ -905,14 +905,15 @@ class ReferenceDocSaveRequest(BaseModel):
 
 @app.post("/api/reference-doc/analyze")
 def analyze_reference_doc(
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(...),
     recommended: str = Form(...),
     known_descriptions: str = Form("{}"),
 ):
-    """Parse the uploaded reference document and compare its archiving-object
-    mappings against the current scored recommendations. *known_descriptions* is a JSON object
+    """Parse the uploaded reference document(s) and compare their archiving-object
+    mappings against the current scored recommendations. Several documents are merged in
+    upload order (the first to mention a table wins). *known_descriptions* is a JSON object
     {archiving object: description} from the current run."""
-    contents = file.file.read()
+    documents = [(f.file.read(), f.filename or "document") for f in files]
     try:
         recommended_rows = json.loads(recommended)
     except Exception:
@@ -922,7 +923,7 @@ def analyze_reference_doc(
         known = known if isinstance(known, dict) else {}
     except Exception:
         known = {}
-    result = ref_doc_mod.analyze_reference_doc(contents, file.filename or "document", recommended_rows, known)
+    result = ref_doc_mod.analyze_reference_doc(documents, recommended_rows, known)
     if result.get("status") == "error":
         raise HTTPException(status_code=400, detail=result["message"])
     return result
@@ -997,17 +998,18 @@ def _header_reference_workbook(req: HeaderReferenceSaveRequest) -> io.BytesIO:
 
 @app.post("/api/header-reference/analyze")
 def analyze_header_reference(
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(...),
     rows: str = Form(...),
 ):
-    """Parse the uploaded reference document and compare its archiving object ->
-    header table mappings against the header tables the app found."""
-    contents = file.file.read()
+    """Parse the uploaded reference document(s) and compare their archiving object ->
+    header table mappings against the header tables the app found. Several documents are
+    merged in upload order (the first to mention an object wins)."""
+    documents = [(f.file.read(), f.filename or "document") for f in files]
     try:
         header_rows = json.loads(rows)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON in 'rows' field.")
-    result = ref_doc_mod.analyze_header_reference(contents, file.filename or "document", header_rows)
+    result = ref_doc_mod.analyze_header_reference(documents, header_rows)
     if result.get("status") == "error":
         raise HTTPException(status_code=400, detail=result["message"])
     return result
