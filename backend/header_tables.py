@@ -107,6 +107,76 @@ def resolve(
 
 
 # ---------------------------------------------------------------------------
+# Final check: only tables that exist in the system
+# ---------------------------------------------------------------------------
+
+def _name_variants(row: dict, item: Optional[dict]) -> list[str]:
+    """The header table as answered, then the closest real-looking alternatives, best first:
+    the ARCH_DEF structure behind that segment, the same name without underscores (a common
+    way a name gets garbled, e.g. SWW_WIHEAD vs SWWWIHEAD), then ARCH_DEF's own candidates."""
+    table = (row.get("Header Table") or "").strip().upper()
+    out = [table]
+    if item:
+        for seg in item.get("segments", []):
+            if (seg.get("Segment") or "").strip().upper() == table:
+                out.append((seg.get("Structure") or "").strip().upper())
+    out.append(table.replace("_", ""))
+    if item:
+        out.extend(c.upper() for c in item.get("candidates", []))
+    seen: list[str] = []
+    for n in out:
+        if n and TABLE_NAME.match(n) and n not in seen:
+            seen.append(n)
+    return seen
+
+
+def verify_exist(
+    rows: list[dict],
+    ambiguous: list[dict],
+    exists: Callable[[list[str]], dict],
+) -> list[dict]:
+    """Return *rows* where every Header Table is confirmed to exist in the SAP system.
+
+    *exists* maps a list of names to {NAME: bool} (se16n.tables_exist). A name that does not
+    exist is replaced by the first alternative that does (Confidence lowered to Medium at
+    best, with a Comments note); if none exists the Header Table is left blank and says why,
+    so the tool never reports a table the system doesn't have. Input is not modified."""
+    out = [dict(r) for r in rows]
+    items = {i["archiving_object"]: i for i in ambiguous}
+    variants = {
+        r["Archiving Object"]: _name_variants(r, items.get(r["Archiving Object"]))
+        for r in out
+        if (r.get("Header Table") or "").strip()
+    }
+    names = sorted({n for v in variants.values() for n in v})
+    if not names:
+        return out
+    found = exists(names)
+
+    for row in out:
+        options = variants.get(row["Archiving Object"])
+        if not options:
+            continue
+        original = options[0]
+        real = next((n for n in options if found.get(n)), "")
+        note = ""
+        if real == original:
+            continue
+        if real:
+            note = f"'{original}' is not a table or view in the system; corrected to '{real}', which does."
+            row["Header Table"] = real
+            if (row.get("Confidence") or "") == "High":
+                row["Confidence"] = "Medium"
+            row["Source"] = f"{row.get('Source') or 'Derived'} (name corrected against SAP)"
+        else:
+            note = f"'{original}' is not a table or view in the system, so it was not used."
+            row["Header Table"] = ""
+            row["Confidence"] = ""
+        row["Comments"] = " ".join(c for c in (row.get("Comments") or "", note) if c).strip()
+    return out
+
+
+# ---------------------------------------------------------------------------
 # The two stages
 # ---------------------------------------------------------------------------
 

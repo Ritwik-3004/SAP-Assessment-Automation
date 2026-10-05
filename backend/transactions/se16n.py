@@ -277,6 +277,40 @@ def _run_batch_find_header_tables(archiving_objects: list[str], on_progress=None
     return {"status": "ok", "rows": rows, "errors": errors, "ambiguous": ambiguous}
 
 
+def tables_exist(names: list[str]) -> dict:
+    """Check which of *names* are real tables/views in the connected SAP system.
+
+    Returns {NAME: True/False}. A name is real if SE16N accepts it without an error message
+    (so structures and misspelt names are rejected). If the SAP session itself fails,
+    raises (the caller must not treat that as "table missing")."""
+    return sap.run(_tables_exist, names)
+
+
+def _tables_exist(names: list[str]) -> dict:
+    session = sap.get_session()
+    result: dict[str, bool] = {}
+    for raw in names:
+        name = (raw or "").strip().upper()
+        if not name or name in result:
+            continue
+        sap.navigate_to("SE16N")
+        time.sleep(SAP_SCREEN_WAIT)
+        session.findById(TABLE_NAME_FIELD_ID).text = name
+        session.findById("wnd[0]").sendVKey(0)
+        sap.wait_until_ready()
+        time.sleep(SAP_SCREEN_WAIT)
+        sap.dismiss_popup()
+        # The selection control exists on SE16N's first screen too, so it proves nothing. SAP
+        # answers an unusable name with an error in the status bar ("X does not exist",
+        # "Table X is not the correct category" for a structure, ...).
+        try:
+            sbar = session.findById("wnd[0]/sbar")
+            result[name] = (sbar.MessageType or "").upper() not in ("E", "A", "X")
+        except Exception:
+            result[name] = False
+    return result
+
+
 def _header_row(archiving_object: str, header_table: str, source: str, confidence: str, comments: str) -> dict:
     return {
         "Archiving Object": archiving_object.strip().upper(),

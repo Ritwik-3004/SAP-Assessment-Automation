@@ -8,6 +8,7 @@ against the current scored/recommended results to surface matches and mismatches
 
 import io
 import json
+import re
 import logging
 from typing import Optional
 
@@ -18,6 +19,12 @@ import llm
 import object_descriptions
 
 logger = logging.getLogger(__name__)
+
+
+def _norm(value) -> str:
+    """Canonical form of a SAP name for comparison: no whitespace, uppercase.
+    SAP table/object names never contain spaces, so a space in a document is formatting noise."""
+    return re.sub(r"\s+", "", str(value or "")).upper()
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +129,7 @@ Document:
 
     try:
         mappings: dict = json.loads(raw)
-        return {str(k).upper(): str(v).upper() for k, v in mappings.items()}
+        return {_norm(k): _norm(v) for k, v in mappings.items() if _norm(v)}
     except Exception:
         logger.warning("Could not parse Claude mapping response: %.200s", raw)
         return {}
@@ -175,7 +182,7 @@ def analyze_reference_doc(
 
     # 2. Get table names from current recommendations
     table_names = [
-        row.get("Table Name", "").upper()
+        _norm(row.get("Table Name", ""))
         for row in recommended
         if row.get("Table Name")
     ]
@@ -193,8 +200,8 @@ def analyze_reference_doc(
     annotated: list[dict] = []
 
     for row in recommended:
-        table = row.get("Table Name", "").upper()
-        current_obj = row.get("Archiving Object", "").upper()
+        table = _norm(row.get("Table Name", ""))
+        current_obj = _norm(row.get("Archiving Object", ""))
         annotated_row = dict(row)
 
         if table in ref_mappings:
@@ -249,7 +256,7 @@ def _parse_mapping_json(raw: str) -> dict[str, str]:
         raw = raw[4:].strip() if raw.lower().startswith("json") else raw.strip()
     try:
         data = json.loads(raw)
-        return {str(k).strip().upper(): str(v).strip().upper() for k, v in data.items() if str(v).strip()}
+        return {_norm(k): _norm(v) for k, v in data.items() if _norm(v)}
     except Exception:
         logger.warning("Could not parse header-table mapping response: %.200s", raw)
         return {}
@@ -310,7 +317,7 @@ def analyze_header_reference(contents: bytes, filename: str, rows: list[dict]) -
     if not text.strip():
         return {"status": "error", "message": "Could not extract any text from the document."}
 
-    object_names = [r.get("Archiving Object", "").upper() for r in rows if r.get("Archiving Object")]
+    object_names = [_norm(r.get("Archiving Object", "")) for r in rows if r.get("Archiving Object")]
     try:
         ref_mappings = _extract_header_mappings_via_llm(text, object_names)
     except llm.LLMError as exc:
@@ -322,8 +329,8 @@ def analyze_header_reference(contents: bytes, filename: str, rows: list[dict]) -
     annotated: list[dict] = []
 
     for row in rows:
-        obj = row.get("Archiving Object", "").upper()
-        current = row.get("Header Table", "").upper()
+        obj = _norm(row.get("Archiving Object", ""))
+        current = _norm(row.get("Header Table", ""))
         out = dict(row)
 
         ref = ref_mappings.get(obj)

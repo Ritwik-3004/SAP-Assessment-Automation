@@ -877,6 +877,17 @@ def _run_header_table_job(archiving_objects: list[str]):
                 result.setdefault("errors", []).append(
                     {"archiving_object": "(several)", "message": f"Could not settle ambiguous objects: {exc}"}
                 )
+
+        # Stage 3 (SAP session again): only report header tables that really exist.
+        total = _header_table_progress.snapshot()["total"]
+        _header_table_progress.update(total, "Verifying the header tables exist in SAP…")
+        try:
+            result["rows"] = header_tables.verify_exist(result["rows"], ambiguous, se16n.tables_exist)
+        except Exception as exc:
+            logger.exception("Header-table existence check failed")
+            result.setdefault("errors", []).append(
+                {"archiving_object": "(several)", "message": f"Could not verify that the header tables exist in SAP: {exc}"}
+            )
         _header_table_progress.finish(result)
     except Exception as exc:
         logger.exception("Header-table batch job failed")
