@@ -79,6 +79,12 @@ start_frontend.bat
 
 Then open `http://localhost:5173` in your browser.
 
+Both scripts install or update their libraries on every start (`pip install -r
+requirements.txt` for the backend, `npm install` for the frontend), so after a `git pull`
+just restart them — a package added by someone else's commit is picked up automatically.
+Starting the frontend with `npm run dev` directly skips that step; run `npm install` first
+if the pull changed `frontend/package.json`.
+
 ## Manual Setup
 
 ### Backend
