@@ -26,7 +26,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Area | Status |
 |---|---|
 | Generate Table List (DB02), Find Archiving Objects (DB15), table sizes | Working |
-| Score & Recommend Objects (Claude, grounded in the DVM Guide) | Working |
+| Find archiving objects → score & recommend in one click (AI-scored, grounded in the DVM Guide) | Working as separate steps; the one-click combination is a UI change checked by building the frontend only — not yet run end to end |
 | Housekeeping program lookup — DVM Guide stage | Working |
 | Housekeeping program lookup — SAP for Me stage | Working in `debug_sap_for_me.py` (COSP → `RK_PLAN_DEL_ZERO_RECORDS`); **not yet verified through a full scoring run in the app**. Needs Chrome for Testing + IT approval. |
 | SAP Community fallback (when SAP for Me has no usable Note/KBA) | Implemented for both the housekeeping and header-table lookups and checked offline with a stubbed browser. **Confirmed live (COSP, via `debug_sap_for_me.py`):** the Community search returns posts, they are recognised by their address shape (`/t5/…/(ba\|qaq\|td\|m)-p/<id>`) and a post's text reads cleanly. **Not yet seen live:** the fallback actually being used in a lookup (COSP has Notes, so it was never needed) and how good Community evidence is — for COSP the posts returned were mostly unrelated, which is why the model must see a program clearly named for the table before using one. Run `backend/.venv/Scripts/python.exe backend/debug_sap_for_me.py TABLE_NAME` to see what it finds (see [below](#housekeepingcleanup-program-lookup-for-tables-with-no-archiving-object)) |
@@ -166,10 +166,10 @@ Both folders are listable via the API (`GET /api/files/input`, `GET /api/files/o
 The **Find Archiving Objects for Tables** tab (`frontend/src/components/BatchArchivingPanel.tsx`) automates DB15 across a whole list of tables in one go. The tcode itself is an implementation detail — the UI only presents the task ("look up the archiving object(s) for these tables"), by design, so end users don't need to know which transaction does the work:
 
 1. **Choose the input file.** The panel lists all `.xlsx`/`.xls` files from the `input/` folder as radio buttons — typically this is the file saved by **Generate Table List**. If you want a different file, click **Upload a different file** to pick one from anywhere on disk; the uploaded filename replaces the radio list until you click **Use input folder** to go back.
-2. Click **Submit**. A progress bar fills in as each table finishes (e.g. "12 of 40 — BSEG"), since this can take a while on a large list.
+2. Click **Find, Score & Recommend** — one click runs the whole pipeline: step 1 looks up the archiving objects in SAP, step 2 scores them and finds housekeeping programs (see [Score & Recommend Objects](#score--recommend-objects-claude-api)). A progress bar fills in for each step as each table finishes (e.g. "12 of 40 — BSEG"), since this can take a while on a large list.
 3. The backend navigates to DB15 once, selects the **Archiving Objects** radio button, then for each table types it into **Objects for Table**, presses Enter, and reads the resulting archiving-object grid.
-4. Results (Table Name, Table Description, Volume (GB), Volume (MB), Archiving Object, Object Description) are shown on screen (20 rows per page, with ← → navigation).
-5. Click **Save to output folder** to write `output/archiving_objects_by_table.xlsx`, or **Download** to get the file directly in the browser.
+4. When both steps finish, two sheets are shown as tabs (20 rows per page, with ← → navigation): **All objects identified** (Table Name, Table Description, Volume (GB), Volume (MB), Archiving Object, Object Description, Housekeeping Program, Score) and **Recommended objects** (the top pick per table, plus the Rationale). If the lookup succeeds but scoring fails (for example a model rate limit), the lookup results stay on screen with a **Retry scoring** button, so the SAP lookup does not have to be repeated.
+5. Click **Save to output folder** or **Download Excel (Scored)** to export the results (see below). The earlier lookup-only export (`archiving_objects_by_table.xlsx`) is no longer offered in the UI because the scored sheet contains the same columns plus the score; its endpoints still exist.
 
 Backend implementation: `db15.run_batch()` in `backend/transactions/db15.py`, plus `/api/transactions/db15/batch` and `/api/transactions/db15/export` in `backend/main.py` (see [API Reference](#api-reference), and [Progress polling](#progress-polling-for-long-running-batches) for how the progress bar works).
 
@@ -192,8 +192,8 @@ GB value.
 
 A table can have many candidate archiving objects (e.g. CDHDR has dozens) — picking
 the right one has always required manual judgment (experience, search, or asking an
-LLM by hand). Once a lookup above has results, click **Score & Recommend Objects** to
-automate that judgment call:
+LLM by hand). Right after the lookup, in the same run as the lookup above (no second button), the tool
+automates that judgment call:
 
 1. The backend groups the results by table and sends each table's full candidate list
    to Claude (`claude-haiku-4-5`) in one request, asking for a 0–100 relevance score
@@ -202,8 +202,7 @@ automate that judgment call:
    time) since a large batch (e.g. 300 tables from the DB02 tool) can mean hundreds of
    calls — a progress bar tracks tables resolved, not individual API calls, so it still
    advances one table at a time even though several are scored in parallel underneath.
-2. A preview of the first 20 scored rows renders on screen with ← → pagination; **Show Recommended List**
-   reveals the highest-scoring object per table (one row per table), and **Show Grouped by Object** rolls that up further by shared archiving object/housekeeping program (see below). Click **Save to output folder** to write `output/archiving_objects_scored.xlsx`, or **Download Excel (Scored)** to get the file directly — either exports a 3-sheet workbook: "All Scored Objects" (every table/object pair with its Score), "Recommended" (the top pick per table, plus the Rationale), and "Grouped by Object".
+2. The results render as two tabs with ← → pagination: **All objects identified** (every table/object pair with its score) and **Recommended objects** (the highest-scoring object per table, one row per table). **Show Grouped by Object** rolls the recommended list up further by shared archiving object/housekeeping program (see below). Click **Save to output folder** to write `output/archiving_objects_scored.xlsx`, or **Download Excel (Scored)** to get the file directly — either exports a 3-sheet workbook: "All Scored Objects" (every table/object pair with its Score), "Recommended" (the top pick per table, plus the Rationale), and "Grouped by Object".
 3. Scores and rationale are the model's best-effort judgment. For a table covered by
    the DVM Guide (see below), the rationale explicitly says so when it draws on it
    (e.g. "Official Data Management Guide recommends BC_E071K..."); otherwise it's the

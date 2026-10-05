@@ -18,16 +18,14 @@ export default function BatchArchivingPanel() {
   const [result, setResult] = useState<Db15BatchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [lookupProgress, setLookupProgress] = useState<ProgressSnapshot<Db15BatchResult> | null>(null);
-  const [exporting, setExporting] = useState(false);
-  const [savingArchiving, setSavingArchiving] = useState(false);
-  const [savedArchivingPath, setSavedArchivingPath] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   // ── Scoring ──────────────────────────────────────────────────────────────
   const [scored, setScored] = useState<ScoredResult | null>(null);
   const [scoring, setScoring] = useState(false);
   const [scoreProgress, setScoreProgress] = useState<ProgressSnapshot<ScoredResult> | null>(null);
-  const [showRecommended, setShowRecommended] = useState(false);
+  // Which of the two result sheets is shown: every object found, or the recommended pick per table
+  const [view, setView] = useState<"all" | "recommended">("all");
   const [scoredExporting, setScoredExporting] = useState(false);
   const [savingScored, setSavingScored] = useState(false);
   const [savedScoredPath, setSavedScoredPath] = useState<string | null>(null);
@@ -89,17 +87,49 @@ export default function BatchArchivingPanel() {
 
   const canSubmit = mode === "upload" ? !!localFile : !!serverFile;
 
+  /** Score the looked-up objects and pick the recommended one per table (also finds housekeeping
+   *  programs for tables with no archiving object). Returns true if scoring succeeded. */
+  async function runScoring(rows: Record<string, string>[]): Promise<boolean> {
+    setScoring(true);
+    setError("");
+    setScoreProgress(null);
+    setGroupedRows(null);
+    setShowGrouped(false);
+    try {
+      const started = await api.db15Score(rows);
+      setScoreProgress({ status: "running", completed: 0, total: started.total, message: null, result: null });
+      const final = await api.pollDb15Score(setScoreProgress);
+      if (final.status === "error") {
+        setError(final.message ?? "Scoring failed");
+        return false;
+      }
+      setScored(final.result);
+      setView("all");
+      return true;
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Scoring failed");
+      return false;
+    } finally {
+      setScoring(false);
+    }
+  }
+
+  /** One click: look up the archiving objects in SAP, then score and recommend them. */
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
+    if (!canSubmit || loading || scoring) return;
     setLoading(true);
     setError("");
     setResult(null);
     setScored(null);
-    setShowRecommended(false);
+    setView("all");
+    setSavedScoredPath(null);
     setGroupedRows(null);
     setShowGrouped(false);
     setLookupProgress(null);
+    setScoreProgress(null);
+
+    let rows: Record<string, string>[] = [];
     try {
       let started: import("../types").JobStarted;
       if (mode === "upload" && localFile) {
@@ -113,73 +143,19 @@ export default function BatchArchivingPanel() {
       const final = await api.pollDb15Batch(setLookupProgress);
       if (final.status === "error") {
         setError(final.message ?? "Lookup failed");
-      } else {
-        setResult(final.result);
+        return;
       }
+      setResult(final.result);
+      rows = final.result?.rows ?? [];
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Lookup failed");
+      return;
     } finally {
       setLoading(false);
     }
-  }
 
-  async function handleExport() {
-    if (!result?.rows?.length) return;
-    setExporting(true);
-    setError("");
-    try {
-      const blob = await api.db15Export(result.rows);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "archiving_objects_by_table.xlsx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Export failed");
-    } finally {
-      setExporting(false);
-    }
-  }
-
-  async function handleSaveArchiving() {
-    if (!result?.rows?.length) return;
-    setSavingArchiving(true);
-    setError("");
-    setSavedArchivingPath(null);
-    try {
-      const res = await api.saveArchivingToOutput(result.rows);
-      setSavedArchivingPath(res.path);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Save failed");
-    } finally {
-      setSavingArchiving(false);
-    }
-  }
-
-  async function handleScore() {
-    if (!result?.rows?.length) return;
-    setScoring(true);
-    setError("");
-    setScoreProgress(null);
-    setGroupedRows(null);
-    setShowGrouped(false);
-    try {
-      const started = await api.db15Score(result.rows);
-      setScoreProgress({ status: "running", completed: 0, total: started.total, message: null, result: null });
-      const final = await api.pollDb15Score(setScoreProgress);
-      if (final.status === "error") {
-        setError(final.message ?? "Scoring failed");
-      } else {
-        setScored(final.result);
-      }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Scoring failed");
-    } finally {
-      setScoring(false);
-    }
+    if (rows.length === 0) return; // nothing found to score; the "no objects" note below explains
+    await runScoring(rows);
   }
 
   async function handleScoredExport() {
@@ -247,10 +223,17 @@ export default function BatchArchivingPanel() {
         <strong>Find Archiving Objects for Tables</strong> — select a table list from the
         input folder, or upload your own Excel file (Table Name in column A, Description
         in column B, header row first). For each table, this looks up the archiving
-        object(s) that reference it. If your file doesn't already have "Volume (GB)" /
-        "Volume (MB)" size columns, they're fetched automatically from DB02 (MB is
-        included since small tables often round to 0.00 GB) and carried through every
-        result and export below — if you already have them, your values are used as-is.
+        object(s) that reference it, then — in the same run — has the selected AI model
+        score each candidate (0–100, approximate), referring to SAP's Data Management
+        Guide (DVM Guide) where it covers the table, and picks the highest-scoring object
+        per table. For a table with no archiving object it looks for a housekeeping/cleanup
+        program instead: first in the DVM Guide, then on SAP for Me (needs your SAP for Me
+        credentials in the sidebar; if it can't run, the Rationale says why). The result is
+        two sheets: every object identified (with its score), and the recommended object per
+        table. If your file doesn't already have "Volume (GB)" / "Volume (MB)" size columns,
+        they're fetched automatically from DB02 and carried through. Scores and rationale are
+        AI-generated best-effort judgments, not guaranteed SAP guidance — treat them as a
+        starting point.
       </div>
 
       <form className="tx-form" onSubmit={handleSubmit}>
@@ -329,9 +312,13 @@ export default function BatchArchivingPanel() {
         <button
           type="submit"
           className="btn btn-primary"
-          disabled={loading || !canSubmit}
+          disabled={loading || scoring || !canSubmit}
         >
-          {loading ? "Looking up archiving objects…" : "Submit"}
+          {loading
+            ? "Step 1 of 2 — looking up archiving objects…"
+            : scoring
+            ? "Step 2 of 2 — scoring and recommending…"
+            : "Find, Score & Recommend"}
         </button>
 
         {loading && (
@@ -340,6 +327,15 @@ export default function BatchArchivingPanel() {
             completed={lookupProgress?.completed ?? 0}
             total={lookupProgress?.total ?? 0}
             label={lookupProgress?.message ?? undefined}
+          />
+        )}
+
+        {scoring && (
+          <ProgressBar
+            mode="determinate"
+            completed={scoreProgress?.completed ?? 0}
+            total={scoreProgress?.total ?? 0}
+            label={scoreProgress?.message ?? undefined}
           />
         )}
       </form>
@@ -359,78 +355,60 @@ export default function BatchArchivingPanel() {
         </div>
       )}
 
-      {result?.rows && result.rows.length > 0 && (
+      {/* Lookup finished but nothing to score */}
+      {result && !loading && (result.rows?.length ?? 0) === 0 && !error && (
+        <p className="tx-hint">No archiving objects were found for any table in this file.</p>
+      )}
+
+      {/* Scoring failed after a successful lookup: keep the lookup, offer a retry */}
+      {!scored && !scoring && !loading && result?.rows && result.rows.length > 0 && (
         <>
           <ResultsTable
             rows={result.rows}
-            caption={`Archiving objects — ${result.rows.length} row${result.rows.length !== 1 ? "s" : ""}`}
+            caption={`Archiving objects found — ${result.rows.length} row${result.rows.length !== 1 ? "s" : ""} (not scored yet)`}
           />
           <div className="action-row">
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={handleSaveArchiving}
-              disabled={savingArchiving}
-            >
-              {savingArchiving ? "Saving…" : "Save to output folder"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={handleExport}
-              disabled={exporting}
-            >
-              {exporting ? "Preparing…" : "Download Excel"}
+            <button type="button" className="btn btn-primary" onClick={() => runScoring(result.rows ?? [])}>
+              Retry scoring
             </button>
           </div>
-          {savedArchivingPath && (
-            <div className="saved-notice">
-              Saved to <code>output/archiving_objects_by_table.xlsx</code>
-            </div>
-          )}
-
-          <div className="tx-description" style={{ marginTop: "1.5rem" }}>
-            <strong>Score &amp; Recommend</strong> — have the selected AI model score each candidate
-            object per table for archiving relevance (0–100, approximate), referring to
-            SAP's official Data Management Guide (DVM Guide) where it covers that table,
-            then pick the highest-scoring object per table as the recommended setup.
-            Every table is included below even if none was found — for a table with no
-            archiving object, this looks for a housekeeping/cleanup program instead: first
-            in the DVM Guide, then by searching the SAP Notes and Knowledge Base Articles on
-            SAP for Me (needs your SAP for Me credentials in the sidebar; if it can't run,
-            the Rationale says why). The program is shown in its own column, never mixed
-            with Archiving Object. "Show Grouped by Object" then rolls tables sharing the same
-            archiving object or housekeeping program into one view with a cumulative
-            size, sorted largest-first (tables with neither found are grouped last).
-            Scores and rationale are AI-generated best-effort judgments, not
-            guaranteed SAP guidance — treat them as a starting point.
-          </div>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={handleScore}
-            disabled={scoring}
-          >
-            {scoring ? "Scoring objects…" : "Score & Recommend Objects"}
-          </button>
-
-          {scoring && (
-            <ProgressBar
-              mode="determinate"
-              completed={scoreProgress?.completed ?? 0}
-              total={scoreProgress?.total ?? 0}
-              label={scoreProgress?.message ?? undefined}
-            />
-          )}
         </>
       )}
 
       {scored?.rows && scored.rows.length > 0 && (
         <>
-          <ResultsTable
-            rows={scored.rows}
-            caption={`Scored objects — ${scored.rows.length} row${scored.rows.length !== 1 ? "s" : ""}`}
-          />
+          <div className="sheet-tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "all"}
+              className={`sheet-tab ${view === "all" ? "active" : ""}`}
+              onClick={() => setView("all")}
+            >
+              All objects identified ({scored.rows.length})
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "recommended"}
+              className={`sheet-tab ${view === "recommended" ? "active" : ""}`}
+              onClick={() => setView("recommended")}
+            >
+              Recommended objects ({scored.recommended?.length ?? 0})
+            </button>
+          </div>
+
+          {view === "all" ? (
+            <ResultsTable
+              rows={scored.rows}
+              caption={`All objects identified, with scores — ${scored.rows.length} row${scored.rows.length !== 1 ? "s" : ""}`}
+            />
+          ) : (
+            <ResultsTable
+              rows={scored.recommended ?? []}
+              caption="Recommended — highest-scoring object per table"
+            />
+          )}
 
           <div className="action-row">
             <button
@@ -452,13 +430,6 @@ export default function BatchArchivingPanel() {
             <button
               type="button"
               className="btn btn-secondary"
-              onClick={() => setShowRecommended((v) => !v)}
-            >
-              {showRecommended ? "Hide Recommended" : "Show Recommended"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary"
               onClick={handleToggleGrouped}
               disabled={groupedLoading}
             >
@@ -469,13 +440,6 @@ export default function BatchArchivingPanel() {
             <div className="saved-notice">
               Saved to <code>output/archiving_objects_scored.xlsx</code>
             </div>
-          )}
-
-          {showRecommended && scored.recommended && (
-            <ResultsTable
-              rows={scored.recommended}
-              caption="Recommended — highest-scoring object per table"
-            />
           )}
 
           {showGrouped && groupedRows && (
