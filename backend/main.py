@@ -32,6 +32,7 @@ import llm
 import header_tables
 import object_descriptions
 import reference_doc as ref_doc_mod
+import credentials_store
 import transactions.taana as taana
 import transactions.db15 as db15
 import transactions.db02 as db02
@@ -214,6 +215,16 @@ class SapForMeCredentialsRequest(BaseModel):
     password: str
 
 
+class SaveCredentialsIdentity(BaseModel):
+    system: str
+    client: str
+    username: str
+
+
+class SapForMeIdentity(BaseModel):
+    email: str
+
+
 class LlmSettingsRequest(BaseModel):
     provider: str
     model: str = ""
@@ -270,10 +281,23 @@ def sap_info():
     }
 
 
+SAP_KEY = ("system", "client", "username")
+SAP_FOR_ME_KEY = ("email",)
+
+
+def _credentials_response(path) -> dict:
+    """The active profile's fields at top level (what the login forms pre-fill from) plus the
+    full "profiles" list for the saved-credentials dropdown."""
+    store = credentials_store.load(path)
+    active = store["profiles"][store["active"]] if store["profiles"] else {}
+    return {**active, "profiles": store["profiles"]}
+
+
 @app.post("/api/sap/credentials")
 def save_credentials(req: SaveCredentialsRequest):
-    """Persist connection details (including password) to a local JSON file so
-    the login form auto-fills on the next session."""
+    """Save connection details (including password) to a local JSON file so the login form can
+    be filled from them later. Saving the same system/client/user again updates that entry;
+    a different one is added alongside, so earlier ones are kept."""
     data = {
         "system": req.system,
         "client": req.client,
@@ -281,39 +305,58 @@ def save_credentials(req: SaveCredentialsRequest):
         "password": req.password,
         "language": req.language,
     }
-    CREDENTIALS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    credentials_store.save(CREDENTIALS_FILE, data, SAP_KEY)
     return {"saved": True}
 
 
 @app.get("/api/sap/credentials")
 def load_credentials():
-    """Return previously saved connection details, or an empty object if none."""
-    if not CREDENTIALS_FILE.exists():
-        return {}
-    try:
-        return json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    """Return the most recently saved/selected connection details at top level, plus every saved
+    profile under "profiles" (empty object if none)."""
+    return _credentials_response(CREDENTIALS_FILE)
+
+
+@app.post("/api/sap/credentials/select")
+def select_credentials(req: SaveCredentialsIdentity):
+    """Make a saved connection the one the login form opens with."""
+    credentials_store.select(CREDENTIALS_FILE, req.model_dump(), SAP_KEY)
+    return {"selected": True}
+
+
+@app.post("/api/sap/credentials/delete")
+def delete_credentials(req: SaveCredentialsIdentity):
+    if not credentials_store.delete(CREDENTIALS_FILE, req.model_dump(), SAP_KEY):
+        raise HTTPException(status_code=404, detail="No such saved connection.")
+    return {"deleted": True}
 
 
 @app.post("/api/sap-for-me/credentials")
 def save_sap_for_me_credentials(req: SapForMeCredentialsRequest):
-    """Persist SAP for Me sign-in details (used by housekeeping.py's SAP for
-    Me fallback to auto-login) to a local JSON file."""
-    data = {"email": req.email, "password": req.password}
-    SAP_FOR_ME_CREDENTIALS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    """Save SAP for Me sign-in details (used by housekeeping.py / header_tables.py's SAP for Me
+    fallback to auto-login). The saved account used for lookups is the most recently saved or
+    selected one; other accounts are kept."""
+    credentials_store.save(SAP_FOR_ME_CREDENTIALS_FILE, {"email": req.email, "password": req.password}, SAP_FOR_ME_KEY)
     return {"saved": True}
 
 
 @app.get("/api/sap-for-me/credentials")
 def load_sap_for_me_credentials():
-    """Return previously saved SAP for Me sign-in details, or an empty object if none."""
-    if not SAP_FOR_ME_CREDENTIALS_FILE.exists():
-        return {}
-    try:
-        return json.loads(SAP_FOR_ME_CREDENTIALS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    """Return the active SAP for Me account at top level, plus every saved one under "profiles"."""
+    return _credentials_response(SAP_FOR_ME_CREDENTIALS_FILE)
+
+
+@app.post("/api/sap-for-me/credentials/select")
+def select_sap_for_me_credentials(req: SapForMeIdentity):
+    """Make a saved SAP for Me account the one used for lookups."""
+    credentials_store.select(SAP_FOR_ME_CREDENTIALS_FILE, req.model_dump(), SAP_FOR_ME_KEY)
+    return {"selected": True}
+
+
+@app.post("/api/sap-for-me/credentials/delete")
+def delete_sap_for_me_credentials(req: SapForMeIdentity):
+    if not credentials_store.delete(SAP_FOR_ME_CREDENTIALS_FILE, req.model_dump(), SAP_FOR_ME_KEY):
+        raise HTTPException(status_code=404, detail="No such saved account.")
+    return {"deleted": True}
 
 
 # ---------------------------------------------------------------------------

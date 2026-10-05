@@ -268,7 +268,12 @@ def _read_result_grid(session, retries: int = 3, retry_wait: float = 0.4) -> lis
                             # with thousands separators (e.g. "1,234,567"),
                             # which float() rejects outright -- strip them
                             # before parsing.
-                            raw_bytes = float(str(value).replace(",", "").strip())
+                            # The grid formats the number with the SAP user's
+                            # separators ("1,234,567" or "1.234.567" or with spaces,
+                            # depending on the user's decimal notation). A byte count
+                            # is always a whole number, so keep only its digits.
+                            digits = "".join(ch for ch in str(value) if ch.isdigit())
+                            raw_bytes = float(digits)
                             row["Volume (GB)"] = f"{raw_bytes / _BYTES_PER_GB:.2f}"
                             row["Volume (MB)"] = f"{raw_bytes / _BYTES_PER_MB:.2f}"
                         except (ValueError, TypeError):

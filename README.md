@@ -16,8 +16,9 @@ Main backend modules (`backend/`): `main.py` (all endpoints), `sap_connector.py`
 connection), `transactions/` (one module per SAP transaction), `header_tables.py` (settles ambiguous header
 tables), `llm.py` (the AI model switch: Claude or
 Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeeping.py` + `sap_for_me.py`
-(housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (chat
-assistant), `reference_doc.py` (reference document analysis), `progress.py` (progress
+(housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (the always-visible
+assistant), `credentials_store.py` (several saved logins per credentials file), `reference_doc.py`
+(reference document analysis), `progress.py` (progress
 polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 
 ## Project status
@@ -33,9 +34,10 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
-| Chat assistant over scored results | Implemented; documented from the code and not run end to end — see [Chat assistant](#chat-assistant) for known gaps |
+| SAP Assistant (always-visible chat column: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
+| Several saved SAP / SAP for Me logins with a dropdown | Working; storage and endpoints tested offline with temporary files — see [Saved connection details](#saved-connection-details) |
 | AI model switch (Claude or Groq free tier) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared** — see [AI model selection](#ai-model-selection-claude-or-groq) |
-| Reference document analysis (Excel / PDF / PowerPoint) | Implemented; frontend builds cleanly, not yet run end to end against a real document — see [Reference document analysis](#reference-document-analysis) |
+| Reference document analysis (Excel / PDF / PowerPoint, one or several files) | Implemented; the multi-document merge was tested offline with canned model answers, not yet run end to end against real documents — see [Reference document analysis](#reference-document-analysis) |
 
 ## Prerequisites
 
@@ -112,8 +114,8 @@ that were the point). Each sidebar item names the *task* ("Generate Table List",
 Archiving Objects for Tables"); the transaction(s) behind it are an implementation
 detail documented here for developers, not exposed in the app itself. (The one
 exception is the [Chat assistant](#chat-assistant): users can ask it questions that
-Claude answers by running DB15, AOBJ, SE16N, SE11, TAANA or SARA on their behalf, and its
-replies always name the transaction it queried.)
+the assistant answers by running DB15, AOBJ, SE16N, SE11, TAANA, SARA or DB02 on their behalf, and its
+replies always name the source it used.)
 
 ## Look and feel
 
@@ -346,7 +348,7 @@ object/program to tackle first. `backend/grouping.py`'s `build_object_groups()`:
 
 ## Reference document analysis
 
-After scoring, a **Reference Document Analysis** panel appears (above the chat box) in
+After scoring, a **Reference Document Analysis** panel appears in
 **Find Archiving Objects for Tables** (`frontend/src/components/ReferenceDocPanel.tsx`).
 It lets the user cross-check the recommendations against one or more documents from past
 project experience — Excel (`.xlsx`/`.xls`), PDF, or PowerPoint (`.pptx`/`.ppt`). The same
@@ -481,18 +483,24 @@ free tier's admission rules under a long batch — watch the first big run.
 
 ## Chat assistant
 
-Once **Find Archiving Objects for Tables** has scored results, an "Ask about these
-results" chat box appears under them (`frontend/src/components/ChatPanel.tsx`, shown by
-`BatchArchivingPanel.tsx`). Users can ask follow-up questions about the scored results,
-check live SAP data, or ask it to change a result; four example questions are offered as
-buttons. It uses whichever AI model is selected in the sidebar (see [AI model selection](#ai-model-selection-claude-or-groq)).
+The **SAP Assistant** is a chat column on the right of the app (`frontend/src/components/AssistantPanel.tsx`)
+that is always visible, on every task and whether or not SAP is connected. It answers from, in order of
+authority: (1) the **DVM Guide**, (2) **SAP for Me**, (3) the **live SAP system**, (4) the user's current
+scored results, and last (5) the model's own SAP knowledge, which it must label as general knowledge. It uses
+whichever AI model is selected in the sidebar (see [AI model selection](#ai-model-selection-claude-or-groq)).
+Example questions are offered as buttons, and **Clear** resets the conversation.
+
+When **Find Archiving Objects for Tables** has scored results, they are shared with the assistant
+(`frontend/src/assistantContext.tsx`; the panel publishes them with `usePublishResults`), so it can discuss
+them and change them ("use FI_DOCUMNT for BKPF"). The preview in that panel refreshes. With no results loaded
+the assistant simply has no `update_table_result` tool and answers general and live-system questions.
 
 How it works (`backend/chat.py`, endpoint `POST /api/chat`):
 
-1. The frontend sends the message, the scored rows, the recommended rows and the chat
-   history. The backend gives Claude a summary of the results (best object per table, up
-   to 60 tables) and a set of tools, and lets it make up to 8 rounds of tool calls per
-   message.
+1. The frontend sends the message, the scored rows and recommended rows (empty if there are none) and the
+   chat history. The backend gives the model a summary of the results (best object per table, a limit set
+   by the model in use), the tools below, and a system prompt that explains the sources and the SAP
+   transactions it can run or only explain, and lets it make several rounds of tool calls per message.
 2. Claude picks a tool based on the question:
 
    | Tool | SAP transaction | Used for |
@@ -503,18 +511,27 @@ How it works (`backend/chat.py`, endpoint `POST /api/chat`):
    | `get_table_definition` | SE11 | A table's fields, types and key fields (first 30 fields) |
    | `analyze_table` | TAANA | Row counts, size, archiving statistics |
    | `get_archiving_sessions` | SARA | Whether and when an object has been run (latest 10 sessions) |
-   | `update_table_result` | — (in memory) | Change a table's archiving object, score or rationale |
+   | `get_largest_tables` | DB02 | The biggest tables by size (top N, default 10, max 50) — the same HANA size query as Generate Table List; column-store tables only |
+   | `get_table_sizes` | DB02 | Size in GB/MB of named tables |
+   | `search_dvm_guide` | — (DVM Guide) | Which object / cleanup program fits a table, by table name or keywords (`dvm_guide.search`); fast, offline |
+   | `search_sap_for_me` | — (SAP for Me) | SAP Notes / Knowledge Base Articles (SAP Community as a fallback); **slow** - opens the browser and signs in with the active SAP for Me account |
+   | `update_table_result` | — (in memory) | Change a table's archiving object, score or rationale (only offered when results are loaded) |
 
 3. For `update_table_result`, the backend edits a copy of the rows, recomputes the
    Recommended list (highest score per table) and returns both; the frontend swaps them
    into the preview without re-running scoring.
 
-4. **Source attribution:** whenever Claude uses a SAP tool, its reply states which
-   transaction it queried (e.g. "Checked in AOBJ: …", "DB15 shows …"), so users can see an
-   answer came from live SAP data rather than the model's own recollection. This is a rule
-   in the system prompt in `backend/chat.py`.
+4. **Source attribution:** every answer says where it came from ("DVM Guide: …", "SAP for Me (Note …): …",
+   "Checked in AOBJ: …", "DB15 shows …", "From my general SAP knowledge: …"), so users can tell live data
+   and SAP's own documents from the model's recollection. This is a rule in the system prompt in
+   `backend/chat.py`.
 
-The SAP tools use the shared SAP GUI session, so SAP must be connected.
+The six SAP transaction tools use the shared SAP GUI session, so SAP must be connected for them; without it the
+assistant says live checks are unavailable and still uses the DVM Guide, SAP for Me and its general knowledge.
+Other transactions (DB02, SE38/SA38, SM36/SM37, SARI, …) it can explain but not run. It cannot run arbitrary
+transactions or read everything in the system, only what these tools expose.
+
+**Number formats:** DB02 returns each table's size as a raw byte count formatted with the SAP user's separators (`2,823,527,885` or `2.823.527.885`). `db02._read_result_grid()` keeps only the digits, so sizes are no longer blank for users whose format uses dots.
 
 **Popup handling:** AOBJ shows an information dialog ("Caution: The table is cross-client")
 as soon as it opens, which blocks the screen until its green tick is pressed. The shared
@@ -536,6 +553,8 @@ and `aobj.py` clears popups right after opening AOBJ and again after executing.
   rules before using those tools.
 - The scored rows sent to the chat have no Rationale field, so Claude never sees the
   reasons behind the scores.
+- A SAP for Me search signs in and loads articles every time (no session is kept between messages), so it can
+  take a minute or more; the assistant is told to try the DVM Guide first.
 
 ## Progress polling for long-running batches
 
@@ -714,7 +733,11 @@ If the SAP session is still live but the browser shows "Not Connected", click **
 
 ## Saved connection details
 
-Click **Save** (next to **Connect** in the login form) to persist all connection fields — including the password — to `sap_credentials.json` at the project root. The next time the page loads (or the backend restarts), the form is pre-filled automatically from that file, so you only need to click **Connect**.
+Click **Save** (next to **Connect** in the login form) to persist all connection fields — including the password — to `sap_credentials.json` at the project root. Saves **accumulate**: saving a different system/client/user adds another entry, while saving the same one again updates it. A **Saved connections** dropdown above the form lists every saved entry (`user @ system (client N)`); choosing one fills the form, and **Delete** removes it. The most recently saved or chosen entry is the one the form opens with after a page reload or backend restart, so you only need to click **Connect**.
+
+The **SAP for Me Credentials** panel works the same way (a **Saved accounts** dropdown, keyed by email). The account that is currently saved or selected there is the one the SAP for Me lookups sign in with, so switching accounts in the dropdown switches which login the scraper uses.
+
+The credential files are handled by `backend/credentials_store.py`. A file from an older version (one flat entry) is read as a single saved entry and converted the next time you save.
 
 The credentials file is stored locally on the machine running the backend; it is not transmitted anywhere. It is plain JSON (the password is not encrypted) and is already listed in `.gitignore`, as is `sap_for_me_credentials.json`, which holds the SAP for Me email and password in the same way (saved from the "SAP for Me Credentials" panel).
 
@@ -786,10 +809,14 @@ Key endpoints:
 | POST | `/api/sap/disconnect` | Log out |
 | GET | `/api/sap/status` | Whether currently connected |
 | GET | `/api/sap/info` | Current connection state including system + user (used by the frontend on page load to restore session) |
-| GET | `/api/sap/credentials` | Return saved connection details from `sap_credentials.json` |
-| POST | `/api/sap/credentials` | Save connection details (including password) to `sap_credentials.json` |
-| GET | `/api/sap-for-me/credentials` | Return saved SAP for Me sign-in details from `sap_for_me_credentials.json` |
-| POST | `/api/sap-for-me/credentials` | Save SAP for Me email + password to `sap_for_me_credentials.json` |
+| GET | `/api/sap/credentials` | Return the active saved connection at top level plus every saved one under `profiles` |
+| POST | `/api/sap/credentials` | Add or update a saved connection (identified by system + client + username) in `sap_credentials.json` and make it active |
+| POST | `/api/sap/credentials/select` | Make a saved connection active (body: `{system, client, username}`) |
+| POST | `/api/sap/credentials/delete` | Remove a saved connection (same body) |
+| GET | `/api/sap-for-me/credentials` | Return the active SAP for Me account at top level plus every saved one under `profiles` |
+| POST | `/api/sap-for-me/credentials` | Add or update a saved SAP for Me account (identified by email) and make it the active one used for lookups |
+| POST | `/api/sap-for-me/credentials/select` | Make a saved SAP for Me account active (body: `{email}`) |
+| POST | `/api/sap-for-me/credentials/delete` | Remove a saved SAP for Me account (same body) |
 | GET | `/api/llm/settings` | Active AI provider/model, the Groq models offered and Groq's free-tier limits (API keys are never returned, only whether each is set in `backend/.env`) |
 | POST | `/api/llm/settings` | Choose the AI model for every AI step (body: `{provider: "anthropic"\|"groq", model}`); API keys come from `backend/.env`, not this call |
 | GET | `/api/llm/usage` | Today's request/token count for the active model |

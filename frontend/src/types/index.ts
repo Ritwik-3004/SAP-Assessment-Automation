@@ -4,6 +4,14 @@ export interface SapSystem {
   name: string;
 }
 
+export interface SavedSapCredentials {
+  system: string;
+  client: string;
+  username: string;
+  password: string;
+  language: string;
+}
+
 export interface ConnectionState {
   connected: boolean;
   system?: string;

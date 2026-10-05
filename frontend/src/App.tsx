@@ -5,6 +5,8 @@ import ModelSettingsPanel from "./components/ModelSettingsPanel";
 import BatchArchivingPanel from "./components/BatchArchivingPanel";
 import GenerateTableListPanel from "./components/GenerateTableListPanel";
 import HeaderTablePanel from "./components/HeaderTablePanel";
+import AssistantPanel from "./components/AssistantPanel";
+import { AssistantProvider } from "./assistantContext";
 import { api } from "./api/client";
 import type { ConnectionState } from "./types";
 import "./App.css";
@@ -48,6 +50,7 @@ export default function App() {
   };
 
   return (
+    <AssistantProvider>
     <div className="app">
       <header className="app-header">
         <div className="header-brand">
@@ -113,7 +116,10 @@ export default function App() {
             </div>
           )}
         </section>
+
+        <AssistantPanel />
       </main>
     </div>
+    </AssistantProvider>
   );
 }

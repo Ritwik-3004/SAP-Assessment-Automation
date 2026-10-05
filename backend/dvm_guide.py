@@ -152,3 +152,54 @@ def sections_naming(object_name: str, limit: int = 3, window: int = 600) -> list
         hits.append((0 if explicit.search(text) else 1, {"tables": sorted(tables), "excerpt": text[start:end]}))
     hits.sort(key=lambda h: h[0])
     return [h[1] for h in hits[:limit]]
+
+
+_STOPWORDS = {
+    "THE", "AND", "FOR", "WITH", "THAT", "THIS", "FROM", "WHAT", "WHICH", "WHERE", "HOW", "DOES", "ARE", "CAN",
+    "TABLE", "TABLES", "DATA", "SAP", "ABOUT", "TELL", "ME", "GUIDE", "DVM", "ARCHIVING", "OBJECT",
+}
+
+
+def search(query: str, limit: int = 3, window: int = 900) -> list[dict]:
+    """Free-text search of the guide: [{"tables": [...], "excerpt": str}], best first.
+
+    A table name in *query* (e.g. "BKPF") returns that table's own section first. Other sections
+    are ranked by how many of the query's keywords they contain (names and rare words count more),
+    each shown as a window around its first keyword hit. Tables sharing one section appear together."""
+    words = [w for w in re.findall(r"[A-Za-z0-9_/]{3,}", (query or "").upper()) if w not in _STOPWORDS]
+    if not words:
+        return []
+    index = load_index()
+
+    by_text: dict[str, list[str]] = {}
+    for table, text in index.items():
+        by_text.setdefault(text, []).append(table)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for w in words:  # a table named in the query: its own section first
+        text = index.get(w)
+        if text and text not in seen:
+            seen.add(text)
+            out.append({"tables": sorted(by_text[text]), "excerpt": text[: window * 2]})
+
+    scored = []
+    for text, tables in by_text.items():
+        if text in seen:
+            continue
+        upper = text.upper()
+        score, first = 0, None
+        for w in set(words):
+            n = len(re.findall(r"(?<![A-Z0-9_])" + re.escape(w) + r"(?![A-Z0-9_])", upper))
+            if n:
+                score += min(n, 3) * (3 if "_" in w or len(w) <= 6 else 1)
+                pos = upper.find(w)
+                first = pos if first is None else min(first, pos)
+        if score:
+            scored.append((score, text, tables, first or 0))
+    scored.sort(key=lambda s: -s[0])
+    for _, text, tables, pos in scored:
+        if len(out) >= limit:
+            break
+        out.append({"tables": sorted(tables), "excerpt": text[max(0, pos - window // 2): pos + window]})
+    return out[:limit]

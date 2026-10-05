@@ -45,6 +45,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+import credentials_store
 import llm
 from config import (
     OUTPUT_DIR,
@@ -112,13 +113,8 @@ class SapForMeLoginError(Exception):
 
 
 def _load_credentials() -> "dict | None":
-    if not SAP_FOR_ME_CREDENTIALS_FILE.exists():
-        return None
-    try:
-        data = json.loads(SAP_FOR_ME_CREDENTIALS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("Could not read SAP for Me credentials file.")
-        return None
+    """The active saved SAP for Me account (most recently saved or selected), or None."""
+    data = credentials_store.active_profile(SAP_FOR_ME_CREDENTIALS_FILE)
     if not data.get("email") or not data.get("password"):
         return None
     return data

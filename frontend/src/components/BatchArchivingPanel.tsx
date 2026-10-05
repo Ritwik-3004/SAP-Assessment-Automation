@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../api/client";
 import ResultsTable from "./ResultsTable";
 import ProgressBar from "./ProgressBar";
-import ChatPanel from "./ChatPanel";
+import { usePublishResults } from "../assistantContext";
 import ReferenceDocPanel from "./ReferenceDocPanel";
 import type { Db15BatchResult, ProgressSnapshot, ScoredResult } from "../types";
 
@@ -38,6 +38,18 @@ export default function BatchArchivingPanel() {
   const [groupedLoading, setGroupedLoading] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Let the always-visible assistant see (and change) the scored results.
+  const applyAssistantChange = useCallback(
+    (rows: Record<string, string>[], recommended: Record<string, string>[]) =>
+      setScored((prev) => (prev ? { ...prev, rows, recommended } : prev)),
+    []
+  );
+  usePublishResults(
+    scored?.rows && scored.rows.length > 0
+      ? { rows: scored.rows, recommended: scored.recommended ?? [], apply: applyAssistantChange }
+      : null
+  );
 
   async function fetchInputFiles() {
     setLoadingFiles(true);
@@ -479,14 +491,6 @@ export default function BatchArchivingPanel() {
         <ReferenceDocPanel scored={scored} />
       )}
 
-      {scored?.rows && scored.rows.length > 0 && (
-        <ChatPanel
-          scored={scored}
-          onResultsUpdated={(rows, recommended) =>
-            setScored((prev) => prev ? { ...prev, rows, recommended } : prev)
-          }
-        />
-      )}
     </div>
   );
 }

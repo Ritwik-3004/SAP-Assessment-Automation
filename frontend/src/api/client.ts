@@ -48,10 +48,26 @@ export const api = {
   disconnect: () => post<{ status: string }>("/api/sap/disconnect", {}),
   status: () => get<{ connected: boolean }>("/api/sap/status"),
   sapInfo: () => get<{ connected: boolean; system: string | null; user: string | null }>("/api/sap/info"),
-  loadCredentials: () => get<{ system?: string; client?: string; username?: string; password?: string; language?: string }>("/api/sap/credentials"),
+  loadCredentials: () =>
+    get<
+      Partial<import("../types").SavedSapCredentials> & {
+        profiles?: import("../types").SavedSapCredentials[];
+      }
+    >("/api/sap/credentials"),
+  selectCredentials: (id: { system: string; client: string; username: string }) =>
+    post<{ selected: boolean }>("/api/sap/credentials/select", id),
+  deleteCredentials: (id: { system: string; client: string; username: string }) =>
+    post<{ deleted: boolean }>("/api/sap/credentials/delete", id),
   saveCredentials: (body: { system: string; client: string; username: string; password: string; language: string }) =>
     post<{ saved: boolean }>("/api/sap/credentials", body),
-  loadSapForMeCredentials: () => get<{ email?: string; password?: string }>("/api/sap-for-me/credentials"),
+  loadSapForMeCredentials: () =>
+    get<{ email?: string; password?: string; profiles?: { email: string; password: string }[] }>(
+      "/api/sap-for-me/credentials"
+    ),
+  selectSapForMeCredentials: (email: string) =>
+    post<{ selected: boolean }>("/api/sap-for-me/credentials/select", { email }),
+  deleteSapForMeCredentials: (email: string) =>
+    post<{ deleted: boolean }>("/api/sap-for-me/credentials/delete", { email }),
   saveSapForMeCredentials: (body: { email: string; password: string }) =>
     post<{ saved: boolean }>("/api/sap-for-me/credentials", body),
   getLlmSettings: () => get<import("../types").LlmSettings>("/api/llm/settings"),
