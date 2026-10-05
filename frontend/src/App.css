@@ -985,3 +985,29 @@ body {
   border-color: var(--border);
   border-bottom: 1px solid var(--surface);
 }
+
+/* Table analysis: questions and field pickers */
+.ta-card {
+  margin-top: 16px;
+  border: 1px solid var(--primary);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.ta-card-header { padding: 12px 16px; background: var(--bg); border-bottom: 1px solid var(--border); font-weight: 600; }
+.ta-card-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.ta-field-list { max-height: 360px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border); border-radius: 6px; }
+.ta-field-row {
+  display: flex; align-items: baseline; gap: 10px; padding: 6px 10px; cursor: pointer;
+  border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.ta-field-row:last-child { border-bottom: none; }
+.ta-field-row:hover { background: var(--bg); }
+.ta-field-name { font-weight: 600; min-width: 120px; }
+.ta-field-label { color: var(--text-muted); flex: 1; }
+.ta-tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; background: var(--tab-bg); color: var(--text-muted); }
+.ta-tag.suggested { background: #fef9c3; color: #854d0e; }
+.ta-status { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 10px; }
+.ta-status.done { background: #dcfce7; color: #15803d; }
+.ta-status.skipped { background: #f3f4f6; color: #6b7280; }
+.ta-status.failed { background: #fee2e2; color: #b91c1c; }

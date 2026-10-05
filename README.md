@@ -18,7 +18,8 @@ tables), `llm.py` (the AI model switch: Claude or
 Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeeping.py` + `sap_for_me.py`
 (housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (the always-visible
 assistant), `credentials_store.py` (several saved logins per credentials file), `reference_doc.py`
-(reference document analysis), `progress.py` (progress
+(reference document analysis), `table_analysis.py` (the Table Analysis task) with `transactions/taana_analysis.py`
+(its TAANA screens), `progress.py` (progress
 polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 
 ## Project status
@@ -33,6 +34,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
+| Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on one tiny table (SWWWIHEAD): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the download were tested offline with a fake SAP. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis-taana) |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
 | SAP Assistant (always-visible chat column: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
 | Several saved SAP / SAP for Me logins with a dropdown | Working; storage and endpoints tested offline with temporary files — see [Saved connection details](#saved-connection-details) |
@@ -140,7 +142,7 @@ transactions below, has no dedicated panel.
 
 | Transaction | Purpose |
 |---|---|
-| **TAANA** | Database table analysis — row counts, sizes, archivability flags |
+| **TAANA** | Table analysis. The **Table Analysis** task (below) drives it with ad hoc variants; the older `taana.run()` function behind the chat's `analyze_table` tool has not been verified against the real screens |
 | **DB15** | Find which archiving objects reference a given table |
 | **DB02** | HANA database administration cockpit (used here for its SQL Editor) |
 | **SE16N** | Browse table contents with optional WHERE filter; also used for a specific ARCH_DEF header-table lookup (see below) |
@@ -724,6 +726,59 @@ Execute, each candidate grid path's found/row_count/column_order/first_row, and 
 table — that is how to confirm the archiving-object text table behind
 [Object descriptions](#object-descriptions).
 
+## Table Analysis (TAANA)
+
+The **Table Analysis (TAANA)** task (`frontend/src/components/TableAnalysisPanel.tsx`) runs a TAANA analysis for each header table and
+collects the results in one Excel file.
+
+**Input.** By default the file saved by **Find Header Tables** (the panel preselects the newest `header_tables*.xlsx` in the
+`output/` folder); **Upload a different file** to use another. From a workbook with several sheets it reads the *last* sheet that
+has a "Header Table" column — for `header_tables_with_reference.xlsx` that is the final list after the reference-document
+overrides. Blank cells and duplicates are dropped. A file with only a "Table Name"/"Table" column also works.
+
+**For each table, in order** (`backend/table_analysis.py`):
+1. The tool opens TAANA, starts *Table Analysis > Perform* for the table and opens **Create Ad Hoc Variant**, and reads every field TAANA
+   offers. The ABAP dictionary types (table `DD03L`, one query for all tables through DB02's SQL editor) tell date, year and month fields
+   apart: `DATS` = date; `ACCP`, or a 6-character field named/labelled like a period (e.g. `SPMON`) = year-month period; 4-digit `NUMC`
+   named/labelled as a year (e.g. `GJAHR`) = year; 2- or 3-character `NUMC`/`CHAR` named/labelled as a month or posting period (e.g. `MONAT`,
+   `POPER`) = month. The lookup takes roughly 30 seconds for five tables. If it fails, field names and labels are used instead and a
+   warning is shown. The dialog is then cancelled, so SAP is not held while you decide.
+2. **Question 1 — date/year/month fields.** The date, year and month fields are listed with checkboxes, each tagged with its kind. A
+   **Group dates by year** box (on by default) gives each selected date or year-month field the sub-field "first 4 characters", so the result has one row per year instead of one per day
+   (the variant shows e.g. `WI_CD(4)`). Year and month fields are added as they are (a month field gives one row per month number).
+3. **Question 2 — other fields?** Yes/No. If the table has no date, year or month field, this says so.
+4. **Question 3 — other fields** (only on Yes). All remaining fields are listed (a filter box appears for long lists; commonly useful
+   ones such as company code and document type are tagged *suggested* and listed first; the client field `MANDT` is hidden).
+5. The tool creates the ad hoc variant with the chosen fields, schedules the analysis **in the background starting immediately**
+   (Start Time dialog: Immediate, Save), then checks TAANA every 10 seconds until the run shows status **Completed** (it identifies its own
+   run by its start date/time, because earlier ad hoc runs of the table stay in the tree).
+6. The result grid is copied into `output/Table analysis.xlsx` and the tool moves to the next table.
+
+**Result.** All fields chosen for a table form **one combined analysis**: the grid has a column per field plus "No. Entr." (e.g. Status ×
+Year), not one result per field. The workbook has a **Summary** sheet (table, result, fields analysed, rows, start time, note) and one
+sheet per table (named after the table) with the grid, counts as numbers, and a **Total** row. It is rewritten after every table, so
+finished tables are kept if a later one fails or the run is cancelled. Each run replaces the file; if it is open in Excel, a numbered copy
+such as `Table analysis (2).xlsx` is written instead. **Download Excel** fetches it.
+
+**Controls.** *Skip this table* (also on each question) and *Cancel* are always available. Skipping or cancelling does not stop a job
+already scheduled in SAP. A table is marked **failed** if its job ends with an error status, TAANA rejects the table, or it does not finish
+within 4 hours (`MAX_WAIT_SECONDS`); the run continues with the next table. A table where nothing was selected is marked skipped.
+
+**Side effects in SAP.** Every run creates a background job and an analysis entry named `AD-HOC` under the table in TAANA; repeated
+runs pile up there, newest first. Remove old ones in TAANA with *Table Analysis > Delete*. While a run is active the SAP GUI session is in
+use — don't run other SAP features or chat live-SAP questions at the same time.
+
+**Verified screens** (`backend/transactions/taana_analysis.py`, documented in its docstring): TAANA opens an administration screen (analysis
+tree + message grid); *Table Analysis > Perform* opens the "Start Table Analyses" popup; F4 on the variant field then **Ad Hoc Variant** (F5) opens the
+variant dialog whose right grid lists the table's fields (`FIELDNAME`, `FIELDDESCR`) and whose left grid holds the chosen ones
+(offset/length columns `PARTOFFSET`/`PARTLENGTH`); *Move left* adds the selected row; Continue, Continue, Continue, then Start Time > **Immediate** > Save.
+The result is shown by selecting a field node under the run and choosing *Table Analysis > Display* (status field `D0100_O_STATUS`, result grid in
+`cntlCUSTOM_CONTROL`).
+
+**Known limits.** Reading a very large result grid cell by cell can take a while. The number of rows is whatever TAANA produces, so selecting
+a day-level date together with several other fields on a big table can give a very large sheet — group by year and add fields sparingly.
+The step that reads the field types assumes SAP HANA, like the other DB02 SQL features.
+
 ## Session persistence
 
 The tool keeps the SAP session alive in the backend process — closing or refreshing the browser tab does **not** disconnect from SAP. On page load the frontend calls `GET /api/sap/info`; if the backend is still connected it restores the connected state (system name, username) without requiring the user to re-enter credentials or re-authenticate.
@@ -827,6 +882,12 @@ Key endpoints:
 | POST | `/api/files/output/save-archiving` | Save archiving-objects rows to `output/archiving_objects_by_table.xlsx` |
 | POST | `/api/files/output/save-scored` | Save scored rows + recommended list + grouped list to `output/archiving_objects_scored.xlsx` |
 | POST | `/api/files/output/save-header-tables` | Save header-table rows to `output/header_tables.xlsx` |
+| POST | `/api/table-analysis/start` | Start the Table Analysis for the header tables in an uploaded `file` or in `filename` (a file in the output folder); returns the tables found and runs in the background |
+| GET | `/api/table-analysis/progress` | Status, current table/step, the open question (if any), the per-table records and the output path |
+| POST | `/api/table-analysis/answer` | Answer the open question: body `{prompt_id, answer}` — `{selected, group_by_year}` (date fields), `{add}` (other fields?), `{selected}` (other fields) |
+| POST | `/api/table-analysis/skip` | Skip the table being worked on |
+| POST | `/api/table-analysis/cancel` | Stop after the current step; finished tables stay in the workbook |
+| GET | `/api/table-analysis/download` | Download `output/Table analysis.xlsx` |
 | POST | `/api/reference-doc/analyze` | Multipart upload: `files` (one or more Excel/PDF/PowerPoint) + `recommended` (JSON string of the recommended rows); returns matches, mismatches, not-in-reference rows and the annotated recommended list |
 | POST | `/api/reference-doc/save` | Save the reference-annotated results (body: `{rows, recommended}`) to `output/archiving_objects_with_reference.xlsx` |
 | POST | `/api/reference-doc/export` | Same workbook as a browser download |

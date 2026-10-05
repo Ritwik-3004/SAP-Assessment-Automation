@@ -248,6 +248,32 @@ export const api = {
     return res.blob();
   },
 
+  tableAnalysisStart: async (source: { filename?: string; file?: File }) => {
+    const formData = new FormData();
+    if (source.file) formData.append("file", source.file);
+    if (source.filename) formData.append("filename", source.filename);
+    const res = await fetch(`${BASE}/api/table-analysis/start`, { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.json() as Promise<{ status: "started"; total: number; tables: string[] }>;
+  },
+  tableAnalysisProgress: () =>
+    get<import("../types").TableAnalysisSnapshot>("/api/table-analysis/progress"),
+  tableAnalysisAnswer: (promptId: number, answer: Record<string, unknown>) =>
+    post<{ ok: boolean }>("/api/table-analysis/answer", { prompt_id: promptId, answer }),
+  tableAnalysisSkip: () => post<{ ok: boolean }>("/api/table-analysis/skip", {}),
+  tableAnalysisCancel: () => post<{ ok: boolean }>("/api/table-analysis/cancel", {}),
+  tableAnalysisDownload: async () => {
+    const res = await fetch(`${BASE}/api/table-analysis/download`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.blob();
+  },
+
   getInputFiles: () => get<{ files: string[] }>("/api/files/input"),
 
   db15BatchFromInput: (filename: string) =>

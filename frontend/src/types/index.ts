@@ -4,6 +4,47 @@ export interface SapSystem {
   name: string;
 }
 
+export interface TableAnalysisField {
+  name: string;
+  label: string;
+  /** date | period | year | month (date/year/month question) */
+  kind?: string;
+  /** commonly useful (company code, document type, ...) */
+  suggested?: boolean;
+}
+
+/** The question the table-analysis job is waiting for the user to answer. */
+export interface TableAnalysisPrompt {
+  id: number;
+  kind: "date_fields" | "more_fields" | "other_fields";
+  table: string;
+  fields?: TableAnalysisField[];
+  can_group_by_year?: boolean;
+  no_date_fields?: boolean;
+  selected?: string[];
+  has_other_fields?: boolean;
+}
+
+export interface TableAnalysisRecord {
+  table: string;
+  state: "done" | "skipped" | "failed";
+  fields: string[];
+  rows: number;
+  note: string;
+}
+
+export interface TableAnalysisSnapshot {
+  status: "idle" | "running" | "waiting" | "done" | "error";
+  total: number;
+  completed: number;
+  message: string | null;
+  current: { table: string; step: string } | null;
+  prompt: TableAnalysisPrompt | null;
+  records: TableAnalysisRecord[];
+  output_path: string | null;
+  warnings: string[];
+}
+
 export interface SavedSapCredentials {
   system: string;
   client: string;

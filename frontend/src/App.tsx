@@ -5,6 +5,7 @@ import ModelSettingsPanel from "./components/ModelSettingsPanel";
 import BatchArchivingPanel from "./components/BatchArchivingPanel";
 import GenerateTableListPanel from "./components/GenerateTableListPanel";
 import HeaderTablePanel from "./components/HeaderTablePanel";
+import TableAnalysisPanel from "./components/TableAnalysisPanel";
 import AssistantPanel from "./components/AssistantPanel";
 import { AssistantProvider } from "./assistantContext";
 import { api } from "./api/client";
@@ -15,6 +16,7 @@ const TASKS = [
   { id: "TOP_TABLES", label: "Generate Table List (DB02)" },
   { id: "BATCH", label: "Find Archiving Objects for Tables" },
   { id: "HEADER_TABLES", label: "Find Header Tables for Archiving Objects" },
+  { id: "TABLE_ANALYSIS", label: "Table Analysis (TAANA)" },
 ] as const;
 
 type Tab = (typeof TASKS)[number]["id"];
@@ -47,6 +49,7 @@ export default function App() {
     TOP_TABLES: <GenerateTableListPanel />,
     BATCH: <BatchArchivingPanel />,
     HEADER_TABLES: <HeaderTablePanel />,
+    TABLE_ANALYSIS: <TableAnalysisPanel />,
   };
 
   return (

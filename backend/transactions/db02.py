@@ -169,6 +169,59 @@ def _run_get_table_sizes(table_names: list[str]) -> dict:
         return {"status": "error", "transaction": "DB02", "message": str(exc)}
 
 
+def run_get_field_types(table_names: list[str]) -> dict:
+    """
+    Date-like and year-like fields of *table_names*, from the ABAP dictionary table DD03L, via
+    the SQL Editor (same path as the size lookups). Used by the TAANA table analysis to tell
+    date/year/month fields from the rest. Only fields that can be one of those are returned: DATS and
+    ACCP; 4-character NUMC/CHAR (a year is usually NUMC(4)); and 2-, 3- or 6-character NUMC/CHAR whose
+    name looks like a month/period (MONAT, POPER, SPMON, ...). The caller decides which are which.
+
+    Returns {"status": "ok", "types": {TABLE: {FIELD: {"type": "DATS", "length": 8}}}}.
+    """
+    return sap.run(_run_get_field_types, table_names)
+
+
+def _run_get_field_types(table_names: list[str]) -> dict:
+    sanitized = sorted({n for n in (_sanitize_table_name(t) for t in table_names) if n})
+    if not sanitized:
+        return {"status": "ok", "transaction": "DB02", "types": {}}
+    try:
+        session = sap.get_session()
+        _open_sql_editor(session)
+        schema_rows = _run_sql_query(
+            session, "SELECT SCHEMA_NAME FROM SYS.TABLES WHERE TABLE_NAME = 'T000'"
+        )
+        if not schema_rows:
+            return {"status": "error", "transaction": "DB02", "message": "Could not find the SAP schema name."}
+        schema = re.sub(r"[^A-Za-z0-9_]", "", str(list(schema_rows[0].values())[0]))
+        table_list = ", ".join(f"'{n}'" for n in sanitized)
+        rows = _run_sql_query(
+            session,
+            f'SELECT TABNAME, FIELDNAME, DATATYPE, LENG FROM "{schema}"."DD03L" '
+            f"WHERE TABNAME IN ({table_list}) AND AS4LOCAL = 'A' "
+            f"AND (DATATYPE IN ('DATS','ACCP') OR (DATATYPE IN ('NUMC','CHAR') AND LENG = 4) "
+            f"OR (DATATYPE IN ('NUMC','CHAR') AND LENG IN (2, 3, 6) "
+            f"AND (FIELDNAME LIKE '%MON%' OR FIELDNAME LIKE '%PER%' OR FIELDNAME LIKE '%BUP%'))) "
+            f"ORDER BY TABNAME, POSITION",
+        )
+        types: dict = {}
+        for r in rows:
+            table = (r.get("TABNAME") or "").strip().upper()
+            field = (r.get("FIELDNAME") or "").strip().upper()
+            if not table or not field:
+                continue
+            try:
+                length = int("".join(ch for ch in str(r.get("LENG") or "") if ch.isdigit()) or 0)
+            except ValueError:
+                length = 0
+            types.setdefault(table, {})[field] = {"type": (r.get("DATATYPE") or "").strip().upper(), "length": length}
+        return {"status": "ok", "transaction": "DB02", "types": types}
+    except Exception as exc:
+        logger.exception("DB02 field-type lookup failed")
+        return {"status": "error", "transaction": "DB02", "message": str(exc)}
+
+
 def _sanitize_table_name(name: str) -> str | None:
     candidate = (name or "").strip().upper()
     return candidate if _VALID_TABLE_NAME.match(candidate) else None

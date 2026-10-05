@@ -20,7 +20,7 @@ import openpyxl
 from openpyxl.styles import Alignment
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from sap_connector import sap
@@ -33,6 +33,7 @@ import header_tables
 import object_descriptions
 import reference_doc as ref_doc_mod
 import credentials_store
+import table_analysis
 import transactions.taana as taana
 import transactions.db15 as db15
 import transactions.db02 as db02
@@ -935,6 +936,86 @@ def _run_header_table_job(archiving_objects: list[str]):
     except Exception as exc:
         logger.exception("Header-table batch job failed")
         _header_table_progress.fail(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Table analysis (TAANA ad hoc variants for the header tables)
+# ---------------------------------------------------------------------------
+
+class TableAnalysisAnswer(BaseModel):
+    prompt_id: int
+    answer: dict
+
+
+@app.post("/api/table-analysis/start")
+def start_table_analysis(file: UploadFile | None = File(None), filename: str = Form("")):
+    """Start the table analysis for the header tables in *file* (an upload) or in *filename* (a file
+    already in the output folder, e.g. header_tables_with_reference.xlsx). Returns immediately; poll
+    /progress and answer the questions it asks."""
+    _require_connection()
+    if table_analysis.job.is_active():
+        raise HTTPException(status_code=409, detail="A table analysis is already running.")
+
+    if file is not None and file.filename:
+        contents = file.file.read()
+    elif filename:
+        path = OUTPUT_DIR / Path(filename).name
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"'{path.name}' not found in the output folder.")
+        contents = path.read_bytes()
+    else:
+        raise HTTPException(status_code=400, detail="Choose a file or upload one.")
+
+    try:
+        tables = table_analysis.parse_tables(contents)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read the file: {exc}")
+
+    try:
+        table_analysis.job.start(tables)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "started", "total": len(tables), "tables": tables}
+
+
+@app.get("/api/table-analysis/progress")
+def table_analysis_progress():
+    return table_analysis.job.snapshot()
+
+
+@app.post("/api/table-analysis/answer")
+def table_analysis_answer(req: TableAnalysisAnswer):
+    if not table_analysis.job.answer(req.prompt_id, req.answer):
+        raise HTTPException(status_code=409, detail="That question is no longer open.")
+    return {"ok": True}
+
+
+@app.post("/api/table-analysis/skip")
+def table_analysis_skip():
+    """Skip the table being worked on (a background job already scheduled in SAP keeps running there)."""
+    table_analysis.job.skip()
+    return {"ok": True}
+
+
+@app.post("/api/table-analysis/cancel")
+def table_analysis_cancel():
+    """Stop after the current step; tables already analysed stay in the workbook."""
+    table_analysis.job.cancel()
+    return {"ok": True}
+
+
+@app.get("/api/table-analysis/download")
+def table_analysis_download():
+    path = table_analysis.job.snapshot().get("output_path")
+    if not path or not Path(path).exists():
+        raise HTTPException(status_code=404, detail="There is no Table analysis workbook yet.")
+    return FileResponse(
+        path,
+        filename=Path(path).name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 # ---------------------------------------------------------------------------
