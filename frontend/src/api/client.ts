@@ -264,6 +264,7 @@ export const api = {
   tableAnalysisAnswer: (promptId: number, answer: Record<string, unknown>) =>
     post<{ ok: boolean }>("/api/table-analysis/answer", { prompt_id: promptId, answer }),
   tableAnalysisSkip: () => post<{ ok: boolean }>("/api/table-analysis/skip", {}),
+  tableAnalysisStopWaiting: (table: string) => post<{ ok: boolean }>("/api/table-analysis/stop-waiting", { table }),
   tableAnalysisCancel: () => post<{ ok: boolean }>("/api/table-analysis/cancel", {}),
   tableAnalysisDownload: async () => {
     const res = await fetch(`${BASE}/api/table-analysis/download`);

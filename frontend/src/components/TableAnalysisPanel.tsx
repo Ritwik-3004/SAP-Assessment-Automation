@@ -265,6 +265,11 @@ export default function TableAnalysisPanel() {
     await api.tableAnalysisSkip().catch(() => {});
   }
 
+  async function stopWaiting(table: string) {
+    await api.tableAnalysisStopWaiting(table).catch(() => {});
+    setSnapshot(await api.tableAnalysisProgress().catch(() => snapshot as TableAnalysisSnapshot));
+  }
+
   async function cancelRun() {
     await api.tableAnalysisCancel().catch(() => {});
   }
@@ -295,7 +300,7 @@ export default function TableAnalysisPanel() {
         reads its fields, shows you the date, year and month fields to choose from, then asks whether to add other fields
         (such as company code or document type). It then creates an ad hoc analysis variant, runs it in the
         background in SAP, and copies the result into <code>output/Table analysis.xlsx</code> (one sheet per
-        table) before moving on to the next table. Don't use SAP at the same time while it runs.
+        table) before moving on to the next table. You answer the questions for all tables in a row: each table's analysis starts in the background as soon as you've chosen its fields, and the results are added to the Excel file as the jobs finish. Don't use SAP at the same time while it runs.
       </div>
 
       <form className="tx-form" onSubmit={handleStart}>
@@ -377,15 +382,30 @@ export default function TableAnalysisPanel() {
             <>
               <ProgressBar
                 mode="determinate"
+                completed={snapshot.asked}
+                total={snapshot.total}
+                label={
+                  snapshot.interactive_done
+                    ? `Questions: all ${snapshot.total} tables answered`
+                    : `Questions: ${snapshot.asked} of ${snapshot.total} tables answered` +
+                      (snapshot.current ? ` — ${snapshot.current.table}: ${snapshot.message ?? snapshot.current.step}` : "")
+                }
+              />
+              <div style={{ height: 8 }} />
+              <ProgressBar
+                mode="determinate"
                 completed={snapshot.completed}
                 total={snapshot.total}
                 label={
-                  `${snapshot.completed} of ${snapshot.total} tables` +
-                  (snapshot.current ? ` — ${snapshot.current.table}: ${snapshot.message ?? snapshot.current.step}` : "")
+                  `Analyses: ${snapshot.completed} of ${snapshot.total} finished` +
+                  (snapshot.running.length > 0 ? ` · ${snapshot.running.length} running in SAP (${snapshot.running.join(", ")})` : "")
                 }
               />
+              {snapshot.interactive_done && snapshot.message && <p className="tx-hint" style={{ marginTop: 6 }}>{snapshot.message}</p>}
               <div className="action-row" style={{ marginTop: 8 }}>
-                <button className="btn btn-secondary" onClick={skipTable}>Skip current table</button>
+                {!snapshot.interactive_done && (
+                  <button className="btn btn-secondary" onClick={skipTable}>Skip current table</button>
+                )}
                 <button className="btn btn-secondary" onClick={cancelRun}>Cancel</button>
               </div>
             </>
@@ -415,7 +435,7 @@ export default function TableAnalysisPanel() {
               <div className="table-scroll">
                 <table className="results-table">
                   <thead>
-                    <tr><th>Table</th><th>Result</th><th>Fields analysed</th><th>Result rows</th><th>Note</th></tr>
+                    <tr><th>Table</th><th>Result</th><th>Fields analysed</th><th>Result rows</th><th>Note</th><th></th></tr>
                   </thead>
                   <tbody>
                     {records.map((r) => (
@@ -425,6 +445,11 @@ export default function TableAnalysisPanel() {
                         <td>{r.fields.join(", ") || "—"}</td>
                         <td>{r.state === "done" ? r.rows : "—"}</td>
                         <td>{r.note}</td>
+                        <td>
+                          {r.state === "running" && (
+                            <button className="btn-link" onClick={() => stopWaiting(r.table)}>Stop waiting</button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

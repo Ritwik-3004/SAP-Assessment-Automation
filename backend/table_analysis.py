@@ -6,10 +6,12 @@ For each table, in order:
      (ABAP dictionary types, looked up once for all tables);
   2. ask the user which DATE/YEAR/MONTH fields to analyse (and whether to group dates by year);
   3. ask whether other fields (company code, document type, ...) should be added; if yes, ask which;
-  4. create the ad hoc variant, schedule the analysis in the background (start immediately);
-  5. wait until it has completed, copy the result grid into  output/Table analysis.xlsx, and move on.
+  4. create the ad hoc variant and schedule the analysis in the background (start immediately) -- then
+     go straight on to the next table's questions, without waiting for the analysis;
+  5. meanwhile a second track watches the scheduled jobs and, as each completes, copies its result grid
+     into  output/Table analysis.xlsx.
 
-The job runs on a background thread and talks to the UI through a small state object: the UI polls
+The job runs on background threads and talks to the UI through a small state object: the UI polls
 snapshot() and answers the current question through answer(). Questions are asked between SAP steps, so
 SAP is not held while the user thinks.
 """
@@ -169,36 +171,58 @@ def _clock(seconds: float) -> str:
 
 
 class TableAnalysisJob:
+    """Two tracks run side by side:
+
+    * the QUESTION track (``_run``) goes through the tables in order, asks the user about the fields and
+      schedules each table's SAP background job straight away, then moves on to the next table;
+    * the COLLECTOR track (``_collect``) watches the scheduled jobs, and as each one completes copies its
+      result into the workbook.
+    So the user answers all the questions without waiting for any analysis. Every SAP call goes through
+    the single SAP worker thread, so the two tracks never touch the SAP screen at the same moment.
+    """
+
     def __init__(self):
         self._lock = threading.RLock()
         self._answered = threading.Event()
+        self._interactive_done = threading.Event()
         self._reset()
 
     def _reset(self) -> None:
         self._state = {
-            "status": "idle",        # idle | running | waiting (for the user) | done | error
+            "status": "idle",         # idle | running | waiting (for the user) | done | error
             "total": 0,
-            "completed": 0,
+            "asked": 0,               # tables whose questions are answered (or that were skipped)
+            "completed": 0,           # tables finished: analysed, skipped or failed
             "message": None,
-            "current": None,         # {"table": ..., "step": ...}
-            "prompt": None,          # the open question, if status == "waiting"
-            "records": [],           # one summary entry per table
+            "current": None,          # the table being asked about: {"table", "step"}
+            "prompt": None,           # the open question, if status == "waiting"
+            "interactive_done": False,
+            "records": [],            # one entry per table handled so far, in input order
+            "running": [],            # tables whose SAP job is still running
             "output_path": None,
             "warnings": [],
         }
-        self._results: list[dict] = []   # full result grids, for the workbook
+        self._records: dict[str, dict] = {}
+        self._index: dict[str, int] = {}          # table -> position in the input
+        self._pending: dict[str, dict] = {}       # scheduled jobs not yet read
+        self._results: list[dict] = []            # full result grids, for the workbook
         self._answer: Optional[dict] = None
         self._prompt_seq = 0
         self._cancel = False
         self._skip = False
+        self._stop_waiting: set[str] = set()
         self._answered.clear()
+        self._interactive_done.clear()
 
     # -- public API -----------------------------------------------------------
 
     def snapshot(self) -> dict:
         with self._lock:
             state = dict(self._state)
-            state["records"] = [dict(r) for r in self._state["records"]]
+            state["records"] = [
+                dict(self._records[t]) for t in sorted(self._records, key=lambda t: self._index.get(t, 0))
+            ]
+            state["running"] = sorted(self._pending, key=lambda t: self._index.get(t, 0))
             state["warnings"] = list(self._state["warnings"])
             return state
 
@@ -224,11 +248,22 @@ class TableAnalysisJob:
         return True
 
     def skip(self) -> None:
-        """Skip the table being worked on (the SAP background job, if already scheduled, keeps running)."""
+        """Skip the table the questions are being asked about."""
         with self._lock:
-            self._skip = True
+            if not self._interactive_done.is_set():
+                self._skip = True
+
+    def stop_waiting(self, table: str) -> bool:
+        """Stop waiting for a table whose SAP job is running (the job itself keeps running in SAP)."""
+        with self._lock:
+            if table not in self._pending:
+                return False
+            self._stop_waiting.add(table)
+            return True
 
     def cancel(self) -> None:
+        """Stop asking and collecting. Finished tables stay in the workbook; jobs already running keep
+        running in SAP."""
         with self._lock:
             self._cancel = True
 
@@ -268,9 +303,26 @@ class TableAnalysisJob:
                 if self._state["status"] == "waiting":
                     self._state["status"] = "running"
 
-    # -- the work -------------------------------------------------------------
+    def _finish(self, table: str, record: dict, result: Optional[dict] = None) -> None:
+        """A table is finished (analysed, skipped or failed): record it and refresh the workbook."""
+        with self._lock:
+            self._records[table] = record
+            self._pending.pop(table, None)
+            self._stop_waiting.discard(table)
+            self._state["completed"] = sum(1 for r in self._records.values() if r["state"] != "running")
+            if result is not None:
+                self._results.append({**result, "index": self._index.get(table, 0)})
+        try:
+            self._write_workbook()
+        except Exception as exc:
+            logger.exception("Could not write the Table analysis workbook")
+            with self._lock:
+                self._state["warnings"].append(f"Could not save the Excel file: {exc}")
+
+    # -- question track -------------------------------------------------------
 
     def _run(self, tables: list[str]) -> None:
+        collector: Optional[threading.Thread] = None
         try:
             self._set(message="Reading the date/year/month fields of all tables from the ABAP dictionary…")
             lookup = db02.run_get_field_types(tables)
@@ -283,41 +335,59 @@ class TableAnalysisJob:
                         f"({lookup.get('message', 'unknown error')}); date/year/month fields are guessed from their names."
                     )
 
+            collector = threading.Thread(target=self._collect, daemon=True, name="table-analysis-collector")
+            collector.start()
+
             for number, table in enumerate(tables, start=1):
                 with self._lock:
                     if self._cancel:
                         break
                     self._skip = False
+                    self._index[table] = number
                 try:
-                    record = self._process(table, all_types.get(table, {}), types_known)
+                    entry = self._submit(table, all_types.get(table, {}), types_known)
                 except _Skipped as skipped:
-                    record = {"table": table, "state": "skipped", "fields": [], "rows": 0, "note": str(skipped)}
+                    self._finish(table, {"table": table, "state": "skipped", "fields": [], "rows": 0, "note": str(skipped)})
                 except _Cancelled:
                     break
                 except Exception as exc:
                     logger.exception("Table analysis failed for %s", table)
-                    record = {"table": table, "state": "failed", "fields": [], "rows": 0, "note": str(exc)}
-                with self._lock:
-                    self._state["records"].append(record)
-                    self._state["completed"] = number
-                try:
-                    self._write_workbook()
-                except Exception as exc:
-                    logger.exception("Could not write the Table analysis workbook")
+                    self._finish(table, {"table": table, "state": "failed", "fields": [], "rows": 0, "note": str(exc)})
+                else:
                     with self._lock:
-                        self._state["warnings"].append(f"Could not save the Excel file: {exc}")
-
-            with self._lock:
-                self._state["status"] = "done"
-                self._state["current"] = None
-                self._state["message"] = "Cancelled." if self._cancel else "Finished."
+                        self._pending[table] = entry
+                        self._records[table] = {
+                            "table": table, "state": "running", "fields": entry["fields"], "rows": 0,
+                            "note": "Job scheduled in SAP; waiting for it to finish.",
+                        }
+                with self._lock:
+                    self._state["asked"] = number
         except Exception as exc:
             logger.exception("Table analysis job failed")
             with self._lock:
                 self._state["status"] = "error"
                 self._state["message"] = str(exc)
+            self._interactive_done.set()
+            return
 
-    def _process(self, table: str, types: dict, types_known: bool) -> dict:
+        with self._lock:
+            self._state["current"] = None
+            self._state["interactive_done"] = True
+            self._state["message"] = "All questions answered."
+        self._interactive_done.set()
+        if collector is not None:
+            collector.join()
+        with self._lock:
+            left = len(self._pending)
+            self._state["status"] = "done"
+            self._state["message"] = (
+                f"Cancelled. {left} job(s) already scheduled keep running in SAP." if self._cancel and left
+                else "Cancelled." if self._cancel
+                else "Finished."
+            )
+
+    def _submit(self, table: str, types: dict, types_known: bool) -> dict:
+        """Ask the questions for *table* and schedule its SAP job. Returns the pending-job entry."""
         self._step(table, "Reading the table's fields in TAANA…")
         listed = taana.list_fields(table)
         if listed["status"] != "ok":
@@ -365,51 +435,88 @@ class TableAnalysisJob:
         started = taana.start_analysis(table, specs)
         if started["status"] != "ok":
             raise RuntimeError(started["message"])
-        result = self._wait_for_result(table, started["before"])
-
-        field_labels = [s["name"] + ("(year)" if s["year"] else "") for s in specs]
-        self._results.append({
-            "table": table,
-            "fields": field_labels,
-            "started": result.get("started", ""),
-            "status": result.get("status", ""),
-            "columns": result["columns"],
-            "column_ids": result["column_ids"],
-            "rows": result["rows"],
-        })
+        now = time.monotonic()
         return {
-            "table": table, "state": "done", "fields": field_labels,
-            "rows": len(result["rows"]), "note": f"Analysis {result.get('status', 'completed')}.",
+            "table": table,
+            "before": started["before"],
+            "fields": [s["name"] + ("(year)" if s["year"] else "") for s in specs],
+            "submitted": now,
+            "next_check": now + FIRST_POLL_SECONDS,
+            "errors": 0,
         }
 
-    def _wait_for_result(self, table: str, before: list[str]) -> dict:
-        began = time.monotonic()
-        errors = 0
-        time.sleep(FIRST_POLL_SECONDS)
+    # -- collector track ------------------------------------------------------
+
+    def _collect(self) -> None:
+        """Check the scheduled jobs and write each result as its job completes, until the question
+        track is done and nothing is left to wait for (or the run is cancelled)."""
         while True:
-            elapsed = time.monotonic() - began
-            self._check_flags()
-            result = taana.check_analysis(table, before)
-            state = result.get("state")
-            if state == "completed":
-                return result
-            if state == "failed":
-                raise RuntimeError(f"The SAP analysis job ended with status '{result.get('status')}'.")
-            errors = errors + 1 if state == "error" else 0
-            if errors >= MAX_CHECK_ERRORS:
-                raise RuntimeError(f"Could not read the analysis in TAANA: {result.get('status')}")
-            if elapsed > MAX_WAIT_SECONDS:
-                raise RuntimeError(f"The analysis did not finish within {_clock(MAX_WAIT_SECONDS)}.")
-            self._step(
-                table,
-                "Waiting for the background job in SAP",
-                f"Waiting for the SAP job for {table} ({_clock(elapsed)}): {result.get('status', '')}",
-            )
-            slept = 0.0
-            while slept < POLL_SECONDS:
-                self._check_flags()
+            with self._lock:
+                if self._cancel:
+                    return
+                pending = list(self._pending.values())
+                stopped = set(self._stop_waiting)
+            if not pending:
+                if self._interactive_done.is_set():
+                    return
                 time.sleep(0.5)
-                slept += 0.5
+                continue
+
+            for entry in [p for p in pending if p["table"] in stopped]:
+                self._finish(entry["table"], {
+                    "table": entry["table"], "state": "skipped", "fields": entry["fields"], "rows": 0,
+                    "note": "Stopped waiting; the job keeps running in SAP.",
+                })
+
+            now = time.monotonic()
+            due = [p for p in pending if p["table"] not in stopped and p["next_check"] <= now]
+            if not due:
+                time.sleep(0.5)
+                continue
+
+            results = taana.check_analyses([{"table": p["table"], "before": p["before"]} for p in due])
+            now = time.monotonic()
+            for entry in due:
+                table = entry["table"]
+                result = results.get(table) or {"state": "error", "status": "No answer from TAANA."}
+                state = result.get("state")
+                elapsed = now - entry["submitted"]
+                if state == "completed":
+                    self._finish(
+                        table,
+                        {"table": table, "state": "done", "fields": entry["fields"], "rows": len(result["rows"]),
+                         "note": f"Analysis {result.get('status', 'completed')}."},
+                        {"table": table, "fields": entry["fields"], "started": result.get("started", ""),
+                         "status": result.get("status", ""), "columns": result["columns"],
+                         "column_ids": result["column_ids"], "rows": result["rows"]},
+                    )
+                    continue
+                if state == "failed":
+                    self._finish(table, {
+                        "table": table, "state": "failed", "fields": entry["fields"], "rows": 0,
+                        "note": f"The SAP analysis job ended with status '{result.get('status')}'.",
+                    })
+                    continue
+                entry["errors"] = entry["errors"] + 1 if state == "error" else 0
+                if entry["errors"] >= MAX_CHECK_ERRORS or elapsed > MAX_WAIT_SECONDS:
+                    reason = (
+                        f"Could not read the analysis in TAANA: {result.get('status')}"
+                        if entry["errors"] >= MAX_CHECK_ERRORS
+                        else f"The analysis did not finish within {_clock(MAX_WAIT_SECONDS)}."
+                    )
+                    self._finish(table, {
+                        "table": table, "state": "failed", "fields": entry["fields"], "rows": 0, "note": reason,
+                    })
+                    continue
+                entry["next_check"] = now + POLL_SECONDS
+                with self._lock:
+                    if table in self._records:
+                        self._records[table]["note"] = f"Running in SAP ({_clock(elapsed)}): {result.get('status', '')}"
+
+            with self._lock:
+                waiting = len(self._pending)
+                if self._interactive_done.is_set() and waiting:
+                    self._state["message"] = f"All questions answered. Waiting for {waiting} SAP job{'s' if waiting != 1 else ''}…"
 
     # -- output ---------------------------------------------------------------
 
@@ -418,9 +525,10 @@ class TableAnalysisJob:
         summary = wb.active
         summary.title = "Summary"
         summary.append(["Table", "Result", "Fields analysed", "Result rows", "Analysis started", "Note"])
-        started_by_table = {r["table"]: r["started"] for r in self._results}
         with self._lock:
-            records = [dict(r) for r in self._state["records"]]
+            results = sorted(self._results, key=lambda r: r["index"])
+            records = [dict(self._records[t]) for t in sorted(self._records, key=lambda t: self._index.get(t, 0))]
+        started_by_table = {r["table"]: r["started"] for r in results}
         for r in records:
             summary.append([
                 r["table"], r["state"].capitalize(), ", ".join(r["fields"]), r["rows"],
@@ -430,7 +538,7 @@ class TableAnalysisJob:
         self._autosize(summary)
 
         used = {"Summary"}
-        for res in self._results:
+        for res in results:
             ws = wb.create_sheet(self._sheet_name(res["table"], used))
             ws.append([f"Table {res['table']}"])
             ws["A1"].font = Font(bold=True, size=13)

@@ -1011,3 +1011,4 @@ body {
 .ta-status.done { background: #dcfce7; color: #15803d; }
 .ta-status.skipped { background: #f3f4f6; color: #6b7280; }
 .ta-status.failed { background: #fee2e2; color: #b91c1c; }
+.ta-status.running { background: #dbeafe; color: #1d4ed8; }

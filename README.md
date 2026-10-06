@@ -34,7 +34,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
-| Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on one tiny table (SWWWIHEAD): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the download were tested offline with a fake SAP. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis-taana) |
+| Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on tiny tables (SWWWIHEAD and BKPF, including two tables in parallel and a month field): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the download were tested offline with a fake SAP. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis-taana) |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
 | SAP Assistant (always-visible chat column: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
 | Several saved SAP / SAP for Me logins with a dropdown | Working; storage and endpoints tested offline with temporary files — see [Saved connection details](#saved-connection-details) |
@@ -736,7 +736,9 @@ collects the results in one Excel file.
 has a "Header Table" column — for `header_tables_with_reference.xlsx` that is the final list after the reference-document
 overrides. Blank cells and duplicates are dropped. A file with only a "Table Name"/"Table" column also works.
 
-**For each table, in order** (`backend/table_analysis.py`):
+**Two tracks run side by side** (`backend/table_analysis.py`), so you never wait for an analysis before the next table's questions: the
+*question track* asks about each table in turn and schedules its SAP job at once; the *collector track* watches the running jobs and writes
+each result to Excel as soon as its job completes. Per table:
 1. The tool opens TAANA, starts *Table Analysis > Perform* for the table and opens **Create Ad Hoc Variant**, and reads every field TAANA
    offers. The ABAP dictionary types (table `DD03L`, one query for all tables through DB02's SQL editor) tell date, year and month fields
    apart: `DATS` = date; `ACCP`, or a 6-character field named/labelled like a period (e.g. `SPMON`) = year-month period; 4-digit `NUMC`
@@ -749,10 +751,15 @@ overrides. Blank cells and duplicates are dropped. A file with only a "Table Nam
 3. **Question 2 — other fields?** Yes/No. If the table has no date, year or month field, this says so.
 4. **Question 3 — other fields** (only on Yes). All remaining fields are listed (a filter box appears for long lists; commonly useful
    ones such as company code and document type are tagged *suggested* and listed first; the client field `MANDT` is hidden).
-5. The tool creates the ad hoc variant with the chosen fields, schedules the analysis **in the background starting immediately**
-   (Start Time dialog: Immediate, Save), then checks TAANA every 10 seconds until the run shows status **Completed** (it identifies its own
-   run by its start date/time, because earlier ad hoc runs of the table stay in the tree).
-6. The result grid is copied into `output/Table analysis.xlsx` and the tool moves to the next table.
+5. The tool creates the ad hoc variant with the chosen fields and schedules the analysis **in the background starting immediately**
+   (Start Time dialog: Immediate, Save). **It then moves straight on to the next table's questions** — nothing waits for the analysis.
+6. Meanwhile the collector checks TAANA every 10 seconds, for *all* running tables in one pass, until each run shows status **Completed**
+   (a run is identified by its start date/time, because earlier ad hoc runs of the table stay in the tree), and copies the result grid into
+   `output/Table analysis.xlsx`. Results arrive in the order the jobs finish; the sheets are kept in your table order.
+
+The panel shows two progress lines — *Questions* (tables answered) and *Analyses* (tables finished, with the ones still running in SAP
+named) — and a **Tables processed** list where a running table shows *running* and a **Stop waiting** button. When the last question
+is answered the tool keeps waiting for the remaining jobs and finishes when they are all done.
 
 **Result.** All fields chosen for a table form **one combined analysis**: the grid has a column per field plus "No. Entr." (e.g. Status ×
 Year), not one result per field. The workbook has a **Summary** sheet (table, result, fields analysed, rows, start time, note) and one
@@ -760,13 +767,17 @@ sheet per table (named after the table) with the grid, counts as numbers, and a 
 finished tables are kept if a later one fails or the run is cancelled. Each run replaces the file; if it is open in Excel, a numbered copy
 such as `Table analysis (2).xlsx` is written instead. **Download Excel** fetches it.
 
-**Controls.** *Skip this table* (also on each question) and *Cancel* are always available. Skipping or cancelling does not stop a job
-already scheduled in SAP. A table is marked **failed** if its job ends with an error status, TAANA rejects the table, or it does not finish
-within 4 hours (`MAX_WAIT_SECONDS`); the run continues with the next table. A table where nothing was selected is marked skipped.
+**Controls.** *Skip current table* (also on each question) skips the table being asked about, until the last question is answered.
+*Stop waiting* (on a running table) stops waiting for that table's job. *Cancel* stops asking and collecting. None of these stops a job
+already scheduled in SAP, which keeps running there (cancelling reports how many). A table is marked **failed** if its job ends with an
+error status, TAANA rejects the table, or it does not finish within 4 hours (`MAX_WAIT_SECONDS`); the other tables carry on. A table
+where nothing was selected is marked skipped.
 
 **Side effects in SAP.** Every run creates a background job and an analysis entry named `AD-HOC` under the table in TAANA; repeated
-runs pile up there, newest first. Remove old ones in TAANA with *Table Analysis > Delete*. While a run is active the SAP GUI session is in
-use — don't run other SAP features or chat live-SAP questions at the same time.
+runs pile up there, newest first. Remove old ones in TAANA with *Table Analysis > Delete*. Several analyses can run in SAP at the same time (they
+queue on the system's background work processes). While a run is active the SAP GUI session is in use — don't run other SAP features
+or chat live-SAP questions at the same time; each of the tool's own SAP steps queues behind the previous one, so a table's field list can
+take a little longer to appear while the collector is reading results.
 
 **Verified screens** (`backend/transactions/taana_analysis.py`, documented in its docstring): TAANA opens an administration screen (analysis
 tree + message grid); *Table Analysis > Perform* opens the "Start Table Analyses" popup; F4 on the variant field then **Ad Hoc Variant** (F5) opens the

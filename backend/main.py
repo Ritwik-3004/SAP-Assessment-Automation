@@ -992,16 +992,29 @@ def table_analysis_answer(req: TableAnalysisAnswer):
     return {"ok": True}
 
 
+class TableAnalysisStopWaiting(BaseModel):
+    table: str
+
+
 @app.post("/api/table-analysis/skip")
 def table_analysis_skip():
-    """Skip the table being worked on (a background job already scheduled in SAP keeps running there)."""
+    """Skip the table the questions are currently being asked about."""
     table_analysis.job.skip()
+    return {"ok": True}
+
+
+@app.post("/api/table-analysis/stop-waiting")
+def table_analysis_stop_waiting(req: TableAnalysisStopWaiting):
+    """Stop waiting for a table whose SAP job is running (the job itself keeps running in SAP)."""
+    if not table_analysis.job.stop_waiting(req.table.strip().upper()):
+        raise HTTPException(status_code=409, detail="That table is not waiting for a job.")
     return {"ok": True}
 
 
 @app.post("/api/table-analysis/cancel")
 def table_analysis_cancel():
-    """Stop after the current step; tables already analysed stay in the workbook."""
+    """Stop asking and collecting; tables already analysed stay in the workbook, and jobs already scheduled
+    keep running in SAP."""
     table_analysis.job.cancel()
     return {"ok": True}
 

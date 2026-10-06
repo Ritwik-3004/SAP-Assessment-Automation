@@ -312,69 +312,93 @@ def _start_analysis(table: str, fields: list[dict]) -> dict:
 def check_analysis(table: str, before: list[str]) -> dict:
     """Look for the run started after *before* and read it if it has completed.
 
-    Returns {"state": "waiting" | "completed" | "failed", "status": str, ...}; a completed run also has
-    "columns" (titles), "rows" (list of lists) and "started" ("date / time")."""
-    return sap.run(_check_analysis, table, before)
+    Returns {"state": "waiting" | "completed" | "failed" | "error", "status": str, ...}; a completed run
+    also has "columns" (titles), "column_ids", "rows" (list of lists) and "started" ("date / time")."""
+    return check_analyses([{"table": table, "before": before}]).get(table, {"state": "error", "status": "No answer."})
 
 
-def _check_analysis(table: str, before: list[str]) -> dict:
+def check_analyses(items: list[dict]) -> dict:
+    """Check several scheduled runs in ONE pass through TAANA (one navigation, one fresh tree).
+
+    *items* are {"table", "before"}; returns {table: result} with the shape of check_analysis()."""
+    return sap.run(_check_analyses, items)
+
+
+def _check_analyses(items: list[dict]) -> dict:
+    out: dict = {}
     try:
         session = sap.get_session()
         _go_to_taana(session)
-        tree = session.findById(TREE_ID)
-        table_key = _find_table_node(tree, table)
-        if table_key is None:
-            return {"state": "waiting", "status": "The analysis is not listed in TAANA yet."}
-        tree.expandNode(table_key)
-        date_col, time_col = _tree_column(tree, "Start date"), _tree_column(tree, "Start time")
-
-        new_run = next(
-            (k for k in _adhoc_children(tree, table_key) if _stamp(tree, k, date_col, time_col) not in before),
-            None,
-        )
-        if new_run is None:
-            return {"state": "waiting", "status": "The job has not produced its analysis yet."}
-        tree.expandNode(new_run)
-        field_nodes = [
-            k for k in tree.GetAllNodeKeys()
-            if _node_path(tree, k).startswith(_node_path(tree, new_run) + "\\")
-        ]
-        if not field_nodes:
-            return {"state": "waiting", "status": "The analysis has no field list yet."}
-
-        tree.selectNode(field_nodes[0])
-        time.sleep(0.4)
-        session.findById(MENU_DISPLAY).select()
-        time.sleep(SAP_SCREEN_WAIT * 1.5)
-        if not _exists(session, HEADER_ID + "txtD0100_O_STATUS"):
-            return {"state": "waiting", "status": "The analysis result is not available yet."}
-
-        status = session.findById(HEADER_ID + "txtD0100_O_STATUS").Text.strip()
-        lowered = status.lower()
-        started = session.findById(HEADER_ID + "txtD0100_O_DATE_AND_TIME").Text.strip()
+    except Exception as exc:
+        logger.exception("TAANA check could not open TAANA")
+        return {i["table"]: {"state": "error", "status": str(exc)} for i in items}
+    for item in items:
+        table = item["table"]
         try:
-            if any(w in lowered for w in FAILED_WORDS):
-                return {"state": "failed", "status": status, "started": started}
-            if not lowered.startswith("complet"):
-                return {"state": "waiting", "status": status or "running", "started": started}
-            grid = session.findById(RESULT_GRID_ID)
-            column_ids = list(grid.ColumnOrder)
-            titles = [grid.GetDisplayedColumnTitle(c) or c for c in column_ids]
-            rows = _read_grid_rows(grid, column_ids)
-            return {
-                "state": "completed",
-                "status": status,
-                "started": started,
-                "columns": titles,
-                "column_ids": column_ids,
-                "rows": rows,
-            }
-        finally:
-            try:
-                session.findById(BACK_BUTTON).press()
-                time.sleep(0.8)
+            out[table] = _check_one(session, table, item["before"])
+        except Exception as exc:
+            logger.exception("TAANA check failed for %s", table)
+            out[table] = {"state": "error", "status": str(exc)}
+            try:  # get back to the tree for the next table
+                _go_to_taana(session)
             except Exception:
                 pass
-    except Exception as exc:
-        logger.exception("TAANA check failed for %s", table)
-        return {"state": "error", "status": str(exc)}
+    return out
+
+
+def _check_one(session, table: str, before: list[str]) -> dict:
+    """One run's state; the TAANA tree must be open and current. Leaves the tree open."""
+    tree = session.findById(TREE_ID)
+    table_key = _find_table_node(tree, table)
+    if table_key is None:
+        return {"state": "waiting", "status": "The analysis is not listed in TAANA yet."}
+    tree.expandNode(table_key)
+    date_col, time_col = _tree_column(tree, "Start date"), _tree_column(tree, "Start time")
+
+    new_run = next(
+        (k for k in _adhoc_children(tree, table_key) if _stamp(tree, k, date_col, time_col) not in before),
+        None,
+    )
+    if new_run is None:
+        return {"state": "waiting", "status": "The job has not produced its analysis yet."}
+    tree.expandNode(new_run)
+    field_nodes = [
+        k for k in tree.GetAllNodeKeys()
+        if _node_path(tree, k).startswith(_node_path(tree, new_run) + "\\")
+    ]
+    if not field_nodes:
+        return {"state": "waiting", "status": "The analysis has no field list yet."}
+
+    tree.selectNode(field_nodes[0])
+    time.sleep(0.4)
+    session.findById(MENU_DISPLAY).select()
+    time.sleep(SAP_SCREEN_WAIT * 1.5)
+    if not _exists(session, HEADER_ID + "txtD0100_O_STATUS"):
+        return {"state": "waiting", "status": "The analysis result is not available yet."}
+
+    status = session.findById(HEADER_ID + "txtD0100_O_STATUS").Text.strip()
+    lowered = status.lower()
+    started = session.findById(HEADER_ID + "txtD0100_O_DATE_AND_TIME").Text.strip()
+    try:
+        if any(w in lowered for w in FAILED_WORDS):
+            return {"state": "failed", "status": status, "started": started}
+        if not lowered.startswith("complet"):
+            return {"state": "waiting", "status": status or "running", "started": started}
+        grid = session.findById(RESULT_GRID_ID)
+        column_ids = list(grid.ColumnOrder)
+        titles = [grid.GetDisplayedColumnTitle(c) or c for c in column_ids]
+        rows = _read_grid_rows(grid, column_ids)
+        return {
+            "state": "completed",
+            "status": status,
+            "started": started,
+            "columns": titles,
+            "column_ids": column_ids,
+            "rows": rows,
+        }
+    finally:
+        try:
+            session.findById(BACK_BUTTON).press()  # back to the tree for the next run
+            time.sleep(0.8)
+        except Exception:
+            pass

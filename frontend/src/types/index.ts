@@ -27,7 +27,7 @@ export interface TableAnalysisPrompt {
 
 export interface TableAnalysisRecord {
   table: string;
-  state: "done" | "skipped" | "failed";
+  state: "running" | "done" | "skipped" | "failed";
   fields: string[];
   rows: number;
   note: string;
@@ -36,10 +36,16 @@ export interface TableAnalysisRecord {
 export interface TableAnalysisSnapshot {
   status: "idle" | "running" | "waiting" | "done" | "error";
   total: number;
+  /** tables whose questions are answered (or skipped) */
+  asked: number;
+  /** tables finished: analysed, skipped or failed */
   completed: number;
   message: string | null;
   current: { table: string; step: string } | null;
   prompt: TableAnalysisPrompt | null;
+  /** true once the last table's questions are answered; only waiting for SAP jobs after that */
+  interactive_done: boolean;
+  running: string[];
   records: TableAnalysisRecord[];
   output_path: string | null;
   warnings: string[];
