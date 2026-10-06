@@ -6,8 +6,10 @@ import BatchArchivingPanel from "./components/BatchArchivingPanel";
 import GenerateTableListPanel from "./components/GenerateTableListPanel";
 import HeaderTablePanel from "./components/HeaderTablePanel";
 import TableAnalysisPanel from "./components/TableAnalysisPanel";
+import ObjectAnalysisPanel from "./components/ObjectAnalysisPanel";
 import AssistantPanel from "./components/AssistantPanel";
 import { AssistantProvider } from "./assistantContext";
+import ObjectAnalysisBadge from "./components/ObjectAnalysisBadge";
 import { api } from "./api/client";
 import type { ConnectionState } from "./types";
 import "./App.css";
@@ -17,6 +19,7 @@ const TASKS = [
   { id: "BATCH", label: "Find Archiving Objects for Tables" },
   { id: "HEADER_TABLES", label: "Find Header Tables for Archiving Objects" },
   { id: "TABLE_ANALYSIS", label: "Table Analysis (TAANA)" },
+  { id: "OBJECT_ANALYSIS", label: "Archiving Object Analysis" },
 ] as const;
 
 type Tab = (typeof TASKS)[number]["id"];
@@ -50,6 +53,7 @@ export default function App() {
     BATCH: <BatchArchivingPanel />,
     HEADER_TABLES: <HeaderTablePanel />,
     TABLE_ANALYSIS: <TableAnalysisPanel />,
+    OBJECT_ANALYSIS: <ObjectAnalysisPanel />,
   };
 
   return (
@@ -66,6 +70,7 @@ export default function App() {
               AI: {modelLabel}
             </span>
           )}
+          <ObjectAnalysisBadge />
           {connection.connected ? (
             <span className="status-badge connected">Connected — {connection.system}</span>
           ) : (

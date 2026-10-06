@@ -34,6 +34,7 @@ import object_descriptions
 import reference_doc as ref_doc_mod
 import credentials_store
 import table_analysis
+import object_analysis
 import transactions.taana as taana
 import transactions.db15 as db15
 import transactions.db02 as db02
@@ -1024,6 +1025,93 @@ def table_analysis_download():
     path = table_analysis.job.snapshot().get("output_path")
     if not path or not Path(path).exists():
         raise HTTPException(status_code=404, detail="There is no Table analysis workbook yet.")
+    return FileResponse(
+        path,
+        filename=Path(path).name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Archiving object analysis (conditions from SARA / DVM Guide / SAP for Me, and what to archive first)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/object-analysis/start")
+def start_object_analysis(
+    file: UploadFile | None = File(None),
+    filename: str = Form(""),
+):
+    """Start the archiving object analysis (SARA information page, DVM Guide, dependencies) for the objects
+    in *file* (an upload) or *filename* (a file in the output folder, e.g. archiving_objects_scored.xlsx).
+    Runs in the background; poll /progress. SAP for Me is a separate, optional second step."""
+    _require_connection()
+    if object_analysis.job.is_active():
+        raise HTTPException(status_code=409, detail="An archiving object analysis is already running.")
+
+    if file is not None and file.filename:
+        contents = file.file.read()
+    elif filename:
+        path = OUTPUT_DIR / Path(filename).name
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"'{path.name}' not found in the output folder.")
+        contents = path.read_bytes()
+    else:
+        raise HTTPException(status_code=400, detail="Choose a file or upload one.")
+
+    try:
+        objects = object_analysis.parse_objects(contents)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read the file: {exc}")
+
+    try:
+        object_analysis.job.start(objects)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "started", "total": len(objects), "objects": [o["object"] for o in objects]}
+
+
+@app.get("/api/object-analysis/progress")
+def object_analysis_progress():
+    return object_analysis.job.snapshot()
+
+
+@app.get("/api/object-analysis/results")
+def object_analysis_results():
+    """The full results for the preview: conditions with their sources, objects to archive first."""
+    return {"objects": object_analysis.job.details()}
+
+
+@app.post("/api/object-analysis/sap-for-me")
+def object_analysis_sap_for_me():
+    """Add SAP for Me conditions to the finished results, in the background. It uses its own browser and the
+    AI model, not the SAP GUI, so other tasks can be used meanwhile."""
+    try:
+        object_analysis.job.start_sap_for_me()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "started"}
+
+
+@app.post("/api/object-analysis/sap-for-me/cancel")
+def object_analysis_sap_for_me_cancel():
+    object_analysis.job.cancel_sap_for_me()
+    return {"ok": True}
+
+
+@app.post("/api/object-analysis/cancel")
+def object_analysis_cancel():
+    """Stop after the current object; objects already analysed stay in the workbook."""
+    object_analysis.job.cancel()
+    return {"ok": True}
+
+
+@app.get("/api/object-analysis/download")
+def object_analysis_download():
+    path = object_analysis.job.snapshot().get("output_path")
+    if not path or not Path(path).exists():
+        raise HTTPException(status_code=404, detail="There is no archiving object analysis workbook yet.")
     return FileResponse(
         path,
         filename=Path(path).name,

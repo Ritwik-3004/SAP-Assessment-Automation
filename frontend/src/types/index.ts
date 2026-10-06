@@ -51,6 +51,46 @@ export interface TableAnalysisSnapshot {
   warnings: string[];
 }
 
+export interface ObjectAnalysisRecord {
+  object: string;
+  description: string;
+  state: "done" | "failed";
+  conditions: number;
+  by_source: Record<string, number>;
+  archive_first: string[];
+  note: string;
+}
+
+export interface ObjectAnalysisSnapshot {
+  status: "idle" | "running" | "done" | "error";
+  total: number;
+  completed: number;
+  message: string | null;
+  current: { object: string; step: string } | null;
+  records: ObjectAnalysisRecord[];
+  output_path: string | null;
+  warnings: string[];
+  /** the optional second step, which runs in the background */
+  sap_for_me: {
+    status: "idle" | "running" | "done" | "error";
+    total: number;
+    completed: number;
+    message: string | null;
+    current: string | null;
+  };
+}
+
+export interface ObjectAnalysisDetail {
+  object: string;
+  description: string;
+  error: string;
+  sara_url: string;
+  network_known: boolean;
+  sources: Record<string, string>;
+  conditions: { condition: string; detail: string; source: string }[];
+  prerequisites: { object: string; step: number; direct: boolean; required_by: string[]; description?: string }[];
+}
+
 export interface SavedSapCredentials {
   system: string;
   client: string;

@@ -19,7 +19,8 @@ Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeepi
 (housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (the always-visible
 assistant), `credentials_store.py` (several saved logins per credentials file), `reference_doc.py`
 (reference document analysis), `table_analysis.py` (the Table Analysis task) with `transactions/taana_analysis.py`
-(its TAANA screens), `progress.py` (progress
+(its TAANA screens), `object_analysis.py` (the Archiving Object Analysis task) with `transactions/sara_info.py`,
+`help_browser.py` and `helpportal.py` (its SARA / SAP Help Portal steps), `progress.py` (progress
 polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 
 ## Project status
@@ -34,6 +35,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
+| Archiving Object Analysis (conditions from SARA's information page, DVM Guide and SAP for Me; objects to archive first from SARA's network) | **Run end to end against a live system** on FI_DOCUMNT and SD_VBAK (all three sources, dependencies, workbook); the two-step split (step 1, then SAP for Me in the background) was tested offline with fakes and live on SD_VBAK. The tab handling, failure cases and ordering were also tested offline with fakes. Not yet run on the full list of recommended objects (about 5 minutes per object with all sources) or on a machine whose default browser is not Edge/Chrome — see [Archiving Object Analysis](#archiving-object-analysis) |
 | Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on tiny tables (SWWWIHEAD and BKPF, including two tables in parallel and a month field): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the download were tested offline with a fake SAP. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis-taana) |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
 | SAP Assistant (always-visible chat column: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
@@ -726,6 +728,70 @@ Execute, each candidate grid path's found/row_count/column_order/first_row, and 
 table — that is how to confirm the archiving-object text table behind
 [Object descriptions](#object-descriptions).
 
+## Archiving Object Analysis
+
+The **Archiving Object Analysis** task (`frontend/src/components/ObjectAnalysisPanel.tsx`) takes the recommended archiving objects and, for each
+one, finds (1) its **archiving conditions** and (2) which other archiving objects **must be archived before it**, and writes everything to
+`output/Archiving object analysis.xlsx`. It works in **two steps** because SAP for Me is slow:
+
+- **Step 1 — Start analysis (SARA + DVM Guide + dependencies)**, about 1.5 minutes per object. The results are previewed on screen as each object
+  finishes: a summary table, and below it an expandable preview per object with its **Archive these objects BEFORE …** block and its conditions table
+  (each condition tagged with its source).
+- **Step 2 — "Also check SAP for Me (runs in the background)"**, a button that appears once step 1 is done, for when the first results don't answer your
+  questions. It runs in the background and adds the SAP for Me conditions to the same results and the same Excel file as each object finishes; the
+  preview updates by itself. It needs only its own browser and the AI model — **not the SAP GUI** — so you can switch to other tasks meanwhile (a ⏳
+  indicator stays in the page header; coming back to the task shows the live progress). *Stop SAP for Me* cancels it; running it again replaces the SAP for
+  Me conditions rather than duplicating them. While step 2 runs a new analysis cannot be started (it would reset the results).
+
+**Input.** By default the recommended objects saved by **Find Archiving Objects** (the panel preselects `archiving_objects_with_reference.xlsx`,
+else `archiving_objects_scored.xlsx`); **Upload a different file** to use another. From the workbook it reads the last sheet whose title
+contains "Recommended" and that has an "Archiving Object" column (otherwise the last sheet with that column). Blank cells, placeholders such as
+"(no archiving object found)" and duplicates are dropped.
+
+**Conditions — three sources, each named on every condition** (`backend/object_analysis.py`). The AI model in use reads each source's text separately
+and returns only conditions that are *in that text* (it is told never to add any from its own knowledge); a condition is a requirement that must
+hold or be done before the object can be archived or deleted: checks of the write/delete program, required status, residence times, required
+Customizing, other objects or documents to process first, blockers.
+1. **SARA information button.** The tool opens SARA, enters the object and presses the `i` icon (*Documentation*, F6). SAP GUI answers by
+   starting the machine's browser on the object's **SAP Help Portal** page (it shows nothing inside SAP GUI). The tool reads that page's address
+   from the browser's address bar through Windows UI Automation (`help_browser.py`) and **closes that tab again** — each object's tab is closed
+   before the next object's page is opened, and only the tab SAP opened is touched (matched by its page address; your own tabs are never closed). The
+   page is then read **headlessly** with Chrome for Testing (`helpportal.py`; same setup as SAP for Me, no sign-in needed). Besides the page itself it
+   reads sub-pages that describe conditions — child pages in the contents tree and pages the article names — whose title contains check, condition,
+   prerequisite, precondition, archivability, residence, criteria, restriction or requirement (up to four), e.g. "Checks and Variants (SD-SLS)" or
+   "Deletion Criteria for MM_EKKO". The portal's "Out of Maintenance" notice is dismissed automatically.
+2. **DVM Guide** — the guide sections that mention the object (`dvm_guide.sections_naming`).
+3. **SAP for Me** (step 2) — SAP Notes / Knowledge Base Articles for "<object> archiving conditions prerequisites" (SAP Community as the usual fallback),
+   with the account saved in the SAP for Me panel. Until step 2 has run, each sheet says "SAP for Me: not checked yet". If no credentials are saved or
+   sign-in fails, the sheet says so and nothing else is affected.
+
+**Dependencies — which objects to archive first.** SARA's **Network Graphic** button is *not* used: on this SAP GUI it raises "Frontend version is
+older than R/3 version" from the SAPnetz control and freezes the whole session, and a graphic cannot be read by scripting anyway. SAP keeps exactly
+that network in table **`ARCH_NET`** ("Table with archiving objects for network display": `OBJECT`, `PREVOBJECT`, one row per "PREVOBJECT must be
+archived before OBJECT"; 351 rows on the test system), which the tool reads once with a SQL query through DB02's SQL editor. For each object it follows
+the predecessors through **every level** and puts them in **archiving order** (step 1 can be archived first; objects in the same step are independent
+of each other); each entry says whether the object requires it directly or indirectly and which object in the chain needs it. Cycles in the data
+cannot loop. Descriptions come from the same lookup the rest of the app uses (`object_descriptions`). If `ARCH_NET` cannot be read the sheets say
+the dependencies are unknown rather than "none".
+
+**Output workbook.** A **Summary** sheet (one row per object: description, **ARCHIVE BEFORE (in order)** highlighted, directly required objects, condition
+counts per source, result/notes) and one sheet per object: a *Sources checked* block (what was read from each source, or why not, plus the Help Portal
+address), an orange **"ARCHIVE THESE OBJECTS BEFORE <object>"** block (step, object, description, direct/indirect, required before — or an explicit "None"),
+and a blue **ARCHIVING CONDITIONS** table (number, condition, source, detail). The file is rewritten after each object, so finished objects survive a
+failure or cancel; if it is open in Excel, a numbered copy is written instead.
+
+**Good to know.**
+- **Time:** step 1 takes about 1.5 minutes per object; adding SAP for Me roughly 3 more minutes per object (two objects took about ten minutes in total on
+  the test system) — which is why it is a separate, background step. A free Groq model also waits for its per-minute limit.
+- During **step 1** SAP opens and closes a browser tab per object and uses your SAP GUI session — leave the browser and SAP alone until it finishes. Step 2
+  does not touch SAP GUI or your browser.
+- Needs the machine's default browser to be **Microsoft Edge or Google Chrome** with a visible window (not minimised); otherwise the address cannot be read and
+  the SARA source is reported as unavailable (the DVM Guide, SAP for Me and the dependencies still run).
+- An object SARA does not know, or for which no page opens, is marked **failed** with the reason; the others continue.
+- The Help Portal page SAP opens is for the SAP release of the system (S/4HANA On-Premise 2020 here). Some "Checks" pages are not reachable from the page (the
+  contents tree only lists expanded branches — FI_DOCUMNT's "Checks (FI-GL, FI-AR, FI-AP)" is an example), so their conditions come from the other sources.
+- Conditions are model extractions of the source text, not authoritative SAP rules: verify important ones against the named source.
+
 ## Table Analysis (TAANA)
 
 The **Table Analysis (TAANA)** task (`frontend/src/components/TableAnalysisPanel.tsx`) runs a TAANA analysis for each header table and
@@ -893,6 +959,13 @@ Key endpoints:
 | POST | `/api/files/output/save-archiving` | Save archiving-objects rows to `output/archiving_objects_by_table.xlsx` |
 | POST | `/api/files/output/save-scored` | Save scored rows + recommended list + grouped list to `output/archiving_objects_scored.xlsx` |
 | POST | `/api/files/output/save-header-tables` | Save header-table rows to `output/header_tables.xlsx` |
+| POST | `/api/object-analysis/start` | Start step 1 of the Archiving Object Analysis (SARA information page, DVM Guide, dependencies) for the objects in an uploaded `file` or in `filename` (a file in the output folder); runs in the background |
+| GET | `/api/object-analysis/progress` | Step 1 status, current object/step, per-object records (conditions per source, objects to archive first, notes), output path, and the `sap_for_me` step's status/progress |
+| GET | `/api/object-analysis/results` | The full results for the preview: per object, the conditions (with sources), the objects to archive first, what each source returned |
+| POST | `/api/object-analysis/sap-for-me` | Start step 2 (SAP for Me) in the background; allowed once step 1 is done |
+| POST | `/api/object-analysis/sap-for-me/cancel` | Stop step 2; objects already finished keep their conditions |
+| POST | `/api/object-analysis/cancel` | Stop after the current object; finished objects stay in the workbook |
+| GET | `/api/object-analysis/download` | Download `output/Archiving object analysis.xlsx` |
 | POST | `/api/table-analysis/start` | Start the Table Analysis for the header tables in an uploaded `file` or in `filename` (a file in the output folder); returns the tables found and runs in the background |
 | GET | `/api/table-analysis/progress` | Status, current table/step, the open question (if any), the per-table records and the output path |
 | POST | `/api/table-analysis/answer` | Answer the open question: body `{prompt_id, answer}` — `{selected, group_by_year}` (date fields), `{add}` (other fields?), `{selected}` (other fields) |

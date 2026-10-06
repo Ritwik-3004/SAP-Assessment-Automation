@@ -169,6 +169,43 @@ def _run_get_table_sizes(table_names: list[str]) -> dict:
         return {"status": "error", "transaction": "DB02", "message": str(exc)}
 
 
+def run_get_archiving_network() -> dict:
+    """
+    The archiving-object dependency network -- the data SARA's "Network Graphic" button draws -- from table
+    ARCH_NET ("Table with archiving objects for network display") via the SQL Editor. Each row says that
+    PREVOBJECT has to be archived before OBJECT. The graphic itself hangs on some SAP GUI versions and
+    cannot be read by scripting; this table can.
+
+    Returns {"status": "ok", "pairs": [{"object": "FDM_PROC", "previous": "FI_DOCUMNT"}, ...]}; a row with
+    no previous object is an object that stands alone in the network (reported with previous "").
+    """
+    return sap.run(_run_get_archiving_network)
+
+
+def _run_get_archiving_network() -> dict:
+    try:
+        session = sap.get_session()
+        _open_sql_editor(session)
+        schema_rows = _run_sql_query(
+            session, "SELECT SCHEMA_NAME FROM SYS.TABLES WHERE TABLE_NAME = 'T000'"
+        )
+        if not schema_rows:
+            return {"status": "error", "transaction": "DB02", "message": "Could not find the SAP schema name."}
+        schema = re.sub(r"[^A-Za-z0-9_]", "", str(list(schema_rows[0].values())[0]))
+        rows = _run_sql_query(session, f'SELECT OBJECT, PREVOBJECT FROM "{schema}"."ARCH_NET" ORDER BY OBJECT, PREVOBJECT')
+        pairs = [
+            {"object": (r.get("OBJECT") or "").strip().upper(), "previous": (r.get("PREVOBJECT") or "").strip().upper()}
+            for r in rows
+            if (r.get("OBJECT") or "").strip()
+        ]
+        if not pairs:
+            return {"status": "error", "transaction": "DB02", "message": "Table ARCH_NET returned no rows."}
+        return {"status": "ok", "transaction": "DB02", "pairs": pairs}
+    except Exception as exc:
+        logger.exception("DB02 archiving-network lookup failed")
+        return {"status": "error", "transaction": "DB02", "message": str(exc)}
+
+
 def run_get_field_types(table_names: list[str]) -> dict:
     """
     Date-like and year-like fields of *table_names*, from the ABAP dictionary table DD03L, via

@@ -248,6 +248,32 @@ export const api = {
     return res.blob();
   },
 
+  objectAnalysisStart: async (source: { filename?: string; file?: File }) => {
+    const formData = new FormData();
+    if (source.file) formData.append("file", source.file);
+    if (source.filename) formData.append("filename", source.filename);
+    const res = await fetch(`${BASE}/api/object-analysis/start`, { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.json() as Promise<{ status: "started"; total: number; objects: string[] }>;
+  },
+  objectAnalysisProgress: () =>
+    get<import("../types").ObjectAnalysisSnapshot>("/api/object-analysis/progress"),
+  objectAnalysisResults: () =>
+    get<{ objects: import("../types").ObjectAnalysisDetail[] }>("/api/object-analysis/results"),
+  objectAnalysisSapForMe: () => post<{ status: string }>("/api/object-analysis/sap-for-me", {}),
+  objectAnalysisSapForMeCancel: () => post<{ ok: boolean }>("/api/object-analysis/sap-for-me/cancel", {}),
+  objectAnalysisCancel: () => post<{ ok: boolean }>("/api/object-analysis/cancel", {}),
+  objectAnalysisDownload: async () => {
+    const res = await fetch(`${BASE}/api/object-analysis/download`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.blob();
+  },
   tableAnalysisStart: async (source: { filename?: string; file?: File }) => {
     const formData = new FormData();
     if (source.file) formData.append("file", source.file);

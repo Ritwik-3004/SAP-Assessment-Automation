@@ -1012,3 +1012,16 @@ body {
 .ta-status.skipped { background: #f3f4f6; color: #6b7280; }
 .ta-status.failed { background: #fee2e2; color: #b91c1c; }
 .ta-status.running { background: #dbeafe; color: #1d4ed8; }
+
+/* Archiving object analysis: preview and background indicator */
+.oa-details { margin-top: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.oa-details > summary { cursor: pointer; padding: 10px 14px; font-size: 13px; }
+.oa-body { padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 12px; }
+.oa-before { border-left: 4px solid #f59e0b; background: #fffbeb; padding: 8px 12px; border-radius: 4px; }
+.oa-before h4, .oa-conds h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+.oa-conds { border-left: 4px solid #1d4ed8; padding-left: 12px; }
+.oa-src { font-size: 11px; padding: 1px 8px; border-radius: 10px; background: var(--tab-bg); color: var(--text-muted); white-space: nowrap; }
+.oa-src.sara { background: #dbeafe; color: #1d4ed8; }
+.oa-src.dvm { background: #dcfce7; color: #15803d; }
+.oa-src.sfm { background: #fef9c3; color: #854d0e; }
+.status-badge.working { background: #1d4ed822; color: #93c5fd; border: 1px solid #1d4ed855; }
