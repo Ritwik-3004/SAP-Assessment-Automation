@@ -263,6 +263,22 @@ export const api = {
     get<import("../types").ObjectAnalysisSnapshot>("/api/object-analysis/progress"),
   objectAnalysisResults: () =>
     get<{ objects: import("../types").ObjectAnalysisDetail[] }>("/api/object-analysis/results"),
+  objectReferenceAnalyze: async (files: File[]) => {
+    const formData = new FormData();
+    files.forEach((f) => formData.append("files", f));
+    const res = await fetch(`${BASE}/api/object-analysis/reference/analyze`, { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.json() as Promise<{ status: string }>;
+  },
+  objectReferenceReview: () =>
+    get<{
+      state: { status: "idle" | "running" | "done" | "error"; message: string | null; filename: string; warnings: string[] };
+      review: import("../types").ObjectReferenceReview | null;
+    }>("/api/object-analysis/reference/review"),
+  objectReferenceApply: (ids: string[]) => post<{ applied: number }>("/api/object-analysis/reference/apply", { ids }),
   objectAnalysisSapForMe: () => post<{ status: string }>("/api/object-analysis/sap-for-me", {}),
   objectAnalysisSapForMeCancel: () => post<{ ok: boolean }>("/api/object-analysis/sap-for-me/cancel", {}),
   objectAnalysisCancel: () => post<{ ok: boolean }>("/api/object-analysis/cancel", {}),

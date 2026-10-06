@@ -1083,6 +1083,38 @@ def object_analysis_results():
     return {"objects": object_analysis.job.details()}
 
 
+class ObjectReferenceApply(BaseModel):
+    ids: list[str]
+
+
+@app.post("/api/object-analysis/reference/analyze")
+def object_analysis_reference_analyze(files: list[UploadFile] = File(...)):
+    """Check one or more reference documents (Excel, PowerPoint, Word, PDF, CSV or text) against the analysis
+    results, in the background: what they confirm, which gaps they fill, which things differ."""
+    documents = [(f.file.read(), f.filename or "document") for f in files]
+    try:
+        object_analysis.job.start_reference(documents)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "started"}
+
+
+@app.get("/api/object-analysis/reference/review")
+def object_analysis_reference_review():
+    """The reference check's state and, once done, its review (confirmed / gaps / mismatches per object)."""
+    return object_analysis.job.reference_review()
+
+
+@app.post("/api/object-analysis/reference/apply")
+def object_analysis_reference_apply(req: ObjectReferenceApply):
+    """Apply the selected gaps / mismatches to the results (and the Excel file)."""
+    try:
+        applied = object_analysis.job.apply_reference(req.ids)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"applied": applied}
+
+
 @app.post("/api/object-analysis/sap-for-me")
 def object_analysis_sap_for_me():
     """Add SAP for Me conditions to the finished results, in the background. It uses its own browser and the

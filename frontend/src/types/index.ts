@@ -78,6 +78,7 @@ export interface ObjectAnalysisSnapshot {
     message: string | null;
     current: string | null;
   };
+  reference: { status: "idle" | "running" | "done" | "error"; message: string | null; filename: string; warnings: string[] };
 }
 
 export interface ObjectAnalysisDetail {
@@ -87,8 +88,37 @@ export interface ObjectAnalysisDetail {
   sara_url: string;
   network_known: boolean;
   sources: Record<string, string>;
-  conditions: { condition: string; detail: string; source: string }[];
-  prerequisites: { object: string; step: number; direct: boolean; required_by: string[]; description?: string }[];
+  conditions: { condition: string; detail: string; source: string; ref?: string }[];
+  prerequisites: {
+    object: string;
+    step: number | null;
+    direct: boolean;
+    required_by: string[];
+    description?: string;
+    from_reference?: boolean;
+    ref?: string;
+  }[];
+}
+
+export interface ObjectReferenceReview {
+  files: string[];
+  warnings: string[];
+  summary: { confirmed: number; gaps: number; mismatches: number; not_in_document: string[]; files: string[] };
+  objects: {
+    object: string;
+    in_document: boolean;
+    dependencies: {
+      stated: boolean;
+      confirmed: string[];
+      only_tool: string[];
+      only_document: { id: string; object: string; file: string; applied?: boolean }[];
+    };
+    conditions: {
+      covered: { document: string; tool: string; file: string }[];
+      new: { id: string; text: string; file: string; applied?: boolean }[];
+      conflicts: { id: string; document: string; tool: string; note: string; file: string; applied?: boolean }[];
+    };
+  }[];
 }
 
 export interface SavedSapCredentials {

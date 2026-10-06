@@ -1,12 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import ProgressBar from "./ProgressBar";
+import ObjectReferenceReview from "./ObjectReferenceReview";
 import type { ObjectAnalysisDetail, ObjectAnalysisSnapshot } from "../types";
 
 const SOURCES = ["SARA information (SAP Help Portal)", "DVM Guide", "SAP for Me"] as const;
 
 const sourceClass = (label: string) =>
-  label.startsWith("SARA") ? "sara" : label.startsWith("DVM") ? "dvm" : label.startsWith("SAP for Me") ? "sfm" : "";
+  label.startsWith("SARA")
+    ? "sara"
+    : label.startsWith("DVM")
+    ? "dvm"
+    : label.startsWith("SAP for Me")
+    ? "sfm"
+    : label.startsWith("Reference document")
+    ? "ref"
+    : "";
 
 /** One object's preview: what to archive first, then the conditions with their sources. */
 function ObjectPreview({ d }: { d: ObjectAnalysisDetail }) {
@@ -38,16 +47,26 @@ function ObjectPreview({ d }: { d: ObjectAnalysisDetail }) {
             <div className="table-scroll">
               <table className="results-table">
                 <thead>
-                  <tr><th>Step</th><th>Archiving object</th><th>Description</th><th>Relationship</th><th>Required before</th></tr>
+                  <tr>
+                    <th>Step</th><th>Archiving object</th><th>Description</th><th>Relationship</th><th>Required before</th>
+                    {d.prerequisites.some((p) => p.ref) && <th>Reference check</th>}
+                  </tr>
                 </thead>
                 <tbody>
                   {d.prerequisites.map((p) => (
                     <tr key={p.object}>
-                      <td>{p.step}</td>
+                      <td>{p.step ?? "—"}</td>
                       <td><strong>{p.object}</strong></td>
                       <td>{p.description ?? ""}</td>
-                      <td>{p.direct ? `Direct — ${d.object} requires it first` : "Indirect — needed further up the chain"}</td>
+                      <td>
+                        {p.from_reference
+                          ? "From the reference document — not in SAP's network, order unknown"
+                          : p.direct
+                          ? `Direct — ${d.object} requires it first`
+                          : "Indirect — needed further up the chain"}
+                      </td>
                       <td>{p.required_by.join(", ")}</td>
+                      {d.prerequisites.some((q) => q.ref) && <td className="ref-doc-comment">{p.ref ?? ""}</td>}
                     </tr>
                   ))}
                 </tbody>
@@ -65,7 +84,10 @@ function ObjectPreview({ d }: { d: ObjectAnalysisDetail }) {
             <div className="table-scroll">
               <table className="results-table">
                 <thead>
-                  <tr><th>#</th><th>Condition</th><th>Source</th><th>Detail</th></tr>
+                  <tr>
+                    <th>#</th><th>Condition</th><th>Source</th><th>Detail</th>
+                    {d.conditions.some((c) => c.ref) && <th>Reference check</th>}
+                  </tr>
                 </thead>
                 <tbody>
                   {d.conditions.map((c, i) => (
@@ -74,6 +96,7 @@ function ObjectPreview({ d }: { d: ObjectAnalysisDetail }) {
                       <td>{c.condition}</td>
                       <td><span className={`oa-src ${sourceClass(c.source)}`}>{c.source}</span></td>
                       <td className="ref-doc-comment">{c.detail}</td>
+                      {d.conditions.some((x) => x.ref) && <td className="ref-doc-comment">{c.ref ?? ""}</td>}
                     </tr>
                   ))}
                 </tbody>
@@ -155,6 +178,11 @@ export default function ObjectAnalysisPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewKey]);
 
+  function refreshAfterApply() {
+    api.objectAnalysisResults().then((r) => setDetails(r.objects)).catch(() => {});
+    api.objectAnalysisProgress().then(setSnapshot).catch(() => {});
+  }
+
   function handleLocalFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0] ?? null;
     if (f) {
@@ -230,7 +258,8 @@ export default function ObjectAnalysisPanel() {
         slower, runs in the background, and adds its conditions to the same results and Excel file as it finds them, so you
         can keep using other tasks meanwhile. Results go to <code>output/Archiving object analysis.xlsx</code> (a Summary
         sheet and one sheet per object). By default the tool uses the recommended objects saved by{" "}
-        <em>Find Archiving Objects</em>; you can upload a different file. During step 1 SAP opens and closes a browser tab
+        <em>Find Archiving Objects</em>; you can upload a different file. After the results are in you can also upload
+        reference documents (any type) to fill gaps and spot mismatches. During step 1 SAP opens and closes a browser tab
         for each object, so please leave the browser and SAP alone until it finishes.
       </div>
 
@@ -369,6 +398,10 @@ export default function ObjectAnalysisPanel() {
                 </p>
               )}
             </div>
+          )}
+
+          {snapshot.status !== "running" && records.length > 0 && (
+            <ObjectReferenceReview enabled={mainDone} onApplied={refreshAfterApply} />
           )}
 
           {records.length > 0 && (

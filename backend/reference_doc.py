@@ -56,6 +56,23 @@ def _extract_pdf_text(contents: bytes) -> str:
     return "\n".join(lines)
 
 
+def _shape_texts(shape) -> list[str]:
+    """Text of one slide shape: its text frame, table cells (row by row, " | " between cells) and, for a
+    group, everything inside it. Tables matter: SME decks keep their findings in them."""
+    out: list[str] = []
+    if getattr(shape, "has_table", False) and shape.has_table:
+        for row in shape.table.rows:
+            cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+            if any(cells):
+                out.append(" | ".join(cells))
+    elif getattr(shape, "shape_type", None) == 6:  # MSO_SHAPE_TYPE.GROUP
+        for inner in shape.shapes:
+            out.extend(_shape_texts(inner))
+    elif getattr(shape, "has_text_frame", False) and shape.has_text_frame and shape.text_frame.text.strip():
+        out.append(shape.text_frame.text.strip())
+    return out
+
+
 def _extract_pptx_text(contents: bytes) -> str:
     try:
         from pptx import Presentation  # type: ignore
@@ -69,20 +86,81 @@ def _extract_pptx_text(contents: bytes) -> str:
     for i, slide in enumerate(prs.slides):
         lines.append(f"=== Slide {i + 1} ===")
         for shape in slide.shapes:
-            if hasattr(shape, "text") and shape.text.strip():
-                lines.append(shape.text)
+            lines.extend(_shape_texts(shape))
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame is not None:
+            notes = slide.notes_slide.notes_text_frame.text.strip()
+            if notes:
+                lines.append("Notes: " + notes)
     return "\n".join(lines)
 
 
+def _extract_docx_text(contents: bytes) -> str:
+    """Text of a Word (.docx) file: paragraphs in order, table rows as " | "-separated lines. A .docx is a zip
+    of XML, so no extra library is needed."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(contents)) as z:
+        root = ET.fromstring(z.read("word/document.xml"))
+
+    def para_text(p) -> str:
+        return "".join(t.text or "" for t in p.iter(ns + "t")).strip()
+
+    lines: list[str] = []
+    body = root.find(ns + "body")
+    for child in (body if body is not None else []):
+        if child.tag == ns + "p":
+            text = para_text(child)
+            if text:
+                lines.append(text)
+        elif child.tag == ns + "tbl":
+            for row in child.iter(ns + "tr"):
+                cells = [" ".join(para_text(p) for p in cell.iter(ns + "p")).strip() for cell in row.iter(ns + "tc")]
+                if any(cells):
+                    lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+def _extract_plain_text(contents: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-16", "cp1252", "latin-1"):
+        try:
+            return contents.decode(encoding)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return contents.decode("utf-8", errors="replace")
+
+
+_LEGACY = {
+    ".xls": "an old Excel file (.xls); open it in Excel and save it as .xlsx",
+    ".ppt": "an old PowerPoint file (.ppt); open it in PowerPoint and save it as .pptx",
+    ".doc": "an old Word file (.doc); open it in Word and save it as .docx",
+}
+
+SUPPORTED_EXTENSIONS = (".xlsx", ".xlsm", ".pdf", ".pptx", ".docx", ".csv", ".txt", ".md")
+
+
 def _extract_text(contents: bytes, filename: str) -> str:
+    """The text of an uploaded document. Reads Excel (.xlsx), PDF, PowerPoint (.pptx, including tables and
+    notes), Word (.docx), and CSV / plain-text / Markdown files. Old binary Office formats (.xls, .ppt, .doc)
+    cannot be read; the error says to save them in the current format."""
     lower = filename.lower()
-    if lower.endswith((".xlsx", ".xls")):
+    for ext, what in _LEGACY.items():
+        if lower.endswith(ext):
+            raise ValueError(f"{filename}: this is {what}.")
+    if lower.endswith((".xlsx", ".xlsm")):
         return _extract_excel_text(contents)
     if lower.endswith(".pdf"):
         return _extract_pdf_text(contents)
-    if lower.endswith((".pptx", ".ppt")):
+    if lower.endswith(".pptx"):
         return _extract_pptx_text(contents)
-    raise ValueError(f"Unsupported file type: {filename}")
+    if lower.endswith(".docx"):
+        return _extract_docx_text(contents)
+    if lower.endswith((".csv", ".txt", ".md")):
+        return _extract_plain_text(contents)
+    raise ValueError(
+        f"Unsupported file type: {filename}. Use Excel (.xlsx), PDF, PowerPoint (.pptx), Word (.docx), CSV or text."
+    )
 
 
 # ---------------------------------------------------------------------------

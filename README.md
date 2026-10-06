@@ -19,7 +19,7 @@ Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeepi
 (housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (the always-visible
 assistant), `credentials_store.py` (several saved logins per credentials file), `reference_doc.py`
 (reference document analysis), `table_analysis.py` (the Table Analysis task) with `transactions/taana_analysis.py`
-(its TAANA screens), `object_analysis.py` (the Archiving Object Analysis task) with `transactions/sara_info.py`,
+(its TAANA screens), `object_analysis.py` (the Archiving Object Analysis task) with `object_reference.py` (its reference-document check) and `transactions/sara_info.py`,
 `help_browser.py` and `helpportal.py` (its SARA / SAP Help Portal steps), `progress.py` (progress
 polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 
@@ -35,7 +35,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet) |
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
-| Archiving Object Analysis (conditions from SARA's information page, DVM Guide and SAP for Me; objects to archive first from SARA's network) | **Run end to end against a live system** on FI_DOCUMNT and SD_VBAK (all three sources, dependencies, workbook); the two-step split (step 1, then SAP for Me in the background) was tested offline with fakes and live on SD_VBAK. The tab handling, failure cases and ordering were also tested offline with fakes. Not yet run on the full list of recommended objects (about 5 minutes per object with all sources) or on a machine whose default browser is not Edge/Chrome — see [Archiving Object Analysis](#archiving-object-analysis) |
+| Archiving Object Analysis (conditions from SARA's information page, DVM Guide and SAP for Me; objects to archive first from SARA's network) | **Run end to end against a live system** on FI_DOCUMNT and SD_VBAK (all three sources, dependencies, workbook); the two-step split (step 1, then SAP for Me in the background) was tested offline with fakes and live on SD_VBAK. The reference-document check was tested offline with real PowerPoint/Excel/Word files and canned model answers, and live with a generated deck. The tab handling, failure cases and ordering were also tested offline with fakes. Not yet run on the full list of recommended objects (about 5 minutes per object with all sources) or on a machine whose default browser is not Edge/Chrome — see [Archiving Object Analysis](#archiving-object-analysis) |
 | Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on tiny tables (SWWWIHEAD and BKPF, including two tables in parallel and a month field): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the download were tested offline with a fake SAP. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis-taana) |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
 | SAP Assistant (always-visible chat column: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
@@ -354,7 +354,7 @@ object/program to tackle first. `backend/grouping.py`'s `build_object_groups()`:
 After scoring, a **Reference Document Analysis** panel appears in
 **Find Archiving Objects for Tables** (`frontend/src/components/ReferenceDocPanel.tsx`).
 It lets the user cross-check the recommendations against one or more documents from past
-project experience — Excel (`.xlsx`/`.xls`), PDF, or PowerPoint (`.pptx`/`.ppt`). The same
+project experience — Excel (`.xlsx`), PowerPoint (`.pptx`, including text in slide tables and speaker notes), Word (`.docx`), PDF, or CSV / text files (the old binary `.xls`, `.ppt` and `.doc` formats must be saved in the current format first). The same
 panel is used for the header-table review in **Find Header Tables**.
 
 **Priority is unchanged:** the DVM Guide comes first, then SAP for Me, and the reference
@@ -748,6 +748,24 @@ else `archiving_objects_scored.xlsx`); **Upload a different file** to use anothe
 contains "Recommended" and that has an "Archiving Object" column (otherwise the last sheet with that column). Blank cells, placeholders such as
 "(no archiving object found)" and duplicates are dropped.
 
+**Reference documents (optional, after step 1).** Below the results, **Reference document(s)** lets you upload any readable document —
+**Excel (.xlsx), PowerPoint (.pptx), Word (.docx), PDF, CSV or text/Markdown**, one or several — with past analysis or SME notes, to fill gaps and
+spot mismatches (`backend/object_reference.py`; runs in the background, AI model only). The tool reads, per archiving object, what the document
+says about its **archiving conditions** and the **objects to archive first**, and compares that with the results:
+- **Objects to archive first** are compared by name: *confirmed* (in both), *only in the document* (a **gap**: SAP's network doesn't list it) and *only in the
+  tool* (in SAP's network but the document doesn't mention it; shown for information).
+- **Conditions** are compared by meaning by the AI model, which sees only the two lists: *covered* (the tool already has it), *new* (a **gap**) and
+  *conflict* (a **mismatch**: same subject, different requirement, e.g. another residence period).
+Nothing changes until you tick items — each gap and mismatch has a checkbox (plus *Select all gaps and mismatches*) — and press **Apply N selected**:
+a gap is added (conditions get the source "Reference document - <file>"; a document-only object is added to the archive-first list marked "From the
+reference document", with no step number because SAP's network doesn't place it), and a mismatch replaces the tool's wording with the document's (the old
+wording is kept in the Detail column). Applying the same item again does nothing. The preview and the Excel file update at once; the workbook gets a
+**Reference check** column on the conditions and archive-first tables (matches / differs / not mentioned / added from the document), a **REFERENCE DOCUMENT
+CHECK** block per object listing every gap and mismatch with "Applied to the results" or "Not applied", and a **Reference check** column on the Summary
+sheet. Objects the document doesn't mention are marked as such. A file that cannot be read is skipped with a warning (an old `.xls`/`.ppt`/`.doc` must be
+saved as `.xlsx`/`.pptx`/`.docx` first; a scanned PDF has no text). Documents longer than eight model-sized chunks (about 64,000 characters with Claude, less
+with Groq) are read only as far as that.
+
 **Conditions — three sources, each named on every condition** (`backend/object_analysis.py`). The AI model in use reads each source's text separately
 and returns only conditions that are *in that text* (it is told never to add any from its own knowledge); a condition is a requirement that must
 hold or be done before the object can be archived or deleted: checks of the write/delete program, required status, residence times, required
@@ -962,6 +980,9 @@ Key endpoints:
 | POST | `/api/object-analysis/start` | Start step 1 of the Archiving Object Analysis (SARA information page, DVM Guide, dependencies) for the objects in an uploaded `file` or in `filename` (a file in the output folder); runs in the background |
 | GET | `/api/object-analysis/progress` | Step 1 status, current object/step, per-object records (conditions per source, objects to archive first, notes), output path, and the `sap_for_me` step's status/progress |
 | GET | `/api/object-analysis/results` | The full results for the preview: per object, the conditions (with sources), the objects to archive first, what each source returned |
+| POST | `/api/object-analysis/reference/analyze` | Multipart upload of one or more reference documents (`files`; Excel, PowerPoint, Word, PDF, CSV or text); starts the reference check in the background (allowed once step 1 is done) |
+| GET | `/api/object-analysis/reference/review` | The reference check's state and, when done, its review: per object, what is confirmed, the gaps and the mismatches, each selectable one with an id |
+| POST | `/api/object-analysis/reference/apply` | Apply the selected gaps / mismatches: body `{ids: [...]}`; returns how many were applied |
 | POST | `/api/object-analysis/sap-for-me` | Start step 2 (SAP for Me) in the background; allowed once step 1 is done |
 | POST | `/api/object-analysis/sap-for-me/cancel` | Stop step 2; objects already finished keep their conditions |
 | POST | `/api/object-analysis/cancel` | Stop after the current object; finished objects stay in the workbook |

@@ -1025,3 +1025,14 @@ body {
 .oa-src.dvm { background: #dcfce7; color: #15803d; }
 .oa-src.sfm { background: #fef9c3; color: #854d0e; }
 .status-badge.working { background: #1d4ed822; color: #93c5fd; border: 1px solid #1d4ed855; }
+
+/* Archiving object analysis: reference-document review */
+.oa-src.ref { background: #ede9fe; color: #6d28d9; }
+.oa-ref-card { margin-top: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.oa-ref-card .oa-ref-head { padding: 12px 16px; background: #f0f4ff; border-bottom: 1px solid var(--border); font-weight: 600; }
+.oa-ref-card .oa-ref-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.oa-ref-check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; padding: 4px 0; }
+.oa-ref-check small { color: var(--text-muted); display: block; }
+.oa-chip { display: inline-block; font-size: 12px; padding: 1px 9px; border-radius: 10px; margin: 0 4px 4px 0; background: var(--tab-bg); }
+.oa-chip.ok { background: #dcfce7; color: #15803d; }
+.oa-chip.muted { color: var(--text-muted); }

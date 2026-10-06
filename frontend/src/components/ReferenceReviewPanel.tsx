@@ -199,7 +199,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
         <div>
           <span className="ref-doc-title">Reference Document Analysis</span>
           <span className="ref-doc-subtitle">
-            Cross-check recommendations against past project experience (Excel, PDF, or PowerPoint)
+            Cross-check recommendations against past project experience (Excel, PowerPoint, Word, PDF, CSV or text)
           </span>
         </div>
       </div>
@@ -220,7 +220,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
                   ref={fileInputRef}
                   type="file"
                   multiple
-                  accept=".xlsx,.xls,.pdf,.pptx,.ppt"
+                  accept=".xlsx,.xlsm,.pdf,.pptx,.docx,.csv,.txt,.md"
                   onChange={handleFileChange}
                   style={{ display: "none" }}
                 />

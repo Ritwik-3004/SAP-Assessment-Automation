@@ -16,6 +16,10 @@ Everything is written to  output/Archiving object analysis.xlsx : a Summary shee
 with a clearly marked "Archive these objects BEFORE ..." block and the conditions table. The workbook is
 rewritten after every object, so finished objects survive a failure or cancel.
 
+After the analysis the user can upload reference documents of any readable type (object_reference.py): the
+document is compared with the results, and the user selects which gaps / mismatches to apply
+(start_reference() / reference_review() / apply_reference()).
+
 The jobs run on background threads; the UI polls snapshot() and reads details() for the preview.
 """
 
@@ -37,6 +41,7 @@ import help_browser
 import helpportal
 import llm
 import object_descriptions
+import object_reference
 import sap_for_me
 import transactions.db02 as db02
 import transactions.sara_info as sara_info
@@ -239,6 +244,9 @@ class ObjectAnalysisJob:
         self._last_help_url: Optional[str] = None
         # the SAP for Me step (second, optional, runs in the background after the first step)
         self._sfm_state = {"status": "idle", "total": 0, "completed": 0, "message": None, "current": None}
+        # the reference-document check (optional, after the first step)
+        self._ref_state = {"status": "idle", "message": None, "filename": "", "warnings": []}
+        self._review: Optional[dict] = None
 
     # -- public ---------------------------------------------------------------
 
@@ -248,6 +256,7 @@ class ObjectAnalysisJob:
             state["records"] = [dict(r) for r in self._state["records"]]
             state["warnings"] = list(self._state["warnings"])
             state["sap_for_me"] = dict(self._sfm_state)
+            state["reference"] = {**self._ref_state, "warnings": list(self._ref_state["warnings"])}
             return state
 
     def details(self) -> list[dict]:
@@ -271,7 +280,11 @@ class ObjectAnalysisJob:
     def is_active(self) -> bool:
         """True while the first step or the SAP for Me step is running (a new run would reset the results)."""
         with self._lock:
-            return self._state["status"] == "running" or self._sfm_state["status"] == "running"
+            return (
+                self._state["status"] == "running"
+                or self._sfm_state["status"] == "running"
+                or self._ref_state["status"] == "running"
+            )
 
     def start(self, objects: list[dict]) -> None:
         with self._lock:
@@ -302,6 +315,111 @@ class ObjectAnalysisJob:
     def cancel_sap_for_me(self) -> None:
         with self._lock:
             self._sfm_cancel = True
+
+    # -- reference document check ----------------------------------------------
+
+    def start_reference(self, documents: list[tuple[bytes, str]]) -> None:
+        """Read the reference documents and compare them with the results, in the background."""
+        with self._lock:
+            if self._state["status"] != "done" or not self._results:
+                raise RuntimeError("Run the analysis first; the reference document is checked against its results.")
+            if self._ref_state["status"] == "running":
+                raise RuntimeError("A reference document is already being checked.")
+            self._ref_state = {
+                "status": "running", "message": "Starting…",
+                "filename": ", ".join(name for _, name in documents), "warnings": [],
+            }
+            self._review = None
+        threading.Thread(target=self._run_reference, args=(documents,), daemon=True, name="object-analysis-ref").start()
+
+    def reference_review(self) -> dict:
+        with self._lock:
+            return {
+                "state": {**self._ref_state, "warnings": list(self._ref_state["warnings"])},
+                "review": self._review_copy(),
+            }
+
+    def _review_copy(self) -> Optional[dict]:
+        if self._review is None:
+            return None
+        import copy
+        return copy.deepcopy(self._review)
+
+    def apply_reference(self, ids: list[str]) -> int:
+        """Apply the selected gaps / mismatches of the reference check to the results. Returns how many were applied."""
+        added: list[str] = []
+        applied = 0
+        with self._lock:
+            if self._review is None:
+                raise RuntimeError("There is no reference check to apply.")
+            by_review = {o["object"]: o for o in self._review["objects"]}
+            by_result = {r["object"]: r for r in self._results}
+            for item_id in ids:
+                parts = item_id.split("|", 2)
+                if len(parts) != 3:
+                    continue
+                obj, kind, _ = parts
+                review, result = by_review.get(obj), by_result.get(obj)
+                if review is None or result is None:
+                    continue
+                if kind == "dep":
+                    item = next((d for d in review["dependencies"]["only_document"] if d["id"] == item_id), None)
+                    if item and not item.get("applied"):
+                        result["prerequisites"].append({
+                            "object": item["object"], "step": None, "direct": False, "required_by": [obj],
+                            "from_reference": True, "description": "",
+                            "ref": f"Added from the reference document ({item['file']})",
+                        })
+                        item["applied"] = True
+                        added.append(item["object"])
+                        applied += 1
+                elif kind == "new":
+                    item = next((c for c in review["conditions"]["new"] if c["id"] == item_id), None)
+                    if item and not item.get("applied"):
+                        result["conditions"].append({
+                            "condition": item["text"], "detail": "",
+                            "source": f"Reference document - {item['file']}",
+                            "ref": "Gap filled from the reference document",
+                        })
+                        item["applied"] = True
+                        applied += 1
+                elif kind == "conflict":
+                    item = next((c for c in review["conditions"]["conflicts"] if c["id"] == item_id), None)
+                    if item and not item.get("applied"):
+                        target = next((c for c in result["conditions"] if c["condition"] == item["tool"]), None)
+                        replacement = {
+                            "condition": item["document"], "detail": f"Replaces: {item['tool']}",
+                            "source": f"Reference document - {item['file']}",
+                            "ref": "Replaced with the reference document's wording",
+                        }
+                        if target is not None:
+                            target.clear()
+                            target.update(replacement)
+                        else:
+                            result["conditions"].append(replacement)
+                        item["applied"] = True
+                        applied += 1
+            for res in by_result.values():
+                res["prerequisites"].sort(key=lambda p: (p["step"] is None, p["step"] or 0, p["object"]))
+
+        if added:
+            try:
+                descriptions = object_descriptions.resolve(sorted(set(added)))
+            except Exception as exc:
+                logger.warning("Could not resolve descriptions for reference objects: %s", exc)
+                descriptions = {}
+            with self._lock:
+                for res in self._results:
+                    for p in res["prerequisites"]:
+                        if p.get("from_reference") and not p.get("description"):
+                            p["description"] = descriptions.get(p["object"], "")
+        with self._lock:
+            for i, rec in enumerate(self._state["records"]):
+                res = next((r for r in self._results if r["object"] == rec["object"]), None)
+                if res is not None:
+                    self._state["records"][i] = self._record_for(res)
+        self._save_workbook()
+        return applied
 
     # -- plumbing -------------------------------------------------------------
 
@@ -533,6 +651,74 @@ class ObjectAnalysisJob:
             "network_known": net is not None,
         }
 
+    # -- reference document check (background) ---------------------------------
+
+    def _set_ref(self, **changes) -> None:
+        with self._lock:
+            self._ref_state.update(changes)
+
+    def _run_reference(self, documents: list[tuple[bytes, str]]) -> None:
+        try:
+            settings = llm.load_settings()
+            problem = llm.not_configured_message(settings)
+            if problem:
+                raise RuntimeError(f"The AI model is not available: {problem}")
+            with self._lock:
+                snapshot = [
+                    {"object": r["object"], "conditions": [dict(c) for c in r["conditions"]],
+                     "prerequisites": [dict(p) for p in r["prerequisites"]]}
+                    for r in sorted(self._results, key=lambda r: r["index"])
+                ]
+            names = [r["object"] for r in snapshot]
+            progress = lambda message: self._set_ref(message=message)       # noqa: E731
+            ref = object_reference.extract_reference(documents, names, settings, on_progress=progress)
+            if not ref["used"]:
+                raise RuntimeError("; ".join(ref["warnings"]) or "No reference document could be read.")
+            review = object_reference.compare(settings, snapshot, ref, on_progress=progress)
+            review["warnings"] = ref["warnings"]
+            with self._lock:
+                self._review = review
+                self._annotate_results(review)
+                self._ref_state.update(
+                    status="done", message="Reference check finished.", warnings=list(ref["warnings"]),
+                )
+            self._save_workbook()
+        except Exception as exc:
+            logger.exception("Reference check failed")
+            self._set_ref(status="error", message=str(exc))
+
+    def _annotate_results(self, review: dict) -> None:
+        """Note on each condition / prerequisite what the reference document said (lock held)."""
+        by_result = {r["object"]: r for r in self._results}
+        for item in review["objects"]:
+            res = by_result.get(item["object"])
+            if res is None:
+                continue
+            for c in res["conditions"]:
+                if not c["source"].startswith("Reference document"):
+                    c.pop("ref", None)
+            for p in res["prerequisites"]:
+                if not p.get("from_reference"):
+                    p.pop("ref", None)
+            if not item["in_document"]:
+                continue
+            deps = item["dependencies"]
+            for p in res["prerequisites"]:
+                if p.get("from_reference"):
+                    continue
+                if p["object"] in deps["confirmed"]:
+                    p["ref"] = "Confirmed by the reference document"
+                elif deps["stated"] and p["object"] in deps["only_tool"]:
+                    p["ref"] = "Not mentioned in the reference document"
+            for covered in item["conditions"]["covered"]:
+                for c in res["conditions"]:
+                    if c["condition"] == covered["tool"] and not c.get("ref"):
+                        c["ref"] = "Matches the reference document"
+            for conflict in item["conditions"]["conflicts"]:
+                for c in res["conditions"]:
+                    if c["condition"] == conflict["tool"]:
+                        c["ref"] = f"Differs from the reference document: {conflict['document']}"
+
     # -- SAP for Me (second, background step) -------------------------------------
 
     def _set_sfm(self, **changes) -> None:
@@ -612,7 +798,7 @@ class ObjectAnalysisJob:
         summary = wb.active
         summary.title = "Summary"
         headers = ["Archiving object", "Description", "ARCHIVE BEFORE (in order)", "Directly requires",
-                   "Conditions", SRC_SARA, SRC_DVM, SRC_SFM, "Result / notes"]
+                   "Conditions", SRC_SARA, SRC_DVM, SRC_SFM, "Result / notes", "Reference check"]
         summary.append(headers)
         for cell in summary[1]:
             cell.font = Font(bold=True)
@@ -625,6 +811,8 @@ class ObjectAnalysisJob:
                 for r in sorted(self._results, key=lambda r: r["index"])
             ]
             records = {r["object"]: dict(r) for r in self._state["records"]}
+            review = self._review_copy()
+        review_by_obj = {o["object"]: o for o in review["objects"]} if review else {}
         for res in results:
             rec = records.get(res["object"], {})
             prereqs = res["prerequisites"]
@@ -637,23 +825,44 @@ class ObjectAnalysisJob:
                 res["object"], res.get("description", ""), order, direct, len(res["conditions"]),
                 by.get(SRC_SARA, 0), by.get(SRC_DVM, 0), by.get(SRC_SFM, 0),
                 rec.get("note") or "OK",
+                self._reference_summary(review_by_obj.get(res["object"]), review),
             ])
             summary.cell(row=summary.max_row, column=3).fill = self._AMBER_LIGHT
         for row in summary.iter_rows(min_row=2):
             for cell in row:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
-        for col, width in zip("ABCDEFGHI", (22, 38, 52, 34, 12, 20, 14, 14, 60)):
+        for col, width in zip("ABCDEFGHIJ", (22, 38, 52, 34, 12, 20, 14, 14, 60, 50)):
             summary.column_dimensions[col].width = width
         summary.freeze_panes = "A2"
 
         used = {"Summary"}
         for res in results:
-            self._object_sheet(wb.create_sheet(self._sheet_name(res["object"], used)), res)
+            self._object_sheet(
+                wb.create_sheet(self._sheet_name(res["object"], used)), res, review_by_obj.get(res["object"]), review
+            )
         self._set(output_path=str(self._save(wb)))
 
-    def _object_sheet(self, ws, res: dict) -> None:
+    @staticmethod
+    def _reference_summary(item: Optional[dict], review: Optional[dict]) -> str:
+        if review is None:
+            return ""
+        if item is None or not item["in_document"]:
+            return "Not mentioned in the reference document"
+        c, d = item["conditions"], item["dependencies"]
+        parts = []
+        confirmed = len(c["covered"]) + len(d["confirmed"])
+        if confirmed:
+            parts.append(f"{confirmed} confirmed")
+        gaps = [*c["new"], *d["only_document"]]
+        if gaps:
+            parts.append(f"{sum(1 for g in gaps if g.get('applied'))} of {len(gaps)} gap(s) filled")
+        if c["conflicts"]:
+            parts.append(f"{sum(1 for g in c['conflicts'] if g.get('applied'))} of {len(c['conflicts'])} mismatch(es) resolved")
+        return "; ".join(parts) or "Nothing to compare"
+
+    def _object_sheet(self, ws, res: dict, review_item: Optional[dict] = None, review: Optional[dict] = None) -> None:
         wrap = Alignment(vertical="top", wrap_text=True)
-        for col, width in zip("ABCDE", (11, 62, 46, 40, 34)):
+        for col, width in zip("ABCDEF", (11, 62, 46, 40, 34, 44)):
             ws.column_dimensions[col].width = width
 
         ws.append([f"Archiving object: {res['object']}"])
@@ -686,16 +895,20 @@ class ObjectAnalysisJob:
             ws.append(["", f"None - no archiving object has to be archived before {res['object']} (per the SARA network, table ARCH_NET)."])
             ws.cell(row=ws.max_row, column=2).font = Font(bold=True)
         else:
-            ws.append(["Step", "Archiving object", "Description", "Relationship", "Required before"])
+            ws.append(["Step", "Archiving object", "Description", "Relationship", "Required before", "Reference check"])
             for cell in ws[ws.max_row]:
                 cell.font = Font(bold=True)
                 cell.fill = self._GREY
             for p in prereqs:
                 targets = ", ".join(p["required_by"]) if p["required_by"] else ""
+                relationship = (
+                    "From the reference document - not in SAP's network, so its order is unknown" if p.get("from_reference")
+                    else f"Direct - {res['object']} requires it first" if p["direct"]
+                    else "Indirect - needed further up the chain"
+                )
                 ws.append([
-                    p["step"], p["object"], p.get("description", ""),
-                    f"Direct - {res['object']} requires it first" if p["direct"] else "Indirect - needed further up the chain",
-                    targets,
+                    p["step"] if p["step"] is not None else "—", p["object"], p.get("description", ""),
+                    relationship, targets, p.get("ref", ""),
                 ])
                 for cell in ws[ws.max_row]:
                     cell.alignment = wrap
@@ -714,14 +927,47 @@ class ObjectAnalysisJob:
         if not res["conditions"]:
             ws.append(["", "No archiving conditions were found in the sources checked (see 'Sources checked' above)."])
         else:
-            ws.append(["No.", "Condition", "Source", "Detail"])
+            ws.append(["No.", "Condition", "Source", "Detail", "Reference check"])
             for cell in ws[ws.max_row]:
                 cell.font = Font(bold=True)
                 cell.fill = self._GREY
             for n, c in enumerate(res["conditions"], start=1):
-                ws.append([n, c["condition"], c["source"], c["detail"]])
+                ws.append([n, c["condition"], c["source"], c["detail"], c.get("ref", "")])
                 for cell in ws[ws.max_row]:
                     cell.alignment = wrap
+        # --- what the reference document said (gaps and mismatches, applied or not)
+        if review is not None:
+            ws.append([])
+            ws.append([f"REFERENCE DOCUMENT CHECK ({', '.join(review['summary']['files'])})"])
+            r = ws.max_row
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+            ws.cell(row=r, column=1).fill = self._GREY
+            ws.cell(row=r, column=1).font = Font(bold=True, size=12)
+            if review_item is None or not review_item["in_document"]:
+                ws.append(["", "This archiving object is not mentioned in the reference document."])
+            else:
+                rows = []
+                for g in review_item["dependencies"]["only_document"]:
+                    rows.append(("Archive first (document only)", g["object"], g.get("applied")))
+                for g in review_item["conditions"]["new"]:
+                    rows.append(("Condition (document only)", g["text"], g.get("applied")))
+                for g in review_item["conditions"]["conflicts"]:
+                    rows.append((
+                        "Condition (mismatch)",
+                        f"Document: {g['document']}  |  Tool: {g['tool']}" + (f"  ({g['note']})" if g.get("note") else ""),
+                        g.get("applied"),
+                    ))
+                if not rows:
+                    ws.append(["", "Everything the document says about this object matches the analysis."])
+                else:
+                    ws.append(["", "Type", "Item", "Status"])
+                    for cell in ws[ws.max_row]:
+                        cell.font = Font(bold=True)
+                        cell.fill = self._GREY
+                    for kind, text, applied in rows:
+                        ws.append(["", kind, text, "Applied to the results" if applied else "Not applied"])
+                        for cell in ws[ws.max_row]:
+                            cell.alignment = wrap
         ws.freeze_panes = None
 
     @staticmethod
