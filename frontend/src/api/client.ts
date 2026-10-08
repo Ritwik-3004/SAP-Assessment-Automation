@@ -70,7 +70,8 @@ export const api = {
     post<{ deleted: boolean }>("/api/sap-for-me/credentials/delete", { email }),
   saveSapForMeCredentials: (body: { email: string; password: string }) =>
     post<{ saved: boolean }>("/api/sap-for-me/credentials", body),
-  getLlmSettings: () => get<import("../types").LlmSettings>("/api/llm/settings"),
+  getLlmSettings: (refreshOllama = false) =>
+    get<import("../types").LlmSettings>(`/api/llm/settings${refreshOllama ? "?refresh_ollama=true" : ""}`),
   saveLlmSettings: (body: { provider: string; model: string }) =>
     post<import("../types").LlmSettings>("/api/llm/settings", body),
   getLlmUsage: () => get<import("../types").LlmUsage>("/api/llm/usage"),

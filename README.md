@@ -40,7 +40,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
 | SAP Assistant (always-visible chat column: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
 | Several saved SAP / SAP for Me logins with a dropdown | Working; storage and endpoints tested offline with temporary files — see [Saved connection details](#saved-connection-details) |
-| AI model switch (Claude or Groq free tier) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared** — see [AI model selection](#ai-model-selection-claude-or-groq) |
+| AI model switch (Claude, Groq free tier, or Ollama on this computer) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared**. Ollama: tested live with a tiny 270M model and offline with a fake server; **not yet tried with a real 7–8B model** — see [AI model selection](#ai-model-selection-claude-groq-or-ollama) |
 | Reference document analysis (Excel / PDF / PowerPoint, one or several files) | Implemented; the multi-document merge was tested offline with canned model answers, not yet run end to end against real documents — see [Reference document analysis](#reference-document-analysis) |
 
 ## Prerequisites
@@ -53,6 +53,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Python 3.11+ | `python --version`. The project's `.venv` is **32-bit** Python 3.12, which suits the SAP GUI COM scripting (and is why Selenium is used instead of Playwright). |
 | Node.js 18+ | `node --version` |
 | `ANTHROPIC_API_KEY` | In `backend/.env`; needed for every AI step while Claude is the selected model |
+| `OLLAMA_URL` (optional) | In `backend/.env`; address of Ollama, default `http://127.0.0.1:11434`. Must be this computer — other hosts are refused. `OLLAMA_TIMEOUT` (seconds per answer, default 900) tunes slow machines |
 | `GROQ_API_KEY` (optional) | In `backend/.env`; only needed if you switch to the Groq free tier (free key from console.groq.com). The app never asks for or stores it |
 | Chrome for Testing + chromedriver | Only for the SAP for Me housekeeping lookup; needs IT approval. See [setup](#housekeepingcleanup-program-lookup-for-tables-with-no-archiving-object) |
 | SAP for Me account | Email and password saved in the app's sidebar; internet access to me.sap.com, and SAP's terms must permit automated access |
@@ -437,7 +438,7 @@ overrides are applied in the panel's own preview and are **not** pushed back int
 scored results or the chat's view of them; very long documents are truncated before being
 sent to Claude; scanned (image-only) PDFs yield no text and are rejected.
 
-## AI model selection (Claude or Groq)
+## AI model selection (Claude, Groq or Ollama)
 
 The sidebar's **AI Model** panel chooses which model every AI step uses — scoring, the
 housekeeping lookup (DVM Guide and SAP for Me stages), reference-document analysis and the
@@ -451,13 +452,31 @@ follow it. The header shows the active model (e.g. "AI: Groq · GPT-OSS 120B").
   backend (the panel warns if it is missing). **Save** applies your choice (stored in
   `llm_settings.json`, git-ignored, which holds no keys); **Test** makes one tiny call to
   check the key and model.
+- **Ollama (runs on this computer)** — a model served by [Ollama](https://ollama.com) on this machine. Nothing is sent
+  over the network, there is no API key and no rate limit. The **Local model** list shows what is installed; **Auto — best
+  installed** (the default) ranks the installed models and picks the best one that (1) fits in 60% of the computer's memory,
+  (2) can call tools (the chat needs them), (3) isn't very small (under 3B parameters), then the one with most parameters.
+  **Refresh models** re-reads the list after you `ollama pull` something. If the best model is too small or can't use tools,
+  the panel says so and suggests one to pull (e.g. `ollama pull qwen3:8b`). Nothing is downloaded automatically.
+  - *Always local:* the address (`OLLAMA_URL` in `backend/.env`, default `http://127.0.0.1:11434`) must be this computer
+    (localhost, 127.x or ::1) — anything else is refused on every call; local traffic bypasses any corporate proxy; and Ollama
+    **cloud** models (names ending `-cloud`/`:cloud`, or listed with a remote host) are hidden and rejected, because they run on
+    Ollama's servers, not here.
+  - *Tuned for local use:* a fixed 8,192-token context window (Ollama's default of 4,096 is too small for this tool's prompts),
+    the same smaller prompt budgets as Groq, one request at a time, thinking switched off for reasoning models (it is slow on a
+    CPU; GPT-OSS can only be set to "low"), JSON answers constrained by the schema with one retry, and a generous
+    `OLLAMA_TIMEOUT` (default 900 s) per answer.
+  - *What to expect:* answers come from a much smaller model than Claude's, so quality for scoring, housekeeping and reference
+    documents will be lower — and a 270M-parameter model (the only one installed when this was added) is not usable for real work.
+    A CPU-only machine needs roughly 1–3 minutes per scored table with an 8B model. Prefer Claude when quality matters; use Ollama
+    when data must not leave the computer.
 
 How it works: `backend/llm.py` is the only module that talks to an AI provider. The other
 modules call `llm.structured()` (JSON answers: scoring, housekeeping, SAP for Me),
 `llm.text()` (reference document) and `llm.run_tool_loop()` (chat, with the SAP tools); the
 selection is read from `llm_settings.json` on each call. A scoring run reads it once at the
 start, so switching mid-run can't mix two models in one result set. Endpoints:
-`GET/POST /api/llm/settings`, `GET /api/llm/usage`, `POST /api/llm/test`.
+`GET/POST /api/llm/settings` (GET also returns the Ollama models; `?refresh_ollama=true` re-reads them), `GET /api/llm/usage`, `POST /api/llm/test`.
 
 **What to expect on the Groq free tier** (limits per model, from Groq's docs: 30 requests/min,
 **8,000 tokens/min**, 1,000 requests/day, **200,000 tokens/day**):
@@ -478,6 +497,12 @@ start, so switching mid-run can't mix two models in one result set. Endpoints:
   rows are sent to Groq instead of Anthropic. Check this against the client's data-handling
   rules and Groq's free-tier data terms first.
 
+Ollama verification: checked **live** against Ollama 0.34 with `gemma3:270m` (the only model installed): model listing,
+automatic pick, test call, schema-constrained JSON, usage count, cloud/uninstalled models rejected. Ranking with several models,
+cloud filtering, thinking switch-off, retry on bad JSON, the tool loop, the non-local address refusal and Ollama being down were
+checked offline with a fake server. **Not yet run:** a real 7–8B model, the chat's tool loop against a real model, and a full
+scoring run — pull a model and compare before relying on it.
+
 Verification status: the Groq path works with a live key (confirmed by the team after the
 first run). The request shape, strict JSON-schema output, retries, daily-limit abort and
 tool calls were also checked offline with fake clients. Still open: how Groq's answers
@@ -490,7 +515,7 @@ The **SAP Assistant** is a chat column on the right of the app (`frontend/src/co
 that is always visible, on every task and whether or not SAP is connected. It answers from, in order of
 authority: (1) the **DVM Guide**, (2) **SAP for Me**, (3) the **live SAP system**, (4) the user's current
 scored results, and last (5) the model's own SAP knowledge, which it must label as general knowledge. It uses
-whichever AI model is selected in the sidebar (see [AI model selection](#ai-model-selection-claude-or-groq)).
+whichever AI model is selected in the sidebar (see [AI model selection](#ai-model-selection-claude-groq-or-ollama)).
 Example questions are offered as buttons, and **Clear** resets the conversation.
 
 When **Find Archiving Objects for Tables** has scored results, they are shared with the assistant
@@ -980,7 +1005,7 @@ Key endpoints:
 | POST | `/api/sap-for-me/credentials/select` | Make a saved SAP for Me account active (body: `{email}`) |
 | POST | `/api/sap-for-me/credentials/delete` | Remove a saved SAP for Me account (same body) |
 | GET | `/api/llm/settings` | Active AI provider/model, the Groq models offered and Groq's free-tier limits (API keys are never returned, only whether each is set in `backend/.env`) |
-| POST | `/api/llm/settings` | Choose the AI model for every AI step (body: `{provider: "anthropic"\|"groq", model}`); API keys come from `backend/.env`, not this call |
+| POST | `/api/llm/settings` | Choose the AI model for every AI step (body: `{provider: "anthropic"\|"groq"\|"ollama", model}` (Ollama: empty model = Auto); API keys come from `backend/.env`, not this call |
 | GET | `/api/llm/usage` | Today's request/token count for the active model |
 | POST | `/api/llm/test` | One tiny call to check the saved key and model work |
 | POST | `/api/chat` | One chat turn over scored results (body: `{message, scored_rows, recommended, history}`); returns `{reply, updated_rows, updated_recommended}` — the last two are `null` unless Claude changed a result |

@@ -40,6 +40,12 @@ SCORING_MODEL = os.getenv("SCORING_MODEL", "claude-haiku-4-5")
 # The key is read only from backend/.env -- the app never asks for or stores it.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+# Ollama (models that run on THIS computer, chosen in the "AI Model" panel). The address must be this
+# machine (localhost / 127.x / ::1): the app refuses any other host so nothing leaves the computer.
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+# Seconds to wait for one local answer. CPU-only machines are slow, so this is generous.
+OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "900"))
+
 # SAP for Me portal scraping (housekeeping-program fallback lookup). Headless
 # by default; flip to "false" to watch the browser while debugging selectors.
 SAP_FOR_ME_HEADLESS = os.getenv("SAP_FOR_ME_HEADLESS", "true").lower() != "false"

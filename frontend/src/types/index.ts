@@ -223,8 +223,41 @@ export interface LlmLimits {
   tpd: number;
 }
 
+export interface OllamaModel {
+  id: string;
+  size_gb: number;
+  params: string;
+  /** can call tools (the chat assistant needs this) */
+  tools: boolean;
+  /** fits in this computer's memory */
+  fits: boolean;
+  /** too few parameters to give reliable answers */
+  too_small: boolean;
+  /** what "Auto" would use */
+  best: boolean;
+}
+
+/** Models installed in Ollama on this computer (nothing here ever leaves it). */
+export interface OllamaInfo {
+  url: string;
+  reachable: boolean;
+  error: string;
+  /** advice to show: Ollama not running, no model installed, or the best one is too small */
+  notice: string;
+  models: OllamaModel[];
+  auto_model: string;
+  /** cloud models Ollama lists that were left out because they don't run locally */
+  hidden_cloud: number;
+  ram_gb: number | null;
+  /** models worth pulling, best first */
+  suggested: string[];
+}
+
 export interface LlmSettings {
-  provider: "anthropic" | "groq";
+  provider: "anthropic" | "groq" | "ollama";
+  /** Ollama: the chosen model, "" for Auto */
+  ollama_model: string;
+  ollama: OllamaInfo;
   model: string;
   label: string;
   claude_model: string;
@@ -235,7 +268,7 @@ export interface LlmSettings {
 }
 
 export interface LlmUsage {
-  provider: "anthropic" | "groq";
+  provider: "anthropic" | "groq" | "ollama";
   model: string;
   date: string;
   requests: number;

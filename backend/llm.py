@@ -16,9 +16,15 @@ Providers:
     per-minute 429s, (c) uses smaller prompt budgets (see budget()), and (d) raises
     a clear LLMRateLimitError(daily=True) when a daily limit is hit, so callers can
     stop with a message instead of quietly producing blank results.
+  * "ollama" -- a model running on THIS computer through Ollama. Nothing is sent over
+    the network: the address must be localhost (checked on every call), models that
+    Ollama would run in its cloud are never offered, and "Auto" picks the best
+    installed model that fits the computer's memory. No rate limits, but small
+    prompt budgets and one request at a time, since local inference is slow.
 """
 
 import copy
+import ipaddress
 import json
 import logging
 import re
@@ -27,8 +33,10 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable, Optional
+from urllib.parse import urlparse
 
 import anthropic
+import httpx
 from pydantic import BaseModel, ValidationError
 
 from config import (
@@ -36,6 +44,8 @@ from config import (
     GROQ_API_KEY,
     LLM_SETTINGS_FILE,
     LLM_USAGE_FILE,
+    OLLAMA_TIMEOUT,
+    OLLAMA_URL,
     SCORING_MODEL,
 )
 
@@ -43,6 +53,8 @@ logger = logging.getLogger(__name__)
 
 CLAUDE = "anthropic"
 GROQ = "groq"
+OLLAMA = "ollama"
+PROVIDERS = (CLAUDE, GROQ, OLLAMA)
 
 # (model id, label). Kept in one place so adding/removing a model is a one-line change.
 GROQ_MODELS = (
@@ -56,6 +68,14 @@ GROQ_LIMITS = {"rpm": 30, "tpm": 8000, "rpd": 1000, "tpd": 200000}
 TPM_HEADROOM = 0.85       # plan to use at most this share of the per-minute token budget
 GROQ_MAX_OUT = 4000       # cap on completion tokens requested from Groq
 MAX_RATE_RETRIES = 6
+
+OLLAMA_NUM_CTX = 8192      # context window requested from Ollama (its own default, 4,096, is too small here)
+OLLAMA_MAX_OUT = 3000      # cap on tokens generated per answer
+OLLAMA_RAM_SHARE = 0.6     # a model's file must fit in this share of the computer's memory (CPU inference)
+OLLAMA_MIN_USEFUL_B = 3.0  # below this many billion parameters a model is too small for this tool's JSON steps
+OLLAMA_CACHE_SECONDS = 15
+# Models worth pulling (name, approximate download in GB), best first -- only those that fit are suggested.
+OLLAMA_SUGGESTED = (("qwen3:14b", 9.3), ("qwen3:8b", 5.2), ("llama3.1:8b", 4.9), ("qwen3:4b", 2.6))
 
 
 # ---------------------------------------------------------------------------
@@ -98,32 +118,57 @@ class Settings:
     provider: str
     model: str
     groq_api_key: str = ""
+    ollama_auto: bool = False   # Ollama: the model was picked automatically (best installed)
+
+
+def _read_settings_file() -> dict:
+    if LLM_SETTINGS_FILE.exists():
+        try:
+            return json.loads(LLM_SETTINGS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Could not read %s; using defaults.", LLM_SETTINGS_FILE)
+    return {}
 
 
 def load_settings() -> Settings:
-    data: dict = {}
-    if LLM_SETTINGS_FILE.exists():
-        try:
-            data = json.loads(LLM_SETTINGS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            logger.warning("Could not read %s; using defaults.", LLM_SETTINGS_FILE)
-    provider = data.get("provider") if data.get("provider") in (CLAUDE, GROQ) else CLAUDE
+    data = _read_settings_file()
+    provider = data.get("provider") if data.get("provider") in PROVIDERS else CLAUDE
+    auto = False
     if provider == GROQ:
         model = data.get("model") if data.get("model") in GROQ_MODEL_IDS else GROQ_MODEL_IDS[0]
+    elif provider == OLLAMA:
+        model = str(data.get("model") or "").strip()
+        if not model:   # "Auto": the best model installed right now
+            auto = True
+            model = _best_local_model()
     else:
         model = SCORING_MODEL
     # The Groq key comes only from backend/.env (GROQ_API_KEY) -- the app never stores it.
-    return Settings(provider, model, (GROQ_API_KEY or "").strip())
+    return Settings(provider, model, (GROQ_API_KEY or "").strip(), auto)
 
 
 def save_settings(provider: str, model: str) -> Settings:
     """Validate and persist the provider/model selection. API keys are not handled
-    here: they are read from backend/.env only."""
-    if provider not in (CLAUDE, GROQ):
+    here: they are read from backend/.env only. For Ollama, *model* "" means Auto."""
+    if provider not in PROVIDERS:
         raise ValueError(f"Unknown provider '{provider}'.")
     if provider == GROQ and model not in GROQ_MODEL_IDS:
         raise ValueError(f"Unsupported Groq model '{model}'.")
-    stored_model = model if provider == GROQ else SCORING_MODEL
+    if provider == GROQ:
+        stored_model = model
+    elif provider == OLLAMA:
+        stored_model = (model or "").strip()
+        if stored_model:
+            if _is_cloud_name(stored_model):
+                raise ValueError(f"'{stored_model}' runs in Ollama's cloud, not on this computer. Pick a local model.")
+            try:
+                info = ollama_models(refresh=True)
+            except LLMError as exc:
+                raise ValueError(str(exc)) from exc
+            if info["reachable"] and stored_model not in [m["id"] for m in info["models"]]:
+                raise ValueError(f"'{stored_model}' is not installed locally. Run: ollama pull {stored_model}")
+    else:
+        stored_model = SCORING_MODEL
     LLM_SETTINGS_FILE.write_text(
         json.dumps({"provider": provider, "model": stored_model}, indent=2), encoding="utf-8"
     )
@@ -136,11 +181,15 @@ def label(settings: Optional[Settings] = None) -> str:
     if s.provider == GROQ:
         name = dict(GROQ_MODELS).get(s.model, s.model)
         return f"Groq · {name}"
+    if s.provider == OLLAMA:
+        return f"Ollama · {s.model or 'no local model'} (this computer)" + (" · auto" if s.ollama_auto else "")
     return f"Claude · {s.model}"
 
 
-def public_settings() -> dict:
+def public_settings(refresh_ollama: bool = False) -> dict:
     """Settings for the UI. API keys are never returned, only whether each is set in backend/.env."""
+    if refresh_ollama:
+        ollama_models(refresh=True)
     s = load_settings()
     return {
         "provider": s.provider,
@@ -151,6 +200,8 @@ def public_settings() -> dict:
         "groq_key_configured": bool(s.groq_api_key),
         "groq_models": [{"id": i, "label": l} for i, l in GROQ_MODELS],
         "groq_limits": GROQ_LIMITS,
+        "ollama_model": "" if s.ollama_auto else (s.model if s.provider == OLLAMA else ""),
+        "ollama": ollama_overview(),
     }
 
 
@@ -161,6 +212,8 @@ def not_configured_message(settings: Optional[Settings] = None) -> Optional[str]
         if not s.groq_api_key:
             return "GROQ_API_KEY is not set. Add it to backend/.env and restart the backend."
         return None
+    if s.provider == OLLAMA:
+        return _ollama_not_ready(s)
     if not ANTHROPIC_API_KEY:
         return "ANTHROPIC_API_KEY is not set. Add it to backend/.env and restart the backend."
     return None
@@ -170,7 +223,7 @@ def budget(settings: Optional[Settings] = None) -> dict:
     """Prompt-size caps. Claude values equal the app's original limits; Groq values are
     smaller so a single request stays well inside the 8,000 tokens/minute free-tier cap."""
     s = settings or load_settings()
-    if s.provider == GROQ:
+    if s.provider in (GROQ, OLLAMA):   # both work with small windows (Groq: token cap; Ollama: context size)
         return {
             "dvm_excerpt_chars": 3000,
             "article_chars": 3000,
@@ -190,9 +243,10 @@ def budget(settings: Optional[Settings] = None) -> dict:
 
 
 def max_workers(settings: Optional[Settings] = None) -> int:
-    """Parallel requests for batch steps. Groq's per-minute cap makes more than a couple pointless."""
+    """Parallel requests for batch steps. Groq's per-minute cap makes more than a couple pointless;
+    a local model answers one request at a time anyway, so more would only queue up and time out."""
     s = settings or load_settings()
-    return 2 if s.provider == GROQ else 8
+    return {GROQ: 2, OLLAMA: 1}.get(s.provider, 8)
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +663,371 @@ def _groq_tool_loop(
 
 
 # ---------------------------------------------------------------------------
+# Ollama backend (runs on this computer)
+# ---------------------------------------------------------------------------
+
+_ollama_lock = threading.Lock()
+_ollama_cache: dict[str, Any] = {"at": 0.0, "result": None}
+_ollama_caps: dict[str, Optional[list]] = {}   # model digest -> capabilities (None = server doesn't say)
+
+
+def _ollama_base() -> str:
+    """The Ollama address, only if it is this computer. Anything else is refused, so a wrong OLLAMA_URL can
+    never send prompts (table names, SAP content) to another machine."""
+    url = (OLLAMA_URL or "").strip().rstrip("/") or "http://127.0.0.1:11434"
+    if "://" not in url:
+        url = "http://" + url
+    host = (urlparse(url).hostname or "").lower()
+    local = host == "localhost"
+    if not local:
+        try:
+            local = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            local = False
+    if not local:
+        raise LLMNotConfiguredError(
+            f"OLLAMA_URL points to '{host}', which is not this computer. For privacy the app only uses Ollama on "
+            "localhost. Set OLLAMA_URL=http://127.0.0.1:11434 in backend/.env (or remove it)."
+        )
+    return url
+
+
+def _ollama_request(method: str, path: str, payload: Optional[dict] = None, timeout: float = 10.0):
+    base = _ollama_base()
+    try:
+        # trust_env=False: never send local traffic through a corporate proxy
+        with httpx.Client(timeout=httpx.Timeout(timeout, connect=3.0), trust_env=False) as client:
+            response = client.request(method, base + path, json=payload)
+    except httpx.ConnectError as exc:
+        raise LLMError(
+            f"Could not reach Ollama at {base}. Start the Ollama app (or run 'ollama serve') and try again."
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise LLMError(
+            f"Ollama did not answer within {int(timeout)}s. The model is probably too big for this computer "
+            "(or still loading) - pick a smaller model in the AI Model panel."
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise LLMError(f"Ollama request failed: {exc}") from exc
+    if response.status_code >= 400:
+        try:
+            detail = str(response.json().get("error") or response.text)
+        except Exception:
+            detail = response.text
+        detail = detail.strip()[:300]
+        if response.status_code == 404 and "not found" in detail.lower():
+            name = (payload or {}).get("model", "the model")
+            raise LLMError(f"Ollama does not have '{name}' installed. Run: ollama pull {name}")
+        if response.status_code == 400:
+            raise LLMBadRequestError(f"Ollama rejected the request: {detail}")
+        raise LLMError(f"Ollama error {response.status_code}: {detail}")
+    return response.json()
+
+
+def _is_cloud_name(name: str) -> bool:
+    n = (name or "").lower()
+    return n.endswith(":cloud") or n.endswith("-cloud")
+
+
+def _total_ram_bytes() -> Optional[int]:
+    try:
+        import ctypes
+
+        class _MemStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemStatus()
+        status.dwLength = ctypes.sizeof(status)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))  # type: ignore[attr-defined]
+        return int(status.ullTotalPhys) or None
+    except Exception:
+        return None
+
+
+def _billions(text: str) -> float:
+    m = re.match(r"\s*([\d.]+)\s*([KMBT]?)", str(text or ""), re.IGNORECASE)
+    if not m:
+        return 0.0
+    return float(m.group(1)) * {"": 1e-9, "K": 1e-6, "M": 1e-3, "B": 1.0, "T": 1e3}[m.group(2).upper()]
+
+
+def _capabilities(entry: dict) -> Optional[list]:
+    caps = entry.get("capabilities")
+    if isinstance(caps, list):
+        return [str(c) for c in caps]
+    digest = entry.get("digest", entry.get("name"))
+    if digest not in _ollama_caps:
+        try:
+            shown = _ollama_request("POST", "/api/show", {"model": entry["name"]}, timeout=10)
+            c = shown.get("capabilities")
+            _ollama_caps[digest] = [str(x) for x in c] if isinstance(c, list) else None
+        except LLMError:
+            _ollama_caps[digest] = None
+    return _ollama_caps[digest]
+
+
+def _rank_key(m: dict) -> tuple:
+    # fits in memory > can use tools (the chat needs them) > big enough to be useful > more parameters > newer
+    return (m["fits"], m["tools"], not m["too_small"], m["params_b"], m["modified"])
+
+
+def ollama_models(refresh: bool = False) -> dict:
+    """The models installed on this computer: {"reachable", "error", "models": [...], "hidden_cloud": n,
+    "ram_gb"}. Cached for a few seconds. Models Ollama would run in its cloud are left out.
+    Raises LLMNotConfiguredError if OLLAMA_URL is not this computer (checked even for a cached answer)."""
+    _ollama_base()
+    with _ollama_lock:
+        cached = _ollama_cache["result"]
+        if cached is not None and not refresh and time.monotonic() - _ollama_cache["at"] < OLLAMA_CACHE_SECONDS:
+            return cached
+    result: dict = {"reachable": False, "error": "", "models": [], "hidden_cloud": 0, "ram_gb": None}
+    ram = _total_ram_bytes()
+    if ram:
+        result["ram_gb"] = round(ram / 1024 ** 3, 1)
+    try:
+        tags = _ollama_request("GET", "/api/tags", timeout=10)
+        result["reachable"] = True
+        for entry in tags.get("models", []):
+            name = entry.get("name") or entry.get("model") or ""
+            if not name:
+                continue
+            if _is_cloud_name(name) or entry.get("remote_host") or entry.get("remote_model"):
+                result["hidden_cloud"] += 1
+                continue
+            caps = _capabilities({**entry, "name": name})
+            details = entry.get("details") or {}
+            size = int(entry.get("size") or 0)
+            params_b = _billions(details.get("parameter_size", ""))
+            usable = caps is None or "completion" in caps
+            if not usable:   # embedding-only models cannot answer questions
+                continue
+            result["models"].append({
+                "id": name,
+                "size_gb": round(size / 1024 ** 3, 1),
+                "params": details.get("parameter_size", ""),
+                "params_b": params_b,
+                "quantization": details.get("quantization_level", ""),
+                "context": int(details.get("context_length") or 0) or None,
+                "tools": bool(caps and "tools" in caps),
+                "thinking": bool(caps and "thinking" in caps),
+                "fits": not ram or not size or size <= ram * OLLAMA_RAM_SHARE,
+                "too_small": 0 < params_b < OLLAMA_MIN_USEFUL_B,
+                "modified": str(entry.get("modified_at") or ""),
+            })
+        result["models"].sort(key=_rank_key, reverse=True)
+    except LLMError as exc:
+        result["error"] = str(exc)
+    with _ollama_lock:
+        _ollama_cache.update(at=time.monotonic(), result=result)
+    return result
+
+
+def _best_local_model() -> str:
+    """The model "Auto" uses: the highest ranked installed one ('' if there is none or Ollama is down)."""
+    try:
+        models = ollama_models()["models"]
+    except LLMError:
+        return ""
+    return models[0]["id"] if models else ""
+
+
+def _ollama_model_info(model: str) -> Optional[dict]:
+    return next((m for m in ollama_models()["models"] if m["id"] == model), None)
+
+
+def _ollama_not_ready(s: Settings) -> Optional[str]:
+    try:
+        info = ollama_models()
+    except LLMError as exc:   # e.g. OLLAMA_URL is not local
+        return str(exc)
+    if not info["reachable"]:
+        return info["error"]
+    if not s.model:
+        return "No local model is installed in Ollama. Run: ollama pull " + _suggested_pulls(info)[0]
+    if _is_cloud_name(s.model):
+        return f"'{s.model}' runs in Ollama's cloud, not on this computer. Pick a local model."
+    if s.model not in [m["id"] for m in info["models"]]:
+        return f"'{s.model}' is not installed in Ollama. Run: ollama pull {s.model}"
+    return None
+
+
+def _suggested_pulls(info: dict) -> list[str]:
+    ram = info.get("ram_gb")
+    fit = [name for name, gb in OLLAMA_SUGGESTED if not ram or gb <= ram * OLLAMA_RAM_SHARE]
+    return fit[:2] or [OLLAMA_SUGGESTED[-1][0]]
+
+
+def ollama_overview() -> dict:
+    """What the AI Model panel shows for Ollama: the local models, the automatic pick, and advice."""
+    try:
+        info = ollama_models()
+    except LLMError as exc:
+        info = {"reachable": False, "error": str(exc), "models": [], "hidden_cloud": 0, "ram_gb": None}
+    models = info["models"]
+    best = models[0] if models else None
+    notice = ""
+    if not info["reachable"]:
+        notice = info["error"]
+    elif not models:
+        notice = "No local model is installed yet. Run: ollama pull " + _suggested_pulls(info)[0]
+    elif best["too_small"] or not best["tools"]:
+        why = "too small to give reliable results" if best["too_small"] else "unable to use tools (the chat needs them)"
+        notice = (f"The best installed model ({best['id']}) is {why}. "
+                  "For better answers run: ollama pull " + _suggested_pulls(info)[0])
+    return {
+        "url": _safe_url(),
+        "reachable": info["reachable"],
+        "error": info["error"],
+        "notice": notice,
+        "models": [
+            {k: m[k] for k in ("id", "size_gb", "params", "tools", "fits", "too_small")} | {"best": m is best}
+            for m in models
+        ],
+        "auto_model": best["id"] if best else "",
+        "hidden_cloud": info["hidden_cloud"],
+        "ram_gb": info["ram_gb"],
+        "suggested": _suggested_pulls(info),
+    }
+
+
+def _safe_url() -> str:
+    try:
+        return _ollama_base()
+    except LLMNotConfiguredError:
+        return OLLAMA_URL
+
+
+_THINK_TAGS = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _ollama_chat(
+    settings: Settings,
+    messages: list,
+    *,
+    max_tokens: int,
+    schema: Optional[dict] = None,
+    tools: Optional[list] = None,
+) -> dict:
+    model = settings.model
+    info = _ollama_model_info(model) or {}
+    ctx = min(OLLAMA_NUM_CTX, info.get("context") or OLLAMA_NUM_CTX)
+    est_in = _estimate_tokens(messages, tools)
+    if est_in + 300 > ctx:
+        raise LLMTooLargeError(
+            f"This request is about {est_in:,} tokens, more than the {ctx:,}-token window used for the local model. "
+            "Use a smaller input or switch to Claude."
+        )
+    out_cap = max(200, min(max_tokens, OLLAMA_MAX_OUT, ctx - est_in - 100))
+    payload: dict[str, Any] = {
+        "model": model, "messages": messages, "stream": False, "keep_alive": "30m",
+        "options": {"temperature": 0, "num_ctx": ctx, "num_predict": out_cap},
+    }
+    if schema:
+        payload["format"] = schema
+    if tools:
+        payload["tools"] = tools
+    if info.get("thinking"):   # thinking tokens are slow on a local CPU; gpt-oss can only be turned down
+        payload["think"] = "low" if model.lower().startswith("gpt-oss") else False
+
+    data = _ollama_request("POST", "/api/chat", payload, timeout=OLLAMA_TIMEOUT)
+    _record_usage(model, int(data.get("prompt_eval_count") or 0) + int(data.get("eval_count") or 0))
+    return data
+
+
+def _ollama_content(data: dict) -> str:
+    return _THINK_TAGS.sub("", (data.get("message") or {}).get("content") or "").strip()
+
+
+def _ollama_structured(settings: Settings, system: str, user: str, schema: type[BaseModel], max_tokens: int) -> BaseModel:
+    json_schema = _strict_schema(schema)
+    messages: list[dict] = [
+        {"role": "system", "content": system + "\n\nReply with ONLY a JSON object matching this JSON Schema:\n"
+         + json.dumps(json_schema)},
+        {"role": "user", "content": user},
+    ]
+    for attempt in range(2):
+        data = _ollama_chat(settings, messages, max_tokens=max_tokens, schema=json_schema)
+        content = _ollama_content(data)
+        if data.get("done_reason") == "length":
+            raise LLMError(
+                "The local model's answer was cut off before it finished (output limit reached). "
+                "Try fewer items at a time, pick a larger model, or switch to Claude."
+            )
+        try:
+            return schema.model_validate(_parse_json(content))
+        except (json.JSONDecodeError, ValidationError) as exc:
+            if attempt == 1:
+                raise LLMError(
+                    f"The local model returned an answer in the wrong format: {str(exc).splitlines()[0][:200]}. "
+                    "Small models do this often - pick a larger one or switch to Claude."
+                ) from exc
+            messages = messages + [
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": "That did not match the required JSON format "
+                 f"({str(exc).splitlines()[0][:200]}). Reply again with ONLY the corrected JSON."},
+            ]
+    raise LLMError("The model did not return a usable answer.")
+
+
+def _ollama_text(settings: Settings, system: str, user: str, max_tokens: int) -> str:
+    messages: list[dict] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
+    return _ollama_content(_ollama_chat(settings, messages, max_tokens=max_tokens))
+
+
+def _ollama_tool_loop(
+    settings: Settings,
+    system: str,
+    history: list[dict],
+    tools: list[dict],
+    execute_tool: Callable[[str, dict], str],
+    max_rounds: int,
+) -> Optional[str]:
+    info = _ollama_model_info(settings.model)
+    if info is not None and not info["tools"]:
+        raise LLMError(
+            f"'{settings.model}' cannot call tools, which the chat assistant needs. Pick a local model that supports "
+            f"tools (for example: ollama pull {_suggested_pulls(ollama_models())[0]}) or switch to Claude."
+        )
+    oa_tools = [
+        {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
+        for t in tools
+    ]
+    messages: list[dict] = [{"role": "system", "content": system}] + list(history)
+
+    for _ in range(max_rounds):
+        data = _ollama_chat(settings, messages, max_tokens=1500, tools=oa_tools)
+        message = data.get("message") or {}
+        calls = message.get("tool_calls") or []
+        if not calls:
+            return _ollama_content(data)
+
+        messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
+        for call in calls:
+            fn = call.get("function") or {}
+            name = fn.get("name", "")
+            args = fn.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            logger.info("Chat tool call: %s(%s)", name, args)
+            messages.append({"role": "tool", "tool_name": name, "content": execute_tool(name, args)})
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Anthropic backend (behaviour identical to the pre-llm.py code)
 # ---------------------------------------------------------------------------
 
@@ -724,6 +1143,8 @@ def structured(
 ) -> BaseModel:
     """One call returning a validated *schema* instance."""
     s = _ready(settings)
+    if s.provider == OLLAMA:
+        return _ollama_structured(s, system, user, schema, max_tokens)
     if s.provider == GROQ:
         return _groq_structured(s, system, user, schema, max_tokens)
     return _anthropic_structured(s, system, user, schema, max_tokens)
@@ -734,6 +1155,8 @@ def text(
 ) -> str:
     """One call returning plain text."""
     s = _ready(settings)
+    if s.provider == OLLAMA:
+        return _ollama_text(s, system, user, max_tokens)
     if s.provider == GROQ:
         return _groq_text(s, system, user, max_tokens)
     return _anthropic_text(s, system, user, max_tokens)
@@ -751,6 +1174,8 @@ def run_tool_loop(
     *execute_tool(name, input)* runs a tool and returns its result as text. Returns the final
     reply, or None if *max_rounds* tool rounds were used without a final answer."""
     s = _ready(settings)
+    if s.provider == OLLAMA:
+        return _ollama_tool_loop(s, system, messages, tools, execute_tool, max_rounds)
     if s.provider == GROQ:
         return _groq_tool_loop(s, system, messages, tools, execute_tool, max_rounds)
     return _anthropic_tool_loop(s, system, messages, tools, execute_tool, max_rounds)

@@ -366,17 +366,17 @@ def delete_sap_for_me_credentials(req: SapForMeIdentity):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/llm/settings")
-def get_llm_settings():
-    """Active AI provider/model plus the options the UI can offer. API keys are never
-    returned, only whether each is set in backend/.env."""
-    return llm.public_settings()
+def get_llm_settings(refresh_ollama: bool = False):
+    """Active AI provider/model plus the options the UI can offer (including the models installed in
+    Ollama on this computer). API keys are never returned, only whether each is set in backend/.env."""
+    return llm.public_settings(refresh_ollama=refresh_ollama)
 
 
 @app.post("/api/llm/settings")
 def save_llm_settings(req: LlmSettingsRequest):
     """Choose the AI model used by scoring, housekeeping lookups, SAP for Me
-    extraction, reference-document analysis and chat. API keys are not accepted
-    here: they come from backend/.env."""
+    extraction, reference-document analysis and chat. For Ollama, an empty model means Auto (the best
+    model installed on this computer). API keys are not accepted here: they come from backend/.env."""
     try:
         llm.save_settings(req.provider, req.model)
     except ValueError as exc:
