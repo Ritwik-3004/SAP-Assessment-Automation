@@ -85,6 +85,7 @@ function PromptCard({
       <div className="ta-card">
         <div className="ta-card-header">{prompt.table} — which date / year / month fields should be analysed?</div>
         <div className="ta-card-body">
+          {prompt.note && <p className="tx-error">{prompt.note}</p>}
           <p className="tx-hint">
             These are the date, year and month (posting period) fields of the table. Tick the ones to add to the
             analysis variant (you will be asked about other fields next).
@@ -121,6 +122,7 @@ function PromptCard({
       <div className="ta-card">
         <div className="ta-card-header">{prompt.table} — add other fields to the analysis?</div>
         <div className="ta-card-body">
+          {prompt.note && <p className="tx-error">{prompt.note}</p>}
           <p className="tx-hint">
             {prompt.no_date_fields
               ? "This table has no date, year or month fields. "
@@ -142,6 +144,44 @@ function PromptCard({
               No, run with the selection
             </button>
             <button className="btn btn-secondary" onClick={onSkip}>Skip this table</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (prompt.kind === "redo_fields") {
+    return (
+      <div className="ta-card">
+        <div className="ta-card-header">{prompt.table} — re-run with additional fields</div>
+        <div className="ta-card-body">
+          <p className="tx-hint">
+            Already analysed (these are kept): <strong>{(prompt.previous ?? []).join(", ")}</strong>. Tick the fields to add;
+            the analysis is repeated with all of them and replaces this table's result in the Excel file. Date, year and month
+            fields are listed first, then suggested ones.
+          </p>
+          <FieldList
+            fields={prompt.fields ?? []}
+            picked={picked}
+            onToggle={toggle}
+            filter={filter}
+            onFilter={setFilter}
+          />
+          {(prompt.fields ?? []).some((f) => f.kind === "date" || f.kind === "period") && (
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+              <input type="checkbox" checked={groupByYear} onChange={(e) => setGroupByYear(e.target.checked)} />
+              Group any added dates by year (first 4 characters)
+            </label>
+          )}
+          <div className="action-row">
+            <button
+              className="btn btn-primary"
+              disabled={picked.size === 0}
+              onClick={() => onAnswer({ selected: Array.from(picked), group_by_year: groupByYear })}
+            >
+              {picked.size > 0 ? `Re-run with ${picked.size} more field${picked.size !== 1 ? "s" : ""}` : "Choose at least one field"}
+            </button>
+            <button className="btn btn-secondary" onClick={onSkip}>Cancel re-run</button>
           </div>
         </div>
       </div>
@@ -182,6 +222,7 @@ export default function TableAnalysisPanel() {
   const [snapshot, setSnapshot] = useState<TableAnalysisSnapshot | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
+  const [sheetGroupByYear, setSheetGroupByYear] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const active = snapshot?.status === "running" || snapshot?.status === "waiting";
@@ -242,7 +283,10 @@ export default function TableAnalysisPanel() {
     setStarting(true);
     setError("");
     try {
-      await api.tableAnalysisStart(mode === "upload" && localFile ? { file: localFile } : { filename: serverFile ?? "" });
+      await api.tableAnalysisStart(
+        mode === "upload" && localFile ? { file: localFile } : { filename: serverFile ?? "" },
+        sheetGroupByYear
+      );
       setSnapshot(await api.tableAnalysisProgress());
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Could not start the analysis");
@@ -258,6 +302,16 @@ export default function TableAnalysisPanel() {
       setSnapshot(await api.tableAnalysisProgress());
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Could not send the answer");
+    }
+  }
+
+  async function redoTable(table: string) {
+    setError("");
+    try {
+      await api.tableAnalysisRedo(table);
+      setSnapshot(await api.tableAnalysisProgress());
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not start the re-run");
     }
   }
 
@@ -296,9 +350,11 @@ export default function TableAnalysisPanel() {
     <div className="tx-panel">
       <div className="tx-description">
         <strong>Table Analysis</strong> — runs a table analysis (TAANA) for each header table. By default it uses the
-        file saved by <em>Find Header Tables</em>; you can also upload a different one. For each table the tool
-        reads its fields, shows you the date, year and month fields to choose from, then asks whether to add other fields
-        (such as company code or document type). It then creates an ad hoc analysis variant, runs it in the
+        file saved by <em>Find Header Tables</em>; you can also upload a different one. For each table the tool first
+        looks in the <em>Fields for TAANA</em> sheet: if the table is listed there, its fields are used and you are not
+        asked anything. Only for tables that aren't in the sheet does it read the table's fields and ask you to choose the
+        date, year and month fields, and whether to add other fields (such as company code or document type). When the
+        analysis is done you can re-run any table with additional fields. It then creates an ad hoc analysis variant, runs it in the
         background in SAP, and copies the result into <code>output/Table analysis.xlsx</code> (one sheet per
         table) before moving on to the next table. You answer the questions for all tables in a row: each table's analysis starts in the background as soon as you've chosen its fields, and the results are added to the Excel file as the jobs finish. Don't use SAP at the same time while it runs.
       </div>
@@ -369,6 +425,23 @@ export default function TableAnalysisPanel() {
           )}
         </div>
 
+        {snapshot?.fields_sheet && (
+          <p className="tx-hint" style={{ margin: 0 }}>
+            {snapshot.fields_sheet.problem
+              ? snapshot.fields_sheet.problem
+              : `Fields for TAANA sheet: ${snapshot.fields_sheet.tables} tables listed — those run without questions.`}
+          </p>
+        )}
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={sheetGroupByYear}
+            onChange={(e) => setSheetGroupByYear(e.target.checked)}
+            disabled={active}
+          />
+          Group date fields by year for tables taken from the sheet (far fewer rows than one per day)
+        </label>
+
         <button type="submit" className="btn btn-primary" disabled={!canStart}>
           {active ? "Analysis running…" : starting ? "Starting…" : "Start analysis"}
         </button>
@@ -378,7 +451,15 @@ export default function TableAnalysisPanel() {
 
       {snapshot && snapshot.status !== "idle" && (
         <div style={{ marginTop: 16 }}>
-          {active && (
+          {active && snapshot.mode === "redo" && (
+            <>
+              <div className="ref-doc-analyzing">
+                <span className="ref-doc-spinner" />
+                {snapshot.message ?? "Re-running with additional fields…"}
+              </div>
+            </>
+          )}
+          {active && snapshot.mode !== "redo" && (
             <>
               <ProgressBar
                 mode="determinate"
@@ -442,12 +523,19 @@ export default function TableAnalysisPanel() {
                       <tr key={r.table}>
                         <td><strong>{r.table}</strong></td>
                         <td><span className={`ta-status ${r.state}`}>{r.state}</span></td>
-                        <td>{r.fields.join(", ") || "—"}</td>
+                        <td>
+                          {r.fields.join(", ") || "—"}
+                          {r.source === "sheet" && <span className="ta-tag" style={{ marginLeft: 6 }}>from sheet</span>}
+                          {r.source === "re-run" && <span className="ta-tag" style={{ marginLeft: 6 }}>re-run</span>}
+                        </td>
                         <td>{r.state === "done" ? r.rows : "—"}</td>
                         <td>{r.note}</td>
                         <td>
                           {r.state === "running" && (
                             <button className="btn-link" onClick={() => stopWaiting(r.table)}>Stop waiting</button>
+                          )}
+                          {r.state === "done" && snapshot.status === "done" && (
+                            <button className="btn-link" onClick={() => redoTable(r.table)}>Add more fields…</button>
                           )}
                         </td>
                       </tr>

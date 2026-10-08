@@ -290,10 +290,11 @@ export const api = {
     }
     return res.blob();
   },
-  tableAnalysisStart: async (source: { filename?: string; file?: File }) => {
+  tableAnalysisStart: async (source: { filename?: string; file?: File }, groupByYear = true) => {
     const formData = new FormData();
     if (source.file) formData.append("file", source.file);
     if (source.filename) formData.append("filename", source.filename);
+    formData.append("group_by_year", groupByYear ? "true" : "false");
     const res = await fetch(`${BASE}/api/table-analysis/start`, { method: "POST", body: formData });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
@@ -305,6 +306,7 @@ export const api = {
     get<import("../types").TableAnalysisSnapshot>("/api/table-analysis/progress"),
   tableAnalysisAnswer: (promptId: number, answer: Record<string, unknown>) =>
     post<{ ok: boolean }>("/api/table-analysis/answer", { prompt_id: promptId, answer }),
+  tableAnalysisRedo: (table: string) => post<{ status: string }>("/api/table-analysis/redo", { table }),
   tableAnalysisSkip: () => post<{ ok: boolean }>("/api/table-analysis/skip", {}),
   tableAnalysisStopWaiting: (table: string) => post<{ ok: boolean }>("/api/table-analysis/stop-waiting", { table }),
   tableAnalysisCancel: () => post<{ ok: boolean }>("/api/table-analysis/cancel", {}),

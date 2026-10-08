@@ -62,3 +62,5 @@ llm_usage.json
 
 input
 output
+# Excel lock files
+~$*

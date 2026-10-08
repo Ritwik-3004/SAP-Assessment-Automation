@@ -949,10 +949,15 @@ class TableAnalysisAnswer(BaseModel):
 
 
 @app.post("/api/table-analysis/start")
-def start_table_analysis(file: UploadFile | None = File(None), filename: str = Form("")):
+def start_table_analysis(
+    file: UploadFile | None = File(None),
+    filename: str = Form(""),
+    group_by_year: bool = Form(True),
+):
     """Start the table analysis for the header tables in *file* (an upload) or in *filename* (a file
-    already in the output folder, e.g. header_tables_with_reference.xlsx). Returns immediately; poll
-    /progress and answer the questions it asks."""
+    already in the output folder, e.g. header_tables_with_reference.xlsx). Tables listed in
+    resources/Fields for TAANA.xlsx use the fields given there (dates grouped by year if *group_by_year*);
+    for the others the user is asked. Returns immediately; poll /progress and answer the questions it asks."""
     _require_connection()
     if table_analysis.job.is_active():
         raise HTTPException(status_code=409, detail="A table analysis is already running.")
@@ -975,7 +980,7 @@ def start_table_analysis(file: UploadFile | None = File(None), filename: str = F
         raise HTTPException(status_code=400, detail=f"Could not read the file: {exc}")
 
     try:
-        table_analysis.job.start(tables)
+        table_analysis.job.start(tables, group_by_year=group_by_year)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return {"status": "started", "total": len(tables), "tables": tables}
@@ -995,6 +1000,21 @@ def table_analysis_answer(req: TableAnalysisAnswer):
 
 class TableAnalysisStopWaiting(BaseModel):
     table: str
+
+
+class TableAnalysisRedo(BaseModel):
+    table: str
+
+
+@app.post("/api/table-analysis/redo")
+def table_analysis_redo(req: TableAnalysisRedo):
+    """Re-run an analysed table with additional fields (once the whole run is done). The user is asked which
+    fields to add; the earlier fields are kept and the table's result is replaced."""
+    try:
+        table_analysis.job.redo(req.table)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "started"}
 
 
 @app.post("/api/table-analysis/skip")

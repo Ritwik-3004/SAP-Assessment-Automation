@@ -4,12 +4,19 @@ Table analysis task: TAANA ad hoc analyses for the header tables of a header-tab
 For each table, in order:
   1. read the fields TAANA offers (transactions/taana_analysis.py) and the date/year-like ones
      (ABAP dictionary types, looked up once for all tables);
-  2. ask the user which DATE/YEAR/MONTH fields to analyse (and whether to group dates by year);
-  3. ask whether other fields (company code, document type, ...) should be added; if yes, ask which;
+  2. if the table is listed in resources/Fields for TAANA.xlsx, use the fields given there and skip the
+     questions; otherwise ask the user which DATE/YEAR/MONTH fields to analyse (and whether to group dates
+     by year);
+  3. (only for tables not in the sheet) ask whether other fields (company code, document type, ...) should
+     be added; if yes, ask which;
   4. create the ad hoc variant and schedule the analysis in the background (start immediately) -- then
      go straight on to the next table's questions, without waiting for the analysis;
   5. meanwhile a second track watches the scheduled jobs and, as each completes, copies its result grid
      into  output/Table analysis.xlsx.
+
+When the whole run is done, any analysed table can be re-run with additional fields (redo()): the user picks
+the extra fields, the analysis is repeated with the earlier fields plus the new ones, and the table's result
+in the workbook is replaced.
 
 The job runs on background threads and talks to the UI through a small state object: the UI polls
 snapshot() and answers the current question through answer(). Questions are asked between SAP steps, so
@@ -52,6 +59,59 @@ _YEAR_NAME = re.compile(r"(GJAHR|JAHR|YEAR|STJAH|FYEAR)")
 _YEAR_LABEL = re.compile(r"\b(year|yr|jahr)\b", re.IGNORECASE)
 _MONTH_NAME = re.compile(r"(MONAT|MONTH|MON$|^MON|_MON|SPBUP|POPER|BUPER|PERIO|PERID|PERBL|PERAB|PERBI)")
 _MONTH_LABEL = re.compile(r"\b(month|monat|period|periode)\b", re.IGNORECASE)
+
+
+FIELDS_SHEET = Path(__file__).parent / "resources" / "Fields for TAANA.xlsx"
+_sheet_cache: dict = {"mtime": None, "data": None}
+
+
+def load_fields_sheet() -> dict:
+    """The fields to analyse per table, from resources/Fields for TAANA.xlsx (re-read when the file changes).
+
+    The sheet needs a "Header Table" column (a "Table Name"/"Table" column also works) and one or more
+    columns whose title contains "field" (e.g. "Primary Date Field"); a cell may hold several fields
+    separated by commas, semicolons or line breaks. Rows for the same table are combined.
+
+    Returns {"tables": {TABLE: [FIELD, ...]}, "problem": str}; "problem" is non-empty (and "tables" empty)
+    if the sheet is missing or unusable -- the task then just asks the user, as it did before the sheet."""
+    try:
+        mtime = FIELDS_SHEET.stat().st_mtime
+    except OSError:
+        return {"tables": {}, "problem": f"The fields sheet was not found ({FIELDS_SHEET.name} in backend/resources)."}
+    if _sheet_cache["mtime"] == mtime and _sheet_cache["data"] is not None:
+        return _sheet_cache["data"]
+
+    data: dict = {"tables": {}, "problem": ""}
+    try:
+        wb = openpyxl.load_workbook(FIELDS_SHEET, read_only=True, data_only=True)
+        try:
+            ws = wb.worksheets[0]
+            rows = ws.iter_rows(values_only=True)
+            header = next(rows, None) or ()
+            table_col = next((i for i, h in enumerate(header) if _norm(h) in ("headertable", "tablename", "table")), None)
+            field_cols = [i for i, h in enumerate(header) if "field" in _norm(h)]
+            if table_col is None or not field_cols:
+                data["problem"] = "The fields sheet needs a 'Header Table' column and a column with 'Field' in its title."
+            else:
+                for row in rows:
+                    table = str(row[table_col] if table_col < len(row) and row[table_col] is not None else "").strip().upper()
+                    if not table or not _TABLE_NAME.match(table):
+                        continue
+                    names = data["tables"].setdefault(table, [])
+                    for col in field_cols:
+                        cell = row[col] if col < len(row) else None
+                        for part in re.split(r"[,;\n]+", str(cell or "")):
+                            name = part.strip().upper()
+                            if name and name not in names:
+                                names.append(name)
+                data["tables"] = {t: f for t, f in data["tables"].items() if f}
+        finally:
+            wb.close()
+    except Exception as exc:
+        logger.warning("Could not read the fields sheet: %s", exc)
+        data = {"tables": {}, "problem": f"The fields sheet could not be read ({exc})."}
+    _sheet_cache.update(mtime=mtime, data=data)
+    return data
 
 
 class _Skipped(Exception):
@@ -185,11 +245,15 @@ class TableAnalysisJob:
         self._lock = threading.RLock()
         self._answered = threading.Event()
         self._interactive_done = threading.Event()
+        self._group_by_year = True
+        self._types: dict = {}
+        self._types_known = False
         self._reset()
 
     def _reset(self) -> None:
         self._state = {
             "status": "idle",         # idle | running | waiting (for the user) | done | error
+            "mode": "run",            # "run", or "redo" while one table is re-run with additional fields
             "total": 0,
             "asked": 0,               # tables whose questions are answered (or that were skipped)
             "completed": 0,           # tables finished: analysed, skipped or failed
@@ -224,19 +288,43 @@ class TableAnalysisJob:
             ]
             state["running"] = sorted(self._pending, key=lambda t: self._index.get(t, 0))
             state["warnings"] = list(self._state["warnings"])
-            return state
+        sheet = load_fields_sheet()
+        state["fields_sheet"] = {"tables": len(sheet["tables"]), "problem": sheet["problem"]}
+        return state
 
     def is_active(self) -> bool:
         with self._lock:
             return self._state["status"] in ("running", "waiting")
 
-    def start(self, tables: list[str]) -> None:
+    def start(self, tables: list[str], group_by_year: bool = True) -> None:
+        """*group_by_year*: for tables taken from the fields sheet, group date fields by year."""
         with self._lock:
             if self._state["status"] in ("running", "waiting"):
                 raise RuntimeError("A table analysis is already running.")
             self._reset()
+            self._group_by_year = group_by_year
             self._state.update(status="running", total=len(tables), message="Starting…")
         threading.Thread(target=self._run, args=(tables,), daemon=True, name="table-analysis").start()
+
+    def redo(self, table: str) -> None:
+        """Re-run an analysed table with additional fields (only once the whole run is done): the user is asked
+        which extra fields to add, the earlier fields are kept, and the table's result is replaced."""
+        table = table.strip().upper()
+        with self._lock:
+            if self._state["status"] != "done":
+                raise RuntimeError("Wait until the analysis has finished before re-running a table.")
+            record = self._records.get(table)
+            if not record or record["state"] != "done" or not record.get("specs"):
+                raise RuntimeError(f"{table} has no finished analysis to re-run.")
+            self._cancel = False
+            self._skip = False
+            self._answered.clear()
+            self._interactive_done.clear()
+            self._state.update(
+                status="running", mode="redo", interactive_done=False, current=None,
+                message=f"Re-running {table} with additional fields…",
+            )
+        threading.Thread(target=self._run_redo, args=(table,), daemon=True, name="table-analysis-redo").start()
 
     def answer(self, prompt_id: int, answer: dict) -> bool:
         with self._lock:
@@ -311,6 +399,7 @@ class TableAnalysisJob:
             self._stop_waiting.discard(table)
             self._state["completed"] = sum(1 for r in self._records.values() if r["state"] != "running")
             if result is not None:
+                self._results = [r for r in self._results if r["table"] != table]   # a re-run replaces the old one
                 self._results.append({**result, "index": self._index.get(table, 0)})
         try:
             self._write_workbook()
@@ -328,6 +417,11 @@ class TableAnalysisJob:
             lookup = db02.run_get_field_types(tables)
             types_known = lookup.get("status") == "ok"
             all_types = lookup.get("types", {}) if types_known else {}
+            self._types, self._types_known = all_types, types_known
+            sheet = load_fields_sheet()
+            if sheet["problem"]:
+                with self._lock:
+                    self._state["warnings"].append(f"{sheet['problem']} You will be asked for every table's fields.")
             if not types_known:
                 with self._lock:
                     self._state["warnings"].append(
@@ -345,7 +439,7 @@ class TableAnalysisJob:
                     self._skip = False
                     self._index[table] = number
                 try:
-                    entry = self._submit(table, all_types.get(table, {}), types_known)
+                    entry = self._submit(table, all_types.get(table, {}), types_known, sheet["tables"].get(table))
                 except _Skipped as skipped:
                     self._finish(table, {"table": table, "state": "skipped", "fields": [], "rows": 0, "note": str(skipped)})
                 except _Cancelled:
@@ -358,7 +452,9 @@ class TableAnalysisJob:
                         self._pending[table] = entry
                         self._records[table] = {
                             "table": table, "state": "running", "fields": entry["fields"], "rows": 0,
-                            "note": "Job scheduled in SAP; waiting for it to finish.",
+                            "source": entry["source"], "specs": entry["specs"],
+                            "note": "Job scheduled in SAP; waiting for it to finish."
+                            + (f" {entry['sheet_note']}" if entry.get("sheet_note") else ""),
                         }
                 with self._lock:
                     self._state["asked"] = number
@@ -386,8 +482,11 @@ class TableAnalysisJob:
                 else "Finished."
             )
 
-    def _submit(self, table: str, types: dict, types_known: bool) -> dict:
-        """Ask the questions for *table* and schedule its SAP job. Returns the pending-job entry."""
+    def _submit(self, table: str, types: dict, types_known: bool, sheet_fields: Optional[list[str]] = None) -> dict:
+        """Work out the fields for *table* and schedule its SAP job. Returns the pending-job entry.
+
+        If the fields sheet lists the table, those fields are used and the user is NOT asked. The user is asked
+        only when the table is not in the sheet, or none of its fields exists in TAANA for this table."""
         self._step(table, "Reading the table's fields in TAANA…")
         listed = taana.list_fields(table)
         if listed["status"] != "ok":
@@ -395,42 +494,70 @@ class TableAnalysisJob:
         date_fields, other_fields = classify_fields(listed["fields"], types, types_known)
 
         specs: list[dict] = []
-        if date_fields:
-            self._step(table, "Waiting for you to choose the date/year/month fields", "Choose the date/year/month fields.")
-            answer = self._ask("date_fields", {
-                "table": table,
-                "fields": date_fields,
-                "can_group_by_year": any(f["kind"] in ("date", "period") for f in date_fields),
-            })
-            if answer.get("skip"):
-                raise _Skipped("Skipped by the user.")
-            by_name = {f["name"]: f for f in date_fields}
-            group = bool(answer.get("group_by_year"))
-            for name in answer.get("selected", []):
-                f = by_name.get(str(name).upper())
-                if f:
-                    specs.append({"name": f["name"], "year": group and f["kind"] in ("date", "period")})
+        source = "you"
+        sheet_note = ""
+        sheet_problem = ""
+        if sheet_fields:
+            offered = {f["name"].upper() for f in listed["fields"]}
+            kinds = {f["name"]: f["kind"] for f in date_fields}
+            usable = [n for n in sheet_fields if n in offered]
+            missing = [n for n in sheet_fields if n not in offered]
+            if usable:
+                specs = [
+                    {"name": n, "year": self._group_by_year and kinds.get(n) in ("date", "period")} for n in usable
+                ]
+                source = "sheet"
+                sheet_note = "Fields taken from the Fields for TAANA sheet."
+                if missing:
+                    sheet_note += f" Not offered by TAANA for this table and left out: {', '.join(missing)}."
+                self._step(table, f"Using the fields from the sheet: {', '.join(usable)}")
+            else:
+                sheet_problem = (
+                    f"The Fields for TAANA sheet lists {', '.join(sheet_fields)} for {table}, but TAANA does not "
+                    "offer any of them for this table, so please choose the fields."
+                )
 
-        self._step(table, "Waiting for you: add other fields?", "Add other fields?")
-        more = self._ask("more_fields", {
-            "table": table,
-            "no_date_fields": not date_fields,
-            "selected": [s["name"] for s in specs],
-            "has_other_fields": bool(other_fields),
-        })
-        if more.get("skip"):
-            raise _Skipped("Skipped by the user.")
-        if more.get("add") and other_fields:
-            self._step(table, "Waiting for you to choose the other fields", "Choose the other fields.")
-            picked = self._ask("other_fields", {"table": table, "fields": other_fields})
-            if picked.get("skip"):
+        if not specs:
+            if date_fields:
+                self._step(table, "Waiting for you to choose the date/year/month fields", "Choose the date/year/month fields.")
+                answer = self._ask("date_fields", {
+                    "table": table,
+                    "fields": date_fields,
+                    "can_group_by_year": any(f["kind"] in ("date", "period") for f in date_fields),
+                    "note": sheet_problem,
+                })
+                if answer.get("skip"):
+                    raise _Skipped("Skipped by the user.")
+                by_name = {f["name"]: f for f in date_fields}
+                group = bool(answer.get("group_by_year"))
+                for name in answer.get("selected", []):
+                    f = by_name.get(str(name).upper())
+                    if f:
+                        specs.append({"name": f["name"], "year": group and f["kind"] in ("date", "period")})
+
+            self._step(table, "Waiting for you: add other fields?", "Add other fields?")
+            more = self._ask("more_fields", {
+                "table": table,
+                "no_date_fields": not date_fields,
+                "selected": [s["name"] for s in specs],
+                "has_other_fields": bool(other_fields),
+                "note": sheet_problem if not date_fields else "",
+            })
+            if more.get("skip"):
                 raise _Skipped("Skipped by the user.")
-            valid = {f["name"] for f in other_fields}
-            specs += [{"name": str(n).upper(), "year": False} for n in picked.get("selected", []) if str(n).upper() in valid]
+            if more.get("add") and other_fields:
+                self._step(table, "Waiting for you to choose the other fields", "Choose the other fields.")
+                picked = self._ask("other_fields", {"table": table, "fields": other_fields})
+                if picked.get("skip"):
+                    raise _Skipped("Skipped by the user.")
+                valid = {f["name"] for f in other_fields}
+                specs += [{"name": str(n).upper(), "year": False} for n in picked.get("selected", []) if str(n).upper() in valid]
 
         if not specs:
             raise _Skipped("No fields were selected.")
+        return self._schedule(table, specs, source, sheet_note)
 
+    def _schedule(self, table: str, specs: list[dict], source: str, sheet_note: str = "", previous: Optional[dict] = None) -> dict:
         self._step(table, "Creating the ad hoc variant and starting the background job in SAP…")
         started = taana.start_analysis(table, specs)
         if started["status"] != "ok":
@@ -440,9 +567,93 @@ class TableAnalysisJob:
             "table": table,
             "before": started["before"],
             "fields": [s["name"] + ("(year)" if s["year"] else "") for s in specs],
+            "specs": specs,
+            "source": source,
+            "sheet_note": sheet_note,
+            "previous": previous,
             "submitted": now,
             "next_check": now + FIRST_POLL_SECONDS,
             "errors": 0,
+        }
+
+    # -- re-run with additional fields ------------------------------------------
+
+    def _submit_redo(self, table: str) -> dict:
+        with self._lock:
+            previous = dict(self._records[table])
+        old_specs = [dict(s) for s in previous["specs"]]
+        self._step(table, "Reading the table's fields in TAANA…", f"Re-running {table}: reading its fields…")
+        listed = taana.list_fields(table)
+        if listed["status"] != "ok":
+            raise RuntimeError(listed["message"])
+        date_fields, other_fields = classify_fields(listed["fields"], self._types.get(table, {}), self._types_known)
+        used = {s["name"] for s in old_specs}
+        offered = [f for f in date_fields if f["name"] not in used] + sorted(
+            (f for f in other_fields if f["name"] not in used), key=lambda f: not f["suggested"]
+        )
+        if not offered:
+            raise RuntimeError("There are no other fields left to add.")
+        self._step(table, "Waiting for you to choose the additional fields", "Choose the additional fields.")
+        answer = self._ask("redo_fields", {
+            "table": table,
+            "previous": [s["name"] + ("(year)" if s["year"] else "") for s in old_specs],
+            "fields": offered,
+            "can_group_by_year": any(f.get("kind") in ("date", "period") for f in offered),
+        })
+        if answer.get("skip"):
+            raise _Skipped("Re-run cancelled.")
+        by_name = {f["name"]: f for f in offered}
+        group = bool(answer.get("group_by_year"))
+        added = []
+        for name in answer.get("selected", []):
+            f = by_name.get(str(name).upper())
+            if f:
+                added.append({"name": f["name"], "year": group and f.get("kind") in ("date", "period")})
+        if not added:
+            raise _Skipped("No additional fields were selected; the previous result was kept.")
+        entry = self._schedule(table, old_specs + added, "re-run", "Re-run with additional fields: "
+                               + ", ".join(a["name"] for a in added) + ".", previous=previous)
+        return entry
+
+    def _run_redo(self, table: str) -> None:
+        collector = threading.Thread(target=self._collect, daemon=True, name="table-analysis-collector")
+        collector.start()
+        note = ""
+        try:
+            entry = self._submit_redo(table)
+        except (_Skipped, _Cancelled) as exc:
+            note = str(exc) or "Re-run cancelled."
+        except Exception as exc:
+            logger.exception("Re-run failed for %s", table)
+            note = f"Re-run failed: {exc}"
+        else:
+            with self._lock:
+                self._pending[table] = entry
+                self._records[table] = {
+                    **self._records[table], "state": "running", "fields": entry["fields"], "specs": entry["specs"],
+                    "source": "re-run", "note": f"Re-running in SAP. {entry['sheet_note']}",
+                }
+        if note:
+            with self._lock:
+                rec = self._records.get(table)
+                if rec is not None:
+                    rec["note"] = f"{note} The previous result was kept."
+        with self._lock:
+            self._state["current"] = None
+            self._state["interactive_done"] = True
+        self._interactive_done.set()
+        collector.join()
+        with self._lock:
+            self._state.update(status="done", mode="run", message="Re-run finished." if not note else note)
+
+    def _unsuccessful(self, entry: dict, state: str, note: str) -> dict:
+        """The record for a job that did not give a result. A re-run that fails keeps the previous result."""
+        previous = entry.get("previous")
+        if previous:
+            return {**previous, "note": f"{note} The previous result was kept."}
+        return {
+            "table": entry["table"], "state": state, "fields": entry["fields"], "specs": entry["specs"],
+            "source": entry["source"], "rows": 0, "note": note,
         }
 
     # -- collector track ------------------------------------------------------
@@ -463,10 +674,9 @@ class TableAnalysisJob:
                 continue
 
             for entry in [p for p in pending if p["table"] in stopped]:
-                self._finish(entry["table"], {
-                    "table": entry["table"], "state": "skipped", "fields": entry["fields"], "rows": 0,
-                    "note": "Stopped waiting; the job keeps running in SAP.",
-                })
+                self._finish(entry["table"], self._unsuccessful(
+                    entry, "skipped", "Stopped waiting; the job keeps running in SAP."
+                ))
 
             now = time.monotonic()
             due = [p for p in pending if p["table"] not in stopped and p["next_check"] <= now]
@@ -485,17 +695,18 @@ class TableAnalysisJob:
                     self._finish(
                         table,
                         {"table": table, "state": "done", "fields": entry["fields"], "rows": len(result["rows"]),
-                         "note": f"Analysis {result.get('status', 'completed')}."},
+                         "specs": entry["specs"], "source": entry["source"],
+                         "note": f"Analysis {result.get('status', 'completed')}."
+                         + (f" {entry['sheet_note']}" if entry.get("sheet_note") else "")},
                         {"table": table, "fields": entry["fields"], "started": result.get("started", ""),
                          "status": result.get("status", ""), "columns": result["columns"],
                          "column_ids": result["column_ids"], "rows": result["rows"]},
                     )
                     continue
                 if state == "failed":
-                    self._finish(table, {
-                        "table": table, "state": "failed", "fields": entry["fields"], "rows": 0,
-                        "note": f"The SAP analysis job ended with status '{result.get('status')}'.",
-                    })
+                    self._finish(table, self._unsuccessful(
+                        entry, "failed", f"The SAP analysis job ended with status '{result.get('status')}'."
+                    ))
                     continue
                 entry["errors"] = entry["errors"] + 1 if state == "error" else 0
                 if entry["errors"] >= MAX_CHECK_ERRORS or elapsed > MAX_WAIT_SECONDS:
@@ -504,9 +715,7 @@ class TableAnalysisJob:
                         if entry["errors"] >= MAX_CHECK_ERRORS
                         else f"The analysis did not finish within {_clock(MAX_WAIT_SECONDS)}."
                     )
-                    self._finish(table, {
-                        "table": table, "state": "failed", "fields": entry["fields"], "rows": 0, "note": reason,
-                    })
+                    self._finish(table, self._unsuccessful(entry, "failed", reason))
                     continue
                 entry["next_check"] = now + POLL_SECONDS
                 with self._lock:
@@ -524,15 +733,16 @@ class TableAnalysisJob:
         wb = openpyxl.Workbook()
         summary = wb.active
         summary.title = "Summary"
-        summary.append(["Table", "Result", "Fields analysed", "Result rows", "Analysis started", "Note"])
+        summary.append(["Table", "Result", "Fields analysed", "Fields chosen by", "Result rows", "Analysis started", "Note"])
         with self._lock:
             results = sorted(self._results, key=lambda r: r["index"])
             records = [dict(self._records[t]) for t in sorted(self._records, key=lambda t: self._index.get(t, 0))]
         started_by_table = {r["table"]: r["started"] for r in results}
         for r in records:
             summary.append([
-                r["table"], r["state"].capitalize(), ", ".join(r["fields"]), r["rows"],
-                started_by_table.get(r["table"], ""), r["note"],
+                r["table"], r["state"].capitalize(), ", ".join(r["fields"]),
+                {"sheet": "Fields for TAANA sheet", "re-run": "You (re-run with additional fields)"}.get(r.get("source", ""), "You"),
+                r["rows"], started_by_table.get(r["table"], ""), r["note"],
             ])
         self._style_header(summary, 1)
         self._autosize(summary)

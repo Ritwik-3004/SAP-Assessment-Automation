@@ -16,7 +16,11 @@ export interface TableAnalysisField {
 /** The question the table-analysis job is waiting for the user to answer. */
 export interface TableAnalysisPrompt {
   id: number;
-  kind: "date_fields" | "more_fields" | "other_fields";
+  kind: "date_fields" | "more_fields" | "other_fields" | "redo_fields";
+  /** a remark to show above the question (e.g. why the fields sheet could not be used) */
+  note?: string;
+  /** redo_fields: the fields already analysed, which are kept */
+  previous?: string[];
   table: string;
   fields?: TableAnalysisField[];
   can_group_by_year?: boolean;
@@ -29,12 +33,18 @@ export interface TableAnalysisRecord {
   table: string;
   state: "running" | "done" | "skipped" | "failed";
   fields: string[];
+  /** who chose the fields: the Fields for TAANA sheet, the user, or a re-run with additional fields */
+  source?: "sheet" | "you" | "re-run";
   rows: number;
   note: string;
 }
 
 export interface TableAnalysisSnapshot {
   status: "idle" | "running" | "waiting" | "done" | "error";
+  /** "redo" while one table is being re-run with additional fields */
+  mode?: "run" | "redo";
+  /** the Fields for TAANA sheet: how many tables it lists, or why it could not be used */
+  fields_sheet?: { tables: number; problem: string };
   total: number;
   /** tables whose questions are answered (or skipped) */
   asked: number;
