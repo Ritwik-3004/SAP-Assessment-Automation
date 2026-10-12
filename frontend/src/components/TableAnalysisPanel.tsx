@@ -231,7 +231,7 @@ export default function TableAnalysisPanel() {
     setLoadingFiles(true);
     try {
       const { files } = await api.getOutputFiles();
-      const spreadsheets = files.filter((f) => !f.startsWith("Table analysis"));
+      const spreadsheets = files.filter((f) => !f.startsWith("Table analysis") && !f.startsWith("Open item analysis"));
       setOutputFiles(spreadsheets);
       if (!serverFile) {
         setServerFile(spreadsheets.find((f) => f.startsWith("header_tables")) ?? spreadsheets[0] ?? null);

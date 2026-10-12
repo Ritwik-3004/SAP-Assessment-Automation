@@ -249,6 +249,31 @@ export const api = {
     return res.blob();
   },
 
+  openItemStart: async (source: { filename?: string; file?: File }) => {
+    const formData = new FormData();
+    if (source.file) formData.append("file", source.file);
+    if (source.filename) formData.append("filename", source.filename);
+    const res = await fetch(`${BASE}/api/open-item-analysis/start`, { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.json() as Promise<{ status: "started"; total: number; objects: string[] }>;
+  },
+  openItemProgress: () => get<import("../types").OpenItemSnapshot>("/api/open-item-analysis/progress"),
+  openItemResult: (object: string) =>
+    get<import("../types").OpenItemResult>(`/api/open-item-analysis/result?object=${encodeURIComponent(object)}`),
+  openItemRunQuery: (object: string, query: string) =>
+    post<{ status: string }>("/api/open-item-analysis/query", { object, query }),
+  openItemCancel: () => post<{ ok: boolean }>("/api/open-item-analysis/cancel", {}),
+  openItemDownload: async () => {
+    const res = await fetch(`${BASE}/api/open-item-analysis/download`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.blob();
+  },
   objectAnalysisStart: async (source: { filename?: string; file?: File }) => {
     const formData = new FormData();
     if (source.file) formData.append("file", source.file);

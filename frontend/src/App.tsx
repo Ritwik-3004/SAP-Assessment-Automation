@@ -7,9 +7,11 @@ import GenerateTableListPanel from "./components/GenerateTableListPanel";
 import HeaderTablePanel from "./components/HeaderTablePanel";
 import TableAnalysisPanel from "./components/TableAnalysisPanel";
 import ObjectAnalysisPanel from "./components/ObjectAnalysisPanel";
+import OpenItemAnalysisPanel from "./components/OpenItemAnalysisPanel";
 import AssistantPanel from "./components/AssistantPanel";
 import { AssistantProvider } from "./assistantContext";
 import ObjectAnalysisBadge from "./components/ObjectAnalysisBadge";
+import OpenItemAnalysisBadge from "./components/OpenItemAnalysisBadge";
 import { api } from "./api/client";
 import type { ConnectionState } from "./types";
 import "./App.css";
@@ -20,6 +22,7 @@ const TASKS = [
   { id: "HEADER_TABLES", label: "Find Header Tables for Archiving Objects" },
   { id: "TABLE_ANALYSIS", label: "Table Analysis (TAANA)" },
   { id: "OBJECT_ANALYSIS", label: "Archiving Object Analysis" },
+  { id: "OPEN_ITEM_ANALYSIS", label: "Open Item Analysis" },
 ] as const;
 
 type Tab = (typeof TASKS)[number]["id"];
@@ -54,6 +57,7 @@ export default function App() {
     HEADER_TABLES: <HeaderTablePanel />,
     TABLE_ANALYSIS: <TableAnalysisPanel />,
     OBJECT_ANALYSIS: <ObjectAnalysisPanel />,
+    OPEN_ITEM_ANALYSIS: <OpenItemAnalysisPanel />,
   };
 
   return (
@@ -71,6 +75,7 @@ export default function App() {
             </span>
           )}
           <ObjectAnalysisBadge />
+          <OpenItemAnalysisBadge />
           {connection.connected ? (
             <span className="status-badge connected">Connected — {connection.system}</span>
           ) : (

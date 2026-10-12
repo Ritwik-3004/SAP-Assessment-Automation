@@ -19,7 +19,7 @@ Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeepi
 (housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (the always-visible
 assistant), `credentials_store.py` (several saved logins per credentials file), `reference_doc.py`
 (reference document analysis), `table_analysis.py` (the Table Analysis task) with `transactions/taana_analysis.py`
-(its TAANA screens), `object_analysis.py` (the Archiving Object Analysis task) with `object_reference.py` (its reference-document check) and `transactions/sara_info.py`,
+(its TAANA screens), `open_item_analysis.py` (the Open Item Analysis task), `object_analysis.py` (the Archiving Object Analysis task) with `object_reference.py` (its reference-document check) and `transactions/sara_info.py`,
 `help_browser.py` and `helpportal.py` (its SARA / SAP Help Portal steps), `progress.py` (progress
 polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 
@@ -36,6 +36,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
 | Archiving Object Analysis (conditions from SARA's information page, DVM Guide and SAP for Me; objects to archive first from SARA's network) | **Run end to end against a live system** on FI_DOCUMNT and SD_VBAK (all three sources, dependencies, workbook); the two-step split (step 1, then SAP for Me in the background) was tested offline with fakes and live on SD_VBAK. The reference-document check was tested offline with real PowerPoint/Excel/Word files and canned model answers, and live with a generated deck. The tab handling, failure cases and ordering were also tested offline with fakes. Not yet run on the full list of recommended objects (about 5 minutes per object with all sources) or on a machine whose default browser is not Edge/Chrome — see [Archiving Object Analysis](#archiving-object-analysis) |
+| Open Item Analysis (the sheet's open-item query per archiving object, run in DB02's SQL Editor, results to Excel) | **Run live on the OTE sandbox (client 100)** with the real DB02 SQL Editor: the query runner (SQL errors caught, zero rows, 2,500-row results, recovery after errors), and the whole job on IDOC, BC_SBAL, WORKITEM and an object without a query (workbook and Summary checked). Editing a query while another runs, cancel and the endpoints were tested offline with a fake DB02. **Not yet run:** the long queries (FI_DOCUMNT, SD_VBAK, MM_EKKO … on big tables), and the sheet's BC_SBAL and WORKITEM queries fail until their client column is corrected — see [Open Item Analysis](#open-item-analysis) |
 | Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on tiny tables (SWWWIHEAD and BKPF, including two tables in parallel and a month field): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the download were tested offline with a fake SAP, as were the Fields for TAANA sheet (listed table skips the questions, unlisted or unusable table is asked, sheet missing) and the re-run with additional fields (replaces the result; cancelled or failed re-run keeps the old one). The sheet-driven run and the re-run have **not yet been run against a live system**. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis-taana) |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
 | SAP Assistant (always-visible chat column: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
@@ -835,6 +836,45 @@ failure or cancel; if it is open in Excel, a numbered copy is written instead.
   contents tree only lists expanded branches — FI_DOCUMNT's "Checks (FI-GL, FI-AR, FI-AP)" is an example), so their conditions come from the other sources.
 - Conditions are model extractions of the source text, not authoritative SAP rules: verify important ones against the named source.
 
+## Open Item Analysis
+
+The **Open Item Analysis** task (`frontend/src/components/OpenItemAnalysisPanel.tsx`, `backend/open_item_analysis.py`) runs an open-item query for each
+recommended archiving object in DB02's SQL Editor and collects the results in one Excel file.
+
+**Input.** By default the recommended archiving objects saved by **Find Archiving Objects** (the panel preselects `archiving_objects_with_reference.xlsx`,
+else `archiving_objects_scored.xlsx`); **Upload a different file** to use another. It reads the file the same way as Archiving Object Analysis.
+
+**The query sheet.** `backend/resources/Open Closed Item details.xlsx`, sheet *Open Item Analysis*, is a grid of cells that each read `OBJECT:` followed
+by the SQL; the heading above a column (Sales Documents, Material Management, FINANCE, TECHNICAL) becomes the object's *Area*. The sheet is re-read
+whenever the file changes. For each object, in order:
+1. **Query in the sheet?** If not, the object is **skipped with the note "No query available…"** and the run moves on.
+2. **Run it.** The query runs in DB02's SQL Editor (Diagnostics > SQL Editor). The sheet's queries return one row per document (year, month, category), which would be
+   millions of rows, so the tool wraps them to **count the documents per year, month and category** (`SELECT Y, M, CAT, COUNT(*) AS ITEMS FROM (…) GROUP BY Y, M, CAT`).
+   A query that doesn't have the Y / M / CAT shape, or already aggregates, runs unchanged.
+3. **Result** goes to `output/Open item analysis.xlsx` (written after every object, so finished objects survive a failure): the sheet *Open item analysis* has the
+   archiving object in the first column and the result columns (Year, Month, Category, Items) next to it; *Summary* lists every object with its result
+   (done / skipped / failed), rows, whether the query came from the sheet (and with which client) or was edited, the note and the SQL that ran. If it is open in Excel a numbered copy is written.
+
+**The query box.** While a query runs the panel shows **which object and query is running** and for how long, in an editable box. Pick any object in the table
+(*View / edit query*) to see or change its query, then **Run this query**: an object still waiting gets your query in place; for others the run is queued **right after
+the query now running** (SAP cannot be interrupted mid-query). Your query runs exactly as typed and replaces that object's result; if it fails, the previous result is kept.
+*Reset to the sheet's query* restores the original, and an object the sheet skipped can be given a query this way. The result's first 500 rows are previewed under the table.
+The same works after the run has finished.
+
+**Safety.** Only a **single read-only statement** (`SELECT` / `WITH`) is accepted — the check ignores text in quotes and comments and rejects `INSERT`, `UPDATE`, `DELETE`,
+`DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `CALL`, `MERGE`, `FOR UPDATE` and similar, and a second statement after `;`. Comments are removed and the query is sent on one line.
+
+**Things to know.**
+- **Client.** The sheet's queries hard-code `MANDT = '300'`. The tool always uses the client **you are logged on to**: it replaces the `MANDT = '300'` value in the sheet's queries
+  with your client (the box shows the query with your client) and the panel says so — "Client changed to 100 … in N queries". It is reversible per object: *View / edit query*
+  shows the change and a **Revert to client 300** button that runs the sheet's own query (and **Use client 100 again** to go back). The Summary sheet's *Query* column says which
+  was used. Only `MANDT`, `MANDANT` or `CLIENT` `= '<3 digits>'` comparisons are replaced (joins like `K.MANDT = V.MANDT` are left alone), and queries you edit yourself are never altered.
+- The category codes (`O`, `E`, `R`) are the ones the sheet's queries produce (O is the open bucket, E the closed one; the sheet doesn't say what R means), and the tool keeps them as they are.
+- A query can run for minutes on large tables (waits up to 30 minutes each) and SAP is busy meanwhile, so the SAP Assistant's live-SAP tools wait too. A ⏳ indicator stays in the header if you switch tasks.
+- **SQL errors.** SAP does not show HANA's error message in the SQL Editor: a failing statement leaves a success-style status bar message "Exception CX_DBA_ADBC in class CL_HDB_SQL_EXECUTOR" and an empty result grid with no columns (a valid query with zero rows still has its columns). The runner recognises both and reports "SAP could not run the query - usually a SQL error such as an unknown table or column…" instead of an empty result.
+- **Row limit.** The SQL Editor cuts a result off at its *Max. No. of Rows* field (1,000 by default). The runner raises it to 10,000 and notes when a result reaches that.
+- **Sheet queries that fail.** The sheet's BC_SBAL query filters on `MANDT`, but BALHDR's client column is `MANDANT`; WORKITEM's SWWWIHEAD uses `CLIENT`. On this system both fail until the sheet is corrected (`L.MANDANT = '300'` / `W.CLIENT = '300'`; checked live — 8 and 35 result rows with client 100). The client substitution handles those column names too. An edit in the query box also fixes a single run.
+
 ## Table Analysis (TAANA)
 
 The **Table Analysis (TAANA)** task (`frontend/src/components/TableAnalysisPanel.tsx`) runs a TAANA analysis for each header table and
@@ -1023,6 +1063,12 @@ Key endpoints:
 | POST | `/api/object-analysis/reference/apply` | Apply the selected gaps / mismatches: body `{ids: [...]}`; returns how many were applied |
 | POST | `/api/object-analysis/sap-for-me` | Start step 2 (SAP for Me) in the background; allowed once step 1 is done |
 | POST | `/api/object-analysis/sap-for-me/cancel` | Stop step 2; objects already finished keep their conditions |
+| POST | `/api/open-item-analysis/start` | Start the Open Item Analysis for the archiving objects in an uploaded `file` or in `filename` (a file in the output folder); objects without a query in the sheet are skipped; runs in the background |
+| GET | `/api/open-item-analysis/progress` | Status, the query now running (object, SQL, start time), per-object records (state, rows, note, query, the sheet's query) and the output path |
+| GET | `/api/open-item-analysis/result?object=` | One object's result (columns and the first 500 rows) for the preview |
+| POST | `/api/open-item-analysis/query` | Run the user's own or edited query for an object: body `{object, query}` (read-only SELECT only; HTTP 400 otherwise); it replaces that object's result |
+| POST | `/api/open-item-analysis/cancel` | Stop after the query now running |
+| GET | `/api/open-item-analysis/download` | Download `output/Open item analysis.xlsx` |
 | POST | `/api/object-analysis/cancel` | Stop after the current object; finished objects stay in the workbook |
 | GET | `/api/object-analysis/download` | Download `output/Archiving object analysis.xlsx` |
 | POST | `/api/table-analysis/start` | Start the Table Analysis for the header tables in an uploaded `file` or in `filename` (a file in the output folder); form field `group_by_year` (default true) applies to tables taken from the Fields for TAANA sheet; returns the tables found and runs in the background |

@@ -61,6 +61,53 @@ export interface TableAnalysisSnapshot {
   warnings: string[];
 }
 
+export interface OpenItemRecord {
+  object: string;
+  description: string;
+  /** the sheet's heading for the object (Sales Documents, FINANCE, ...) */
+  area: string;
+  state: "queued" | "running" | "done" | "skipped" | "failed";
+  rows: number;
+  note: string;
+  /** the query that ran (or is running / waiting) */
+  query: string;
+  /** the sheet's query as the tool runs it; empty if the sheet has none for this object */
+  default_query: string;
+  edited: boolean;
+  /** "sheet": the standard query; "sheet_client": the sheet's own query with its own client (reverted); "edited": the user's */
+  query_kind: "sheet" | "sheet_client" | "edited";
+  /** the client the sheet's query names (e.g. "300") when the tool replaced it with the logged-on client, else "" */
+  sheet_client: string;
+  /** the client the tool used instead (the one the user is logged on to), else "" */
+  client: string;
+  /** the sheet's query exactly as it is in the sheet (with the sheet's client), to revert to; "" if not replaced */
+  sheet_query: string;
+  /** an edited query is waiting to run next */
+  queued_edit: boolean;
+  seconds: number;
+}
+
+export interface OpenItemSnapshot {
+  status: "idle" | "running" | "done";
+  total: number;
+  completed: number;
+  message: string | null;
+  /** the query being run now; `started` is epoch seconds */
+  current: { object: string; query: string; started: number } | null;
+  /** set when the sheet's client was replaced with the logged-on client */
+  client_note: { sheet_client: string; client: string; objects: string[] } | null;
+  records: OpenItemRecord[];
+  output_path: string | null;
+  warnings: string[];
+  sheet: { objects: string[]; problem: string };
+}
+
+export interface OpenItemResult {
+  columns: string[];
+  rows: string[][];
+  total_rows: number;
+}
+
 export interface ObjectAnalysisRecord {
   object: string;
   description: string;

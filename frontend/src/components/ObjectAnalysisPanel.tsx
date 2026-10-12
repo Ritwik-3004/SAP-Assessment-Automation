@@ -145,7 +145,7 @@ export default function ObjectAnalysisPanel() {
     setLoadingFiles(true);
     try {
       const { files } = await api.getOutputFiles();
-      const spreadsheets = files.filter((f) => !f.startsWith("Table analysis") && !f.startsWith("Archiving object analysis"));
+      const spreadsheets = files.filter((f) => !f.startsWith("Table analysis") && !f.startsWith("Archiving object analysis") && !f.startsWith("Open item analysis"));
       setOutputFiles(spreadsheets);
       if (!serverFile) setServerFile(preferred(spreadsheets));
     } catch {

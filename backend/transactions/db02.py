@@ -259,6 +259,140 @@ def _run_get_field_types(table_names: list[str]) -> dict:
         return {"status": "error", "transaction": "DB02", "message": str(exc)}
 
 
+# The SQL Editor caps a result at its "Max. No. of Rows" field (1,000 by default, which would silently cut a
+# longer result off). Confirmed live: a failing statement does NOT give an error message type -- the status
+# bar says "S" with "Exception CX_DBA_ADBC in class CL_HDB_SQL_EXECUTOR ..." and the result grid has no
+# columns at all (a valid query with zero rows still has its columns).
+ROW_MAX_FIELD_ID = "wnd[0]/usr/txtDYN_VIEW_SQL-ROW_MAX"
+MAX_RESULT_ROWS = 10000
+
+
+def run_query(query: str, wait_seconds: float = 1800.0) -> dict:
+    """
+    Run one SELECT statement in DB02's SQL Editor and return its result grid, however many rows and
+    columns it has: {"status": "ok", "columns": [ids], "rows": [[values...]]}. Unlike the size / field-type
+    lookups this one checks that the statement really ran: a SQL error (status bar or popup) is returned as
+    {"status": "error", "message": ...} instead of reading whatever result was on screen before, and it waits
+    up to *wait_seconds* for a long-running query (the sheet's open-item queries can take minutes). The editor's
+    row limit is raised to MAX_RESULT_ROWS; a result that reaches it is returned with "truncated": True.
+
+    The caller must pass a single read-only statement on one line (see open_item_analysis.prepare_for_sap).
+    """
+    return sap.run(_run_query, query, wait_seconds)
+
+
+def _popup_text(session) -> str:
+    """The text of an open popup (wnd[1]) -- title and labels -- or ''."""
+    try:
+        popup = session.findById("wnd[1]")
+    except Exception:
+        return ""
+    parts = []
+    try:
+        parts.append(str(popup.Text))
+    except Exception:
+        pass
+    try:
+        for child in popup.findById("usr").Children:
+            try:
+                text = str(child.Text).strip()
+            except Exception:
+                continue
+            if text:
+                parts.append(text)
+    except Exception:
+        pass
+    return " - ".join(p for p in parts if p)
+
+
+def _run_query(query: str, wait_seconds: float) -> dict:
+    try:
+        session = sap.get_session()
+        _open_sql_editor(session)
+        session.findById(SQL_INPUT_SHELL_ID).text = query
+        try:
+            session.findById(ROW_MAX_FIELD_ID).text = str(MAX_RESULT_ROWS)
+        except Exception:
+            logger.warning("Could not raise the SQL Editor's row limit; results are capped at its default.")
+        session.findById("wnd[0]").sendVKey(8)  # F8 -- Execute
+
+        # A big query keeps the session busy for as long as it runs; sap.wait_until_ready() only waits 10 s.
+        time.sleep(0.5)
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                busy = bool(session.Busy)
+            except Exception:
+                busy = False
+            if not busy:
+                break
+            if time.monotonic() > deadline:
+                return {"status": "error", "transaction": "DB02", "message": (
+                    f"The query did not finish within {int(wait_seconds // 60)} minutes. It may still be running in SAP."
+                )}
+            time.sleep(0.5)
+        time.sleep(SAP_SCREEN_WAIT)
+
+        popup = _popup_text(session)
+        sap.dismiss_all_popups()
+        try:
+            message_type = str(session.findById("wnd[0]/sbar").MessageType or "").upper()
+            message = str(session.findById("wnd[0]/sbar/pane[0]").text or "").strip()
+        except Exception:
+            message_type, message = "", ""
+        logger.info("DB02 SQL status bar [%s]: %s %s", message_type, message, popup)
+        if message_type in ("E", "A") or message.lower().startswith("exception"):
+            return {"status": "error", "transaction": "DB02", "message": _sql_error_text(message or popup)}
+
+        session.findById(RESULT_TAB_ID).select()
+        sap.wait_until_ready()
+        time.sleep(SAP_SCREEN_WAIT)
+        result = _read_full_grid(session, error_hint=message or popup)
+        if result["status"] == "ok":
+            if not result["columns"]:   # a statement that ran has columns, even with no rows
+                return {"status": "error", "transaction": "DB02", "message": _sql_error_text(message or popup)}
+            result["truncated"] = len(result["rows"]) >= MAX_RESULT_ROWS
+        return result
+    except Exception as exc:
+        logger.exception("DB02 custom query failed")
+        return {"status": "error", "transaction": "DB02", "message": str(exc)}
+
+
+def _sql_error_text(sap_message: str) -> str:
+    """What to tell the user when the SQL Editor did not run a statement. SAP only shows the exception class
+    ("Exception CX_DBA_ADBC ..."), not HANA's own message, so say what it usually means."""
+    return (
+        "SAP could not run the query - usually a SQL error such as an unknown table or column, a syntax error "
+        "or a missing authorization. Check the query" + (f" (SAP said: {sap_message})." if sap_message else ".")
+    )
+
+
+def _read_full_grid(session, error_hint: str = "") -> dict:
+    """Read the SQL Editor's result grid completely (all rows and columns, as displayed). Raises nothing:
+    a grid that cannot be read is reported as an error rather than as an empty result."""
+    last_exc: Exception | None = None
+    for _ in range(4):
+        try:
+            grid = session.findById(RESULT_GRID_ID)
+            col_ids = [str(c) for c in grid.ColumnOrder]
+            rows = []
+            for row_idx in range(int(grid.RowCount)):
+                try:
+                    grid.FirstVisibleRow = row_idx   # rows outside the rendered window read back blank otherwise
+                except Exception:
+                    pass
+                rows.append([str(grid.GetCellValue(row_idx, c)) for c in col_ids])
+            return {"status": "ok", "transaction": "DB02", "columns": col_ids, "rows": rows}
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(0.5)
+    return {"status": "error", "transaction": "DB02", "message": (
+        "The query's result could not be read from the SQL Editor"
+        + (f" ({error_hint})" if error_hint else "")
+        + (f": {last_exc}" if last_exc else ".")
+    )}
+
+
 def _sanitize_table_name(name: str) -> str | None:
     candidate = (name or "").strip().upper()
     return candidate if _VALID_TABLE_NAME.match(candidate) else None

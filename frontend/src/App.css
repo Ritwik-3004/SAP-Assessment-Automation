@@ -1036,3 +1036,22 @@ body {
 .oa-chip { display: inline-block; font-size: 12px; padding: 1px 9px; border-radius: 10px; margin: 0 4px 4px 0; background: var(--tab-bg); }
 .oa-chip.ok { background: #dcfce7; color: #15803d; }
 .oa-chip.muted { color: var(--text-muted); }
+
+/* Open Item Analysis: the editable query box and the row being looked at */
+.oi-query {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12.5px;
+  line-height: 1.45;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+  white-space: pre;
+  overflow: auto;
+}
+.results-table tr.selected-row td { background: #eef4ff; }
+.ta-status.queued { background: var(--tab-bg); color: var(--text-muted); }

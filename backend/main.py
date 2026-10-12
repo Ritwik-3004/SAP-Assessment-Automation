@@ -35,6 +35,7 @@ import reference_doc as ref_doc_mod
 import credentials_store
 import table_analysis
 import object_analysis
+import open_item_analysis
 import transactions.taana as taana
 import transactions.db15 as db15
 import transactions.db02 as db02
@@ -1101,6 +1102,100 @@ def object_analysis_progress():
 def object_analysis_results():
     """The full results for the preview: conditions with their sources, objects to archive first."""
     return {"objects": object_analysis.job.details()}
+
+
+# ---------------------------------------------------------------------------
+# Open item analysis (the sheet's open-item query per archiving object, run in DB02's SQL Editor)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/open-item-analysis/start")
+def start_open_item_analysis(
+    file: UploadFile | None = File(None),
+    filename: str = Form(""),
+):
+    """Start the open item analysis for the archiving objects in *file* (an upload) or *filename* (a file in
+    the output folder, by default the recommended objects saved by Find Archiving Objects). Objects without
+    a query in resources/Open Closed Item details.xlsx are skipped with a note. Runs in the background."""
+    _require_connection()
+    if open_item_analysis.job.is_active():
+        raise HTTPException(status_code=409, detail="An open item analysis is already running.")
+
+    if file is not None and file.filename:
+        contents = file.file.read()
+    elif filename:
+        path = OUTPUT_DIR / Path(filename).name
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"'{path.name}' not found in the output folder.")
+        contents = path.read_bytes()
+    else:
+        raise HTTPException(status_code=400, detail="Choose a file or upload one.")
+
+    try:
+        objects = object_analysis.parse_objects(contents)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read the file: {exc}")
+
+    try:
+        open_item_analysis.job.start(objects)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "started", "total": len(objects), "objects": [o["object"] for o in objects]}
+
+
+@app.get("/api/open-item-analysis/progress")
+def open_item_analysis_progress():
+    return open_item_analysis.job.snapshot()
+
+
+@app.get("/api/open-item-analysis/result")
+def open_item_analysis_result(object: str):
+    """One object's collected result (columns and the first rows) for the preview."""
+    res = open_item_analysis.job.result(object)
+    if res is None:
+        raise HTTPException(status_code=404, detail=f"There is no result for {object} yet.")
+    return res
+
+
+class OpenItemQuery(BaseModel):
+    object: str
+    query: str
+
+
+@app.post("/api/open-item-analysis/query")
+def open_item_analysis_query(req: OpenItemQuery):
+    """Run the user's own or edited query for one object (it replaces that object's result). Only a single
+    read-only SELECT is accepted."""
+    _require_connection()
+    try:
+        open_item_analysis.job.submit_query(req.object, req.query)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"{req.object} is not part of this analysis.")
+    return {"status": "queued"}
+
+
+@app.post("/api/open-item-analysis/cancel")
+def open_item_analysis_cancel():
+    """Stop after the query now running; finished objects stay in the workbook."""
+    open_item_analysis.job.cancel()
+    return {"ok": True}
+
+
+@app.get("/api/open-item-analysis/download")
+def open_item_analysis_download():
+    path = open_item_analysis.job.snapshot().get("output_path")
+    if not path or not Path(path).exists():
+        raise HTTPException(status_code=404, detail="There is no Open item analysis workbook yet.")
+    return FileResponse(
+        path,
+        filename=Path(path).name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 class ObjectReferenceApply(BaseModel):
