@@ -904,7 +904,10 @@ Customizing, other objects or documents to process first, blockers.
 1. **SARA information button.** The tool opens SARA, enters the object and presses the `i` icon (*Documentation*, F6). SAP GUI answers by
    starting the machine's browser on the object's **SAP Help Portal** page (it shows nothing inside SAP GUI). The tool reads that page's address
    from the browser's address bar through Windows UI Automation (`help_browser.py`) and **closes that tab again** — each object's tab is closed
-   before the next object's page is opened, and only the tab SAP opened is touched (matched by its page address; your own tabs are never closed). The
+   before the next object's page is opened, and only the tab SAP opened is touched (matched by its page address; your own tabs are never closed).
+   **The default browser must be Google Chrome:** Microsoft Edge shows the app no address bar or tabs through UI Automation (checked on this machine; Edge
+   showed only empty panes), so with Edge the page opens but its address cannot be read, the tab is not closed, and tabs pile up. Browsers hide `https://`
+   in the address bar, so the address is completed with it before the page is read. The
    page is then read **headlessly** with Chrome for Testing (`helpportal.py`; same setup as SAP for Me, no sign-in needed). Besides the page itself it
    reads sub-pages that describe conditions — child pages in the contents tree and pages the article names — whose title contains check, condition,
    prerequisite, precondition, archivability, residence, criteria, restriction or requirement (up to four), e.g. "Checks and Variants (SD-SLS)" or

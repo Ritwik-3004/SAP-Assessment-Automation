@@ -68,10 +68,10 @@ ConvertTo-Json -InputObject @($out) -Compress
 """
 
 _PS_CLOSE = _PS_COMMON + r"""
-$target = ($env:HELP_URL -split '\?')[0]
+$target = (($env:HELP_URL -split '\?')[0]) -replace '^https?://', ''
 $closed = $false
 foreach ($b in Get-BrowserWindows) {
-  if ($b.Url -and ((($b.Url -split '\?')[0]) -eq $target)) {
+  if ($b.Url -and (((($b.Url -split '\?')[0]) -replace '^https?://', '') -eq $target)) {
     $tab = Get-SelectedTab $b.Window
     if (-not $tab) { continue }
     $buttons = $tab.FindAll($TS::Descendants, (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::Button)))
@@ -117,6 +117,12 @@ def _is_help_page(page: dict) -> bool:
     return HELP_HOST in (page.get("url") or "")
 
 
+def _with_scheme(url: str) -> str:
+    """Chrome and Edge hide "https://" in the address bar, so the address read from it is "help.sap.com/docs/...",
+    which a browser driver rejects as an invalid URL."""
+    return url if url.lower().startswith(("http://", "https://")) else "https://" + url
+
+
 def help_urls_open() -> set[str]:
     try:
         return {p["url"] for p in list_browser_pages() if _is_help_page(p)}
@@ -137,8 +143,8 @@ def wait_for_new_help_page(before: set[str], timeout: float = 25.0, interval: fl
                     time.sleep(1.5)
                     for later in list_browser_pages():
                         if _is_help_page(later) and later["url"].split("?")[0] == url.split("?")[0]:
-                            return later["url"]
-                    return url
+                            return _with_scheme(later["url"])
+                    return _with_scheme(url)
         except Exception as exc:
             logger.warning("Could not read the browser address bar: %s", exc)
             return None

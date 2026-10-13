@@ -551,8 +551,9 @@ class ObjectAnalysisJob:
             description = description or pressed["description"]
             url = help_browser.wait_for_new_help_page(before)
             if not url:
-                sara_note = ("The information button did not open a SAP Help Portal page in the browser "
-                             "(or its address could not be read).")
+                sara_note = ("The information button did not open a SAP Help Portal page in the browser, or the "
+                             "page's address could not be read. SAP GUI opens it in the default browser, which "
+                             "must be Google Chrome: Microsoft Edge does not let the app read its address bar.")
             else:
                 self._last_help_url = url
                 self._close_help_tab()               # close it straight away; the page is read headlessly

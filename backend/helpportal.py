@@ -111,6 +111,8 @@ class HelpPortalReader:
         if self._driver is None:
             self._open()
         driver = self._driver
+        if not re.match(r"https?://", url, re.IGNORECASE):
+            url = "https://" + url          # an address copied from a browser's address bar has no scheme
         driver.get(url)
         deadline = time.monotonic() + timeout
         article = None
@@ -136,7 +138,9 @@ class HelpPortalReader:
         try:
             first = self._page(url)
         except Exception as exc:
-            return {"pages": [], "problem": f"Could not read the Help Portal page: {exc}"}
+            logger.warning("Could not read the Help Portal page %s: %s", url, exc)
+            reason = (str(exc).strip().splitlines() or [type(exc).__name__])[0]   # not the driver's stack trace
+            return {"pages": [], "problem": f"Could not read the Help Portal page: {reason}"}
         pages.append({"title": first["title"], "url": url, "text": first["text"]})
 
         # The contents tree loads a moment after the article: wait until it shows the open page.
