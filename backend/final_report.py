@@ -2,8 +2,8 @@
 Final report generation: combine the important result sheets of the other tasks into two workbooks.
 
   * "Final report - Overview.xlsx" -- sheet "Overview": one block per archiving object (largest cumulative
-    size first): archiving object, description, header table, its tables, archiving conditions and the four
-    size columns. Whatever is common to a group (object, description, header table, conditions, cumulative
+    size first): archiving object, description, header table, its tables, archiving conditions, the objects to
+    archive before it and the four size columns. Whatever is common to a group (object, description, header table, conditions, cumulative
     sizes) is merged into one cell across the group's table rows, like the "Grouped by Object" sheet.
     Sheet "Housekeeping Programs": the groups of that sheet that have a housekeeping program instead of an
     archiving object -- program, its tables and the four size columns, merged the same way.
@@ -20,7 +20,8 @@ Where the sources come from:
                                         (else archiving_objects_scored.xlsx), sheet "Grouped by Object"
   header table                          results/Find Header Tables for Archiving Objects/header_tables_with_reference.xlsx
                                         (else header_tables.xlsx)
-  archiving conditions                  results/Archiving Object Analysis/Archiving object analysis.xlsx
+  archiving conditions, archive before  results/Archiving Object Analysis/Archiving object analysis.xlsx
+                                        (conditions: each object's sheet; archive before: the Summary sheet)
   table analysis                        results/Table Analysis/Table analysis.xlsx
   open item analysis                    results/Open Item Analysis/Open item analysis.xlsx
 """
@@ -79,7 +80,7 @@ def resolve_sources() -> dict:
                     "fallback": bool(objects and "with_reference" not in objects.name), "required": True},
         "headers": {"label": "Header tables", "path": headers, "warning": headers_warning,
                     "fallback": bool(headers and "with_reference" not in headers.name), "required": False},
-        "conditions": {"label": "Archiving conditions", "required": False, "fallback": False, "warning": "",
+        "conditions": {"label": "Archiving conditions and archive-before objects", "required": False, "fallback": False, "warning": "",
                        "path": _newest(results_folder("OBJECT_ANALYSIS"), "Archiving object analysis")},
         "table_analysis": {"label": "Table analysis", "required": False, "fallback": False, "warning": "",
                            "path": _newest(results_folder("TABLE_ANALYSIS"), "Table analysis")},
@@ -230,6 +231,36 @@ def read_conditions(path: Path) -> dict[str, list[str]]:
         wb.close()
 
 
+def read_archive_before(path: Path) -> dict[str, str]:
+    """{ARCHIVING OBJECT: the objects to archive before it, as one cell of text} from the analysis workbook's
+    Summary sheet (column "ARCHIVE BEFORE (in order)": the objects in archiving order, comma separated, or
+    "None", or a note that the network was not available). A list becomes numbered lines, step 1 first."""
+    wb = _load(path)
+    try:
+        ws = wb["Summary"] if "Summary" in wb.sheetnames else None
+        if ws is None:
+            return {}
+        header = [_text(h).lower() for h in next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())]
+        obj_col = next((i for i, h in enumerate(header) if h == "archiving object"), None)
+        ab_col = next((i for i, h in enumerate(header) if h.startswith("archive before")), None)
+        if obj_col is None or ab_col is None:
+            return {}
+        out: dict[str, str] = {}
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            obj = _text(row[obj_col]).upper() if obj_col < len(row) else ""
+            raw = _text(row[ab_col]) if ab_col < len(row) else ""
+            if not obj or not raw:
+                continue
+            if raw.lower() == "none" or raw.startswith("("):
+                out[obj] = raw
+            else:
+                items = [i.strip() for i in raw.split(",") if i.strip()]
+                out[obj] = "\n".join(f"{n}. {i}" for n, i in enumerate(items, start=1))
+        return out
+    finally:
+        wb.close()
+
+
 def _grid(ws, header_row: int, first_col: int = 1) -> tuple[list[str], list[list]]:
     """Header and data rows of a sheet's table, up to the first fully blank row."""
     rows = list(ws.iter_rows(min_row=header_row, min_col=first_col, values_only=True))
@@ -356,7 +387,7 @@ def _to_bytes(wb) -> io.BytesIO:
 
 _OVERVIEW_COLUMNS = [
     ("Archiving Object", 22), ("Archiving Object Description", 38), ("Header Table", 20), ("Tables", 22),
-    ("Archiving Conditions", 85), ("Volume (GB)", 13), ("Volume (MB)", 14),
+    ("Archiving Conditions", 85), ("Archive Before", 26), ("Volume (GB)", 13), ("Volume (MB)", 14),
     ("Cumulative Size (GB)", 16), ("Cumulative Size (MB)", 17),
 ]
 _HOUSEKEEPING_COLUMNS = [
@@ -423,7 +454,8 @@ def _write_grouped_sheet(
 
 
 def build_overview(
-    groups: list[dict], headers: dict[str, str], conditions: dict[str, list[str]], housekeeping: list[dict],
+    groups: list[dict], headers: dict[str, str], conditions: dict[str, list[str]], archive_before: dict[str, str],
+    housekeeping: list[dict],
 ) -> io.BytesIO:
     """The overview workbook: the "Overview" sheet (archiving objects) and the "Housekeeping Programs" sheet."""
     wb = openpyxl.Workbook()
@@ -433,10 +465,11 @@ def build_overview(
         ws, _OVERVIEW_COLUMNS,
         [{
             "shared": {1: g["object"], 2: g["description"], 3: headers.get(g["object"], ""),
-                       5: conditions_text(conditions.get(g["object"], [])), 8: g["cum_gb"], 9: g["cum_mb"]},
-            "rows": [{4: t["table"], 6: t["gb"], 7: t["mb"]} for t in g["tables"]],
+                       5: conditions_text(conditions.get(g["object"], [])), 6: archive_before.get(g["object"], ""),
+                       9: g["cum_gb"], 10: g["cum_mb"]},
+            "rows": [{4: t["table"], 7: t["gb"], 8: t["mb"]} for t in g["tables"]],
         } for g in groups],
-        shared={1, 2, 3, 5, 8, 9}, numeric={6, 7, 8, 9}, wrap={2, 4, 5}, top={5},
+        shared={1, 2, 3, 5, 6, 9, 10}, numeric={7, 8, 9, 10}, wrap={2, 4, 5, 6}, top={5, 6},
     )
     hk = wb.create_sheet("Housekeeping Programs")
     _write_grouped_sheet(
@@ -580,11 +613,12 @@ def generate(save: Callable[[str, str, io.BytesIO], str]) -> dict:
 
     headers = optional("headers", read_header_tables, {}, "the Header Table column is blank and there are no object sheets with table analysis.")
     conditions = optional("conditions", read_conditions, {}, "the Archiving Conditions column is blank.")
+    archive_before = optional("conditions", read_archive_before, {}, "the Archive Before column is blank.")
     table_analysis = optional("table_analysis", read_table_analysis, {}, "the object sheets have no table analysis.")
     open_items = optional("open_items", read_open_items, {}, "the object sheets have no open item analysis.")
 
     housekeeping = read_housekeeping_groups(objects_path)
-    overview = build_overview(groups, headers, conditions, housekeeping)
+    overview = build_overview(groups, headers, conditions, archive_before, housekeeping)
     details, parts = build_details(groups, headers, table_analysis, open_items)
     folder_task = "FINAL_REPORT"
     files = [

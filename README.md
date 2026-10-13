@@ -983,6 +983,7 @@ files it will use and whether each is found, using the plain file as a fallback,
 | Housekeeping program, its tables, the four size columns | the same sheet (columns C, D and F-I), for the groups that have no archiving object | the same fallback |
 | Header table | `Find Header Tables for Archiving Objects/header_tables_with_reference.xlsx`, sheet *Header Tables (with Reference)*, column B, matched to the object by column A | `header_tables.xlsx` |
 | Archiving conditions | `Archiving Object Analysis/Archiving object analysis.xlsx`, the Condition column of each object's sheet | none (column left blank) |
+| Archive before | the same file, sheet *Summary*, column *ARCHIVE BEFORE (in order)* | none (column left blank) |
 | Table analysis | `Table Analysis/Table analysis.xlsx`, the sheet of the object's header table | none |
 | Open item analysis | `Open Item Analysis/Open item analysis.xlsx`, the object's sheet | none (the object's sheet simply has no open item part) |
 
@@ -992,8 +993,8 @@ counts. Only the archiving objects file is required; anything else that is missi
 
 **Overview** (`Final report - Overview.xlsx`), sheet *Overview*. One row per table, in the order of the *Grouped by Object* sheet (largest
 cumulative size first): Archiving Object, Archiving Object Description, Header Table, Tables, Archiving Conditions (numbered, one per
-line), Volume (GB), Volume (MB), Cumulative Size (GB), Cumulative Size (MB). What is common to an object, which is its name,
-description, header table, conditions and cumulative sizes, is merged into one cell across its tables, and a heavier line separates objects.
+line), Archive Before (the objects to archive first, numbered in archiving order; "None" when there are none), Volume (GB), Volume (MB), Cumulative Size (GB), Cumulative Size (MB). What is common to an object, which is its name,
+description, header table, conditions, archive-before list and cumulative sizes, is merged into one cell across its tables, and a heavier line separates objects.
 Merged cells do not auto-size, so each group's row height is set from its longest wrapped text.
 
 The second sheet, *Housekeeping Programs*, holds the groups of the *Grouped by Object* sheet that have a housekeeping program instead of an

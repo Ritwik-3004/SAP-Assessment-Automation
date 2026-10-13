@@ -54,7 +54,7 @@ export default function FinalReportPanel() {
       <div className="tx-description">
         <strong>Final report generation</strong> — combines the important results of the other tasks into two Excel
         files. The <strong>Overview</strong> lists every archiving object with its description, header table, tables,
-        archiving conditions and sizes; whatever is common to an archiving object's tables is merged into one cell. A second sheet
+        archiving conditions, the objects to archive before it and sizes; whatever is common to an archiving object's tables is merged into one cell. A second sheet
         lists the <strong>housekeeping programs</strong> with their tables and sizes. The{" "}
         <strong>Object details</strong> file has one sheet per archiving object with its table analysis (taken from its
         header table) and, next to it, its open item analysis when there is one. Both files are saved automatically; you
