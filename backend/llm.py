@@ -69,6 +69,18 @@ TPM_HEADROOM = 0.85       # plan to use at most this share of the per-minute tok
 GROQ_MAX_OUT = 4000       # cap on completion tokens requested from Groq
 MAX_RATE_RETRIES = 6
 
+# Some free-tier models also have a cap on OUTPUT tokens per minute (OTPM) that is not in Groq's general limits table:
+# Qwen 3.8 27B answered "Request too large ... on output tokens per minute (OTPM): Limit 1000". A limit learned from a
+# refusal (_learned_otpm) wins over this table, so a model that is not listed here teaches itself on its first refusal.
+GROQ_MODEL_LIMITS = {"qwen/qwen3.8-27b": {"otpm": 1000}}
+_learned_otpm: dict[str, int] = {}
+# Live check (Qwen 3.8 27B, 2026-10-13): two back-to-back requests that each asked for 900 output tokens (limit 1,000) and
+# used 2 were both admitted, so Groq counts the tokens actually produced. Only the request being sent has to fit; once it
+# is answered the minute is charged its real output. Set True to charge the full requested amount instead.
+OTPM_COUNTS_REQUESTED = False
+# Models that refused the "reasoning off" parameter (see _groq_chat); it is not sent to them again.
+_reasoning_unsupported: set[str] = set()
+
 OLLAMA_NUM_CTX = 8192      # context window requested from Ollama (its own default, 4,096, is too small here)
 OLLAMA_MAX_OUT = 3000      # cap on tokens generated per answer
 OLLAMA_RAM_SHARE = 0.6     # a model's file must fit in this share of the computer's memory (CPU inference)
@@ -231,6 +243,7 @@ def budget(settings: Optional[Settings] = None) -> dict:
             "chat_context_tables": 25,
             "chat_history_messages": 6,
             "chat_max_rounds": 4,
+            "score_chunk": 40,        # candidates per scoring request (sized so the answer fits Qwen's 1,000 output tokens/min)
         }
     return {
         "dvm_excerpt_chars": 6000,
@@ -239,7 +252,24 @@ def budget(settings: Optional[Settings] = None) -> dict:
         "chat_context_tables": 60,
         "chat_history_messages": 40,
         "chat_max_rounds": 8,
+        "score_chunk": 120,
     }
+
+
+def groq_output_limit(model: str) -> Optional[int]:
+    """The output-tokens-per-minute limit of a Groq model: learned from a refusal, else the known table, else None."""
+    return _learned_otpm.get(model) or GROQ_MODEL_LIMITS.get(model, {}).get("otpm")
+
+
+def max_output_tokens(settings: Optional[Settings] = None) -> int:
+    """The most output tokens one answer can have with the active model (a request asking for more would be cut or refused)."""
+    s = settings or load_settings()
+    if s.provider == GROQ:
+        limit = groq_output_limit(s.model)
+        return min(GROQ_MAX_OUT, limit) if limit else GROQ_MAX_OUT
+    if s.provider == OLLAMA:
+        return OLLAMA_MAX_OUT
+    return 16000
 
 
 def max_workers(settings: Optional[Settings] = None) -> int:
@@ -320,14 +350,14 @@ def _notify(message: str) -> None:
 
 
 class _RateWindow:
-    """Rolling 60-second window of requests/tokens; acquire() blocks until a call fits."""
+    """Rolling 60-second window of requests, tokens and output tokens; acquire() blocks until a call fits."""
 
     def __init__(self, rpm: int, tpm: int):
         self._rpm, self._tpm = rpm, tpm
         self._lock = threading.Lock()
-        self._events: list[list] = []   # [monotonic time, tokens], oldest first
+        self._events: list[list] = []   # [monotonic time, tokens, output tokens], oldest first
 
-    def acquire(self, tokens: int) -> list:
+    def acquire(self, tokens: int, out_tokens: int = 0, otpm: Optional[int] = None) -> list:
         cap = int(self._tpm * TPM_HEADROOM)
         announced = False
         while True:
@@ -335,9 +365,14 @@ class _RateWindow:
                 now = time.monotonic()
                 self._events = [e for e in self._events if now - e[0] < 60]
                 used = sum(e[1] for e in self._events)
-                fits = (used + tokens <= cap or used == 0) and len(self._events) < self._rpm
+                out_used = sum(e[2] for e in self._events)
+                fits = (
+                    (used + tokens <= cap or used == 0)
+                    and (otpm is None or out_used + out_tokens <= otpm or out_used == 0)
+                    and len(self._events) < self._rpm
+                )
                 if fits:
-                    event = [now, tokens]
+                    event = [now, tokens, out_tokens]
                     self._events.append(event)
                     return event
                 wait = max(0.5, 60 - (now - self._events[0][0]) + 0.2)
@@ -346,9 +381,11 @@ class _RateWindow:
                 announced = True
             time.sleep(min(wait, 5))
 
-    def correct(self, event: list, tokens: int) -> None:
+    def correct(self, event: list, tokens: int, out_tokens: Optional[int] = None) -> None:
         with self._lock:
             event[1] = tokens
+            if out_tokens is not None:
+                event[2] = out_tokens
 
     def release(self, event: list) -> None:
         with self._lock:
@@ -370,6 +407,18 @@ def _window(model: str) -> _RateWindow:
 def _estimate_tokens(messages: list, tools: Optional[list] = None) -> int:
     chars = len(json.dumps(messages, default=str)) + (len(json.dumps(tools)) if tools else 0)
     return int(chars / 3.2) + 20
+
+
+def _groq_reason(exc: Exception) -> str:
+    """Groq's own explanation of a refusal, shortened for the user (the organisation id is dropped)."""
+    message = ""
+    try:
+        message = exc.body["error"]["message"]  # type: ignore[attr-defined]
+    except Exception:
+        message = str(exc)
+    message = re.sub(r"\s+in organization `[^`]*`( service tier `[^`]*`)?", "", message)
+    message = re.sub(r"\s*Need more tokens\?.*$", "", message, flags=re.DOTALL)
+    return message.strip()[:260]
 
 
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
@@ -429,14 +478,11 @@ def _groq_chat(
             f"This request is about {est_in:,} tokens, more than Groq's free tier allows in one "
             f"request ({tpm:,} tokens/minute). Use a smaller input or switch to Claude."
         )
-    out_cap = max(200, min(max_tokens, GROQ_MAX_OUT, int(tpm * 0.95) - est_in))
-    reserve = est_in + min(out_cap, 800)
-
-    kwargs: dict[str, Any] = dict(
-        model=model, messages=messages, max_completion_tokens=out_cap, temperature=0
-    )
+    kwargs: dict[str, Any] = dict(model=model, messages=messages, temperature=0)
     if model.startswith("openai/gpt-oss"):
         kwargs["reasoning_effort"] = "low"   # reasoning tokens count against the same limits
+    elif model.startswith("qwen/") and model not in _reasoning_unsupported:
+        kwargs["reasoning_effort"] = "none"  # thinking tokens would use up the small output allowance
     if response_format:
         kwargs["response_format"] = response_format
     if tools:
@@ -446,13 +492,22 @@ def _groq_chat(
     client = _groq_client(settings.groq_api_key)
     window = _window(model)
 
+    last_reason = ""
     for attempt in range(MAX_RATE_RETRIES):
-        event = window.acquire(reserve)
+        # asked for afresh each time: a refusal can teach the app the model's output limit
+        otpm = groq_output_limit(model)
+        out_cap = max(200, min(max_tokens, GROQ_MAX_OUT, int(tpm * 0.95) - est_in))
+        if otpm:
+            out_cap = min(out_cap, otpm)
+        reserve = est_in + min(out_cap, 800)
+        kwargs["max_completion_tokens"] = out_cap
+        event = window.acquire(reserve, out_cap, otpm)
         try:
             response = client.chat.completions.create(**kwargs)
         except groq.RateLimitError as exc:
             window.release(event)
             text = str(exc).lower()
+            last_reason = _groq_reason(exc)
             if "per day" in text or "tpd" in text or "rpd" in text:
                 _daily_block[model] = date.today().isoformat()
                 raise LLMRateLimitError(
@@ -462,6 +517,17 @@ def _groq_chat(
                     "in the AI Model panel.",
                     daily=True,
                 ) from exc
+            too_large = re.search(r"request too large.*?\((o?tpm)\):\s*limit\s*(\d+)", text, re.DOTALL)
+            if too_large:
+                # Resending the same request can never work: say what is wrong, or ask for less and go again
+                kind, limit = too_large.group(1), int(too_large.group(2))
+                if kind != "otpm":
+                    raise LLMTooLargeError(f"Groq refuses a request this large on the free tier: {last_reason}") from exc
+                if out_cap <= limit and _learned_otpm.get(model) == limit:
+                    raise LLMTooLargeError(f"Groq refuses this many output tokens: {last_reason}") from exc
+                _learned_otpm[model] = limit
+                _notify(f"Groq allows {limit:,} output tokens per minute for this model; asking for less…")
+                continue
             wait = _retry_after_seconds(exc) or 10 * (attempt + 1)
             _notify(f"Groq rate limit reached; retrying in ~{int(wait)}s…")
             time.sleep(min(wait + 0.5, 90))
@@ -471,6 +537,10 @@ def _groq_chat(
             raise LLMAuthError("Groq rejected the API key. Check GROQ_API_KEY in backend/.env.") from exc
         except groq.BadRequestError as exc:
             window.release(event)
+            if "reasoning_effort" in kwargs and model.startswith("qwen/") and "reasoning" in str(exc).lower():
+                kwargs.pop("reasoning_effort")           # this model does not take it: go on without
+                _reasoning_unsupported.add(model)
+                continue
             raise LLMBadRequestError(f"Groq rejected the request: {exc}") from exc
         except groq.APIStatusError as exc:
             window.release(event)
@@ -484,13 +554,16 @@ def _groq_chat(
             window.release(event)
             raise LLMError("Could not reach Groq. Check the internet connection.") from exc
 
-        total = getattr(getattr(response, "usage", None), "total_tokens", None) or reserve
-        window.correct(event, int(total))
+        usage = getattr(response, "usage", None)
+        total = getattr(usage, "total_tokens", None) or reserve
+        actual_out = getattr(usage, "completion_tokens", None)
+        window.correct(event, int(total), None if OTPM_COUNTS_REQUESTED or actual_out is None else int(actual_out))
         _record_usage(model, int(total))
         return response
 
     raise LLMRateLimitError(
-        "Groq kept rate-limiting this request. Wait a minute and try again, or switch to Claude.",
+        "Groq kept refusing the request" + (f" ({last_reason})" if last_reason else "")
+        + ". Wait a minute and try again, or switch to Claude.",
         daily=False,
     )
 
