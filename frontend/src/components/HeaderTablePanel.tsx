@@ -2,12 +2,14 @@ import { useState, useEffect, useRef } from "react";
 import { api } from "../api/client";
 import ResultsTable from "./ResultsTable";
 import ProgressBar from "./ProgressBar";
+import SavedNotice from "./SavedNotice";
 import HeaderReferencePanel from "./HeaderReferencePanel";
 import type { HeaderTableBatchResult, ProgressSnapshot } from "../types";
 
 export default function HeaderTablePanel() {
   // ── Input source ────────────────────────────────────────────────────────
   const [outputFiles, setOutputFiles] = useState<string[]>([]);
+  const [sourceFolder, setSourceFolder] = useState("");
   const [serverFile, setServerFile] = useState<string | null>(null);
   const [localFile, setLocalFile] = useState<File | null>(null);
   const [mode, setMode] = useState<"folder" | "upload">("folder");
@@ -20,9 +22,6 @@ export default function HeaderTablePanel() {
   const [runId, setRunId] = useState(0);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<ProgressSnapshot<HeaderTableBatchResult> | null>(null);
-  const [exporting, setExporting] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [savedPath, setSavedPath] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -30,8 +29,9 @@ export default function HeaderTablePanel() {
   async function fetchOutputFiles() {
     setLoadingFiles(true);
     try {
-      const { files } = await api.getOutputFiles();
+      const { files, folder } = await api.getResultFiles("BATCH");
       setOutputFiles(files);
+      setSourceFolder(folder);
       if (!serverFile) {
         // Prefer the scored workbook if present, otherwise the newest file.
         setServerFile(files.find((f) => f === "archiving_objects_scored.xlsx") ?? files[0] ?? null);
@@ -72,7 +72,6 @@ export default function HeaderTablePanel() {
     setLoading(true);
     setError("");
     setResult(null);
-    setSavedPath(null);
     setProgress(null);
     try {
       let started: import("../types").JobStarted;
@@ -98,51 +97,15 @@ export default function HeaderTablePanel() {
     }
   }
 
-  async function handleExport() {
-    if (!result?.rows?.length) return;
-    setExporting(true);
-    setError("");
-    try {
-      const blob = await api.headerTablesExport(result.rows);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "header_tables.xlsx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Export failed");
-    } finally {
-      setExporting(false);
-    }
-  }
-
-  async function handleSave() {
-    if (!result?.rows?.length) return;
-    setSaving(true);
-    setError("");
-    setSavedPath(null);
-    try {
-      const res = await api.saveHeaderTablesToOutput(result.rows);
-      setSavedPath(res.path);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   return (
     <div className="tx-panel">
       <div className="tx-description">
         <strong>Find Header Tables for Archiving Objects</strong> — select
-        "archiving_objects_scored.xlsx" from the output folder (its last sheet, already
+        "archiving_objects_scored.xlsx" saved by Find Archiving Objects for Tables (its last sheet, already
         sorted by descending cumulative size, is used), or upload your own Excel file
         with an "Archiving Object" column on its last sheet. For each of the top N
         archiving objects, this looks up its header table — the segment with no parent
-        segment. Whenever ARCH_DEF doesn't settle it (several top-level segments, none,
+        segment. Whenever SAP's archiving definition doesn't settle it (several top-level segments, none,
         or no entry at all), the DVM Guide and SAP for Me are consulted so that every
         object gets a header table, marked with its source and a confidence level. You can then upload a reference document to cross-check the
         results.
@@ -153,7 +116,7 @@ export default function HeaderTablePanel() {
           {mode === "folder" ? (
             <>
               <div className="file-picker-header">
-                <span className="file-picker-title">Output folder</span>
+                <span className="file-picker-title">Saved by Find Archiving Objects for Tables</span>
                 <button
                   type="button"
                   className="btn-refresh"
@@ -165,11 +128,16 @@ export default function HeaderTablePanel() {
                 </button>
               </div>
 
+              {sourceFolder && (
+                <p className="tx-hint" style={{ margin: 0 }}>
+                  Folder: <code>{sourceFolder}</code>
+                </p>
+              )}
               {loadingFiles ? (
                 <p className="tx-hint">Loading…</p>
               ) : outputFiles.length === 0 ? (
                 <p className="tx-hint">
-                  No Excel files in the output folder yet. Run <em>Score & Recommend Objects</em>{" "}
+                  Nothing saved yet. Run <em>Find Archiving Objects for Tables</em>{" "}
                   first, or upload a file below.
                 </p>
               ) : (
@@ -215,7 +183,7 @@ export default function HeaderTablePanel() {
                 className="btn-clear-upload"
                 onClick={handleClearUpload}
               >
-                ✕ Use output folder
+                ✕ Use a saved file
               </button>
             </div>
           )}
@@ -271,29 +239,7 @@ export default function HeaderTablePanel() {
             rows={result.rows}
             caption={`Header tables — ${result.rows.length} row${result.rows.length !== 1 ? "s" : ""}`}
           />
-          <div className="action-row">
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={handleSave}
-              disabled={saving}
-            >
-              {saving ? "Saving…" : "Save to output folder"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={handleExport}
-              disabled={exporting}
-            >
-              {exporting ? "Preparing…" : "Download Excel"}
-            </button>
-          </div>
-          {savedPath && (
-            <div className="saved-notice">
-              Saved to <code>output/header_tables.xlsx</code>
-            </div>
-          )}
+          <SavedNotice path={result.saved_path} error={result.save_error} />
           {result.rows.some((r) => r["Confidence"] && r["Confidence"] !== "High") && (
             <p className="tx-hint">
               Rows marked Medium or Low confidence are best guesses made from the DVM Guide

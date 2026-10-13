@@ -45,14 +45,14 @@ import object_reference
 import sap_for_me
 import transactions.db02 as db02
 import transactions.sara_info as sara_info
-from config import OUTPUT_DIR
+from config import results_folder
 
 logger = logging.getLogger(__name__)
 
 OUTPUT_NAME = "Archiving object analysis.xlsx"
 _OBJECT_NAME = re.compile(r"^[A-Z0-9_/]{2,30}$")
 
-SRC_SARA = "SARA information (SAP Help Portal)"
+SRC_SARA = "SAP Help Portal information"
 SRC_DVM = "DVM Guide"
 SRC_SFM = "SAP for Me"
 
@@ -65,13 +65,15 @@ def _norm(text) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
 
 
-def parse_objects(contents: bytes) -> list[dict]:
+def parse_objects(contents: bytes, prefer: str = "recommended") -> list[dict]:
     """Distinct archiving objects, in order, from a recommended-objects workbook: [{"object", "description"}].
 
-    Uses the last sheet whose title contains "recommended" and that has an "Archiving Object" column (the
-    scored workbook's "Recommended" sheet, or "Recommended (with Reference Doc)" after the reference review);
-    otherwise the last sheet with that column. Blank cells, placeholders like "(no archiving object found)"
-    and invalid names are skipped. Raises ValueError with a readable message."""
+    Uses the last sheet whose title contains *prefer* and that has an "Archiving Object" column: by default
+    "recommended" (the scored workbook's "Recommended" sheet, or "Recommended (with Ref Doc)" after the
+    reference review), or "grouped" for the "Grouped by Object" sheet (objects ordered by cumulative size,
+    each object once although its tables are merged cells). Without such a sheet, the last sheet with that
+    column is used. Blank cells, placeholders like "(no archiving object found)" and invalid names are
+    skipped. Raises ValueError with a readable message."""
     workbook = openpyxl.load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
     try:
         candidates = []
@@ -87,7 +89,7 @@ def parse_objects(contents: bytes) -> list[dict]:
                 "No 'Archiving Object' column found. Use the workbook saved by Find Archiving Objects "
                 "(archiving_objects_scored.xlsx or archiving_objects_with_reference.xlsx)."
             )
-        preferred = [c for c in candidates if "recommended" in c[0].title.lower()]
+        preferred = [c for c in candidates if prefer in c[0].title.lower()]
         ws, cols = (preferred or candidates)[-1]
         obj_idx, desc_idx = cols["archivingobject"], cols.get("objectdescription")
 
@@ -538,7 +540,7 @@ class ObjectAnalysisJob:
         sources: dict[str, str] = {}
 
         # 1. SARA information button -> the SAP Help Portal page
-        self._step(obj, "SARA: opening the information page")
+        self._step(obj, "Opening the SAP Help Portal information page")
         self._close_help_tab()                       # the previous object's page is closed first
         blocks, sara_note, sara_url = [], "", ""
         before = help_browser.help_urls_open()
@@ -549,7 +551,7 @@ class ObjectAnalysisJob:
             description = description or pressed["description"]
             url = help_browser.wait_for_new_help_page(before)
             if not url:
-                sara_note = ("SARA's information button did not open a SAP Help Portal page in the browser "
+                sara_note = ("The information button did not open a SAP Help Portal page in the browser "
                              "(or its address could not be read).")
             else:
                 self._last_help_url = url
@@ -892,7 +894,7 @@ class ObjectAnalysisJob:
         if not res.get("network_known"):
             ws.append(["", "The archiving-object network (table ARCH_NET) could not be read, so this is unknown."])
         elif not prereqs:
-            ws.append(["", f"None - no archiving object has to be archived before {res['object']} (per the SARA network, table ARCH_NET)."])
+            ws.append(["", f"None - no archiving object has to be archived before {res['object']} (per the archiving object network)."])
             ws.cell(row=ws.max_row, column=2).font = Font(bold=True)
         else:
             ws.append(["Step", "Archiving object", "Description", "Relationship", "Required before", "Reference check"])
@@ -982,9 +984,9 @@ class ObjectAnalysisJob:
 
     @staticmethod
     def _save(wb) -> Path:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        folder = results_folder("OBJECT_ANALYSIS")
         stem, suffix = Path(OUTPUT_NAME).stem, Path(OUTPUT_NAME).suffix
-        candidates = [OUTPUT_DIR / OUTPUT_NAME] + [OUTPUT_DIR / f"{stem} ({n}){suffix}" for n in range(2, 10)]
+        candidates = [folder / OUTPUT_NAME] + [folder / f"{stem} ({n}){suffix}" for n in range(2, 10)]
         for path in candidates:
             try:
                 wb.save(path)

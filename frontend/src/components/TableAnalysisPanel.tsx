@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import ProgressBar from "./ProgressBar";
+import SavedNotice from "./SavedNotice";
 import type { TableAnalysisField, TableAnalysisPrompt, TableAnalysisSnapshot } from "../types";
 
 const KIND_TAG: Record<string, string> = {
@@ -230,8 +231,7 @@ export default function TableAnalysisPanel() {
   async function fetchOutputFiles() {
     setLoadingFiles(true);
     try {
-      const { files } = await api.getOutputFiles();
-      const spreadsheets = files.filter((f) => !f.startsWith("Table analysis") && !f.startsWith("Open item analysis"));
+      const { files: spreadsheets } = await api.getResultFiles("HEADER_TABLES");
       setOutputFiles(spreadsheets);
       if (!serverFile) {
         setServerFile(spreadsheets.find((f) => f.startsWith("header_tables")) ?? spreadsheets[0] ?? null);
@@ -328,34 +328,18 @@ export default function TableAnalysisPanel() {
     await api.tableAnalysisCancel().catch(() => {});
   }
 
-  async function handleDownload() {
-    try {
-      const blob = await api.tableAnalysisDownload();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "Table analysis.xlsx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Download failed");
-    }
-  }
-
   const records = snapshot?.records ?? [];
 
   return (
     <div className="tx-panel">
       <div className="tx-description">
-        <strong>Table Analysis</strong> — runs a table analysis (TAANA) for each header table. By default it uses the
-        file saved by <em>Find Header Tables</em>; you can also upload a different one. For each table the tool first
-        looks in the <em>Fields for TAANA</em> sheet: if the table is listed there, its fields are used and you are not
+        <strong>Table Analysis</strong> — runs a table analysis for each header table. By default it uses the
+        file saved by <em>Find Header Tables for Archiving Objects</em>; you can also upload a different one. For each table the tool first
+        looks in the <em>Fields for Table Analysis</em> sheet: if the table is listed there, its fields are used and you are not
         asked anything. Only for tables that aren't in the sheet does it read the table's fields and ask you to choose the
         date, year and month fields, and whether to add other fields (such as company code or document type). When the
         analysis is done you can re-run any table with additional fields. It then creates an ad hoc analysis variant, runs it in the
-        background in SAP, and copies the result into <code>output/Table analysis.xlsx</code> (one sheet per
+        background in SAP, and copies the result into an Excel file that is saved automatically in the <em>Table Analysis</em> results folder (one sheet per
         table) before moving on to the next table. You answer the questions for all tables in a row: each table's analysis starts in the background as soon as you've chosen its fields, and the results are added to the Excel file as the jobs finish. Don't use SAP at the same time while it runs.
       </div>
 
@@ -364,7 +348,7 @@ export default function TableAnalysisPanel() {
           {mode === "folder" ? (
             <>
               <div className="file-picker-header">
-                <span className="file-picker-title">Output folder</span>
+                <span className="file-picker-title">Saved by Find Header Tables for Archiving Objects</span>
                 <button
                   type="button"
                   className="btn-refresh"
@@ -379,7 +363,7 @@ export default function TableAnalysisPanel() {
                 <p className="tx-hint">Loading…</p>
               ) : outputFiles.length === 0 ? (
                 <p className="tx-hint">
-                  No Excel files in the output folder. Run <em>Find Header Tables</em> first and save the result, or
+                  Nothing saved yet. Run <em>Find Header Tables for Archiving Objects</em> first, or
                   upload a file below.
                 </p>
               ) : (
@@ -419,7 +403,7 @@ export default function TableAnalysisPanel() {
               <span className="file-icon-lg">📄</span>
               <span className="uploaded-file-name">{localFile?.name}</span>
               <button type="button" className="btn-clear-upload" onClick={handleClearUpload} disabled={active}>
-                ✕ Use output folder
+                ✕ Use a saved file
               </button>
             </div>
           )}
@@ -429,7 +413,7 @@ export default function TableAnalysisPanel() {
           <p className="tx-hint" style={{ margin: 0 }}>
             {snapshot.fields_sheet.problem
               ? snapshot.fields_sheet.problem
-              : `Fields for TAANA sheet: ${snapshot.fields_sheet.tables} tables listed — those run without questions.`}
+              : `Fields for Table Analysis sheet: ${snapshot.fields_sheet.tables} tables listed — those run without questions.`}
           </p>
         )}
         <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
@@ -546,18 +530,8 @@ export default function TableAnalysisPanel() {
             </div>
           )}
 
-          {snapshot.status === "done" && (
-            <>
-              <div className="saved-notice">
-                {snapshot.message} Results are in <code>{snapshot.output_path ?? "output/Table analysis.xlsx"}</code>
-              </div>
-              {snapshot.output_path && (
-                <div className="action-row" style={{ marginTop: 8 }}>
-                  <button className="btn btn-primary" onClick={handleDownload}>Download Excel</button>
-                </div>
-              )}
-            </>
-          )}
+          {snapshot.status === "done" && snapshot.message && <p className="tx-hint">{snapshot.message}</p>}
+          <SavedNotice path={snapshot.output_path} />
         </div>
       )}
     </div>

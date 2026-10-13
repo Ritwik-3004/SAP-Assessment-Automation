@@ -4,7 +4,7 @@ Table analysis task: TAANA ad hoc analyses for the header tables of a header-tab
 For each table, in order:
   1. read the fields TAANA offers (transactions/taana_analysis.py) and the date/year-like ones
      (ABAP dictionary types, looked up once for all tables);
-  2. if the table is listed in resources/Fields for TAANA.xlsx, use the fields given there and skip the
+  2. if the table is listed in resources/Fields for Table Analysis.xlsx, use the fields given there and skip the
      questions; otherwise ask the user which DATE/YEAR/MONTH fields to analyse (and whether to group dates
      by year);
   3. (only for tables not in the sheet) ask whether other fields (company code, document type, ...) should
@@ -35,7 +35,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 
-from config import OUTPUT_DIR
+from config import results_folder
 import transactions.db02 as db02
 import transactions.taana_analysis as taana
 
@@ -61,12 +61,12 @@ _MONTH_NAME = re.compile(r"(MONAT|MONTH|MON$|^MON|_MON|SPBUP|POPER|BUPER|PERIO|P
 _MONTH_LABEL = re.compile(r"\b(month|monat|period|periode)\b", re.IGNORECASE)
 
 
-FIELDS_SHEET = Path(__file__).parent / "resources" / "Fields for TAANA.xlsx"
+FIELDS_SHEET = Path(__file__).parent / "resources" / "Fields for Table Analysis.xlsx"
 _sheet_cache: dict = {"mtime": None, "data": None}
 
 
 def load_fields_sheet() -> dict:
-    """The fields to analyse per table, from resources/Fields for TAANA.xlsx (re-read when the file changes).
+    """The fields to analyse per table, from resources/Fields for Table Analysis.xlsx (re-read when the file changes).
 
     The sheet needs a "Header Table" column (a "Table Name"/"Table" column also works) and one or more
     columns whose title contains "field" (e.g. "Primary Date Field"); a cell may hold several fields
@@ -487,7 +487,7 @@ class TableAnalysisJob:
 
         If the fields sheet lists the table, those fields are used and the user is NOT asked. The user is asked
         only when the table is not in the sheet, or none of its fields exists in TAANA for this table."""
-        self._step(table, "Reading the table's fields in TAANA…")
+        self._step(table, "Reading the table's fields…")
         listed = taana.list_fields(table)
         if listed["status"] != "ok":
             raise RuntimeError(listed["message"])
@@ -507,13 +507,13 @@ class TableAnalysisJob:
                     {"name": n, "year": self._group_by_year and kinds.get(n) in ("date", "period")} for n in usable
                 ]
                 source = "sheet"
-                sheet_note = "Fields taken from the Fields for TAANA sheet."
+                sheet_note = "Fields taken from the Fields for Table Analysis sheet."
                 if missing:
-                    sheet_note += f" Not offered by TAANA for this table and left out: {', '.join(missing)}."
+                    sheet_note += f" Not offered for analysis for this table and left out: {', '.join(missing)}."
                 self._step(table, f"Using the fields from the sheet: {', '.join(usable)}")
             else:
                 sheet_problem = (
-                    f"The Fields for TAANA sheet lists {', '.join(sheet_fields)} for {table}, but TAANA does not "
+                    f"The Fields for Table Analysis sheet lists {', '.join(sheet_fields)} for {table}, but the analysis does not "
                     "offer any of them for this table, so please choose the fields."
                 )
 
@@ -582,7 +582,7 @@ class TableAnalysisJob:
         with self._lock:
             previous = dict(self._records[table])
         old_specs = [dict(s) for s in previous["specs"]]
-        self._step(table, "Reading the table's fields in TAANA…", f"Re-running {table}: reading its fields…")
+        self._step(table, "Reading the table's fields…", f"Re-running {table}: reading its fields…")
         listed = taana.list_fields(table)
         if listed["status"] != "ok":
             raise RuntimeError(listed["message"])
@@ -688,7 +688,7 @@ class TableAnalysisJob:
             now = time.monotonic()
             for entry in due:
                 table = entry["table"]
-                result = results.get(table) or {"state": "error", "status": "No answer from TAANA."}
+                result = results.get(table) or {"state": "error", "status": "No answer from the analysis."}
                 state = result.get("state")
                 elapsed = now - entry["submitted"]
                 if state == "completed":
@@ -711,7 +711,7 @@ class TableAnalysisJob:
                 entry["errors"] = entry["errors"] + 1 if state == "error" else 0
                 if entry["errors"] >= MAX_CHECK_ERRORS or elapsed > MAX_WAIT_SECONDS:
                     reason = (
-                        f"Could not read the analysis in TAANA: {result.get('status')}"
+                        f"Could not read the analysis: {result.get('status')}"
                         if entry["errors"] >= MAX_CHECK_ERRORS
                         else f"The analysis did not finish within {_clock(MAX_WAIT_SECONDS)}."
                     )
@@ -741,7 +741,7 @@ class TableAnalysisJob:
         for r in records:
             summary.append([
                 r["table"], r["state"].capitalize(), ", ".join(r["fields"]),
-                {"sheet": "Fields for TAANA sheet", "re-run": "You (re-run with additional fields)"}.get(r.get("source", ""), "You"),
+                {"sheet": "Fields for Table Analysis sheet", "re-run": "You (re-run with additional fields)"}.get(r.get("source", ""), "You"),
                 r["rows"], started_by_table.get(r["table"], ""), r["note"],
             ])
         self._style_header(summary, 1)
@@ -802,9 +802,9 @@ class TableAnalysisJob:
 
     @staticmethod
     def _save(wb) -> Path:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        candidates = [OUTPUT_DIR / OUTPUT_NAME] + [
-            OUTPUT_DIR / f"{Path(OUTPUT_NAME).stem} ({n}){Path(OUTPUT_NAME).suffix}" for n in range(2, 10)
+        folder = results_folder("TABLE_ANALYSIS")
+        candidates = [folder / OUTPUT_NAME] + [
+            folder / f"{Path(OUTPUT_NAME).stem} ({n}){Path(OUTPUT_NAME).suffix}" for n in range(2, 10)
         ]
         for path in candidates:
             try:

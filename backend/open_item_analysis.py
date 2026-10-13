@@ -1,10 +1,11 @@
 """
-Open Item Analysis task: for each recommended archiving object, run the object's open-item query (from
+Open Item Analysis task: for each archiving object on the "Grouped by Object" sheet, run the object's open-item query (from
 resources/Open Closed Item details.xlsx, sheet "Open Item Analysis") in DB02's SQL Editor and collect the
-results in output/Open item analysis.xlsx.
+results in "Open item analysis.xlsx" (a Summary sheet, then one sheet per archiving object).
 
-  * The objects come from the recommended-objects workbook saved by Find Archiving Objects (or any file
-    the user chooses) -- the same input as the Archiving Object Analysis task.
+  * The objects come from the "Grouped by Object" sheet of the workbook saved by Find Archiving Objects for
+    Tables (or any file the user chooses), largest cumulative size first. (Archiving Object Analysis reads
+    the "Recommended" sheet instead.) Without such a sheet the "Recommended" sheet is used.
   * The sheet holds one query per object, in a grid of cells that each read "OBJECT:" followed by the SQL.
     An object without a query is skipped with a note.
   * The sheet's queries list one row per document (year, month, category), which would be millions of rows,
@@ -29,7 +30,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 
-from config import OUTPUT_DIR
+from config import results_folder
 import transactions.db02 as db02
 from sap_connector import sap
 
@@ -488,28 +489,8 @@ class OpenItemAnalysisJob:
             results = {o: {"columns": list(r["columns"]), "rows": list(r["rows"])} for o, r in self._results.items()}
 
         wb = openpyxl.Workbook()
-        data = wb.active
-        data.title = "Open item analysis"
-        columns: list[str] = []                   # every result column, in order of first appearance
-        for o in order:
-            for c in results.get(o, {}).get("columns", []):
-                if c not in columns:
-                    columns.append(c)
-        data.append(["Archiving Object"] + [_COLUMN_TITLES.get(c, c) for c in columns])
-        for o in order:
-            res = results.get(o)
-            if not res:
-                continue
-            index = {c: i for i, c in enumerate(res["columns"])}
-            for row in res["rows"]:
-                data.append([o] + [
-                    self._cell(c, row[index[c]]) if c in index and index[c] < len(row) else "" for c in columns
-                ])
-        self._style_header(data)
-        data.freeze_panes = "B2"
-        self._autosize(data)
-
-        summary = wb.create_sheet("Summary")
+        summary = wb.active
+        summary.title = "Summary"
         summary.append(["Archiving Object", "Description", "Area", "Result", "Rows", "Query", "Note", "SQL run"])
         for o in order:
             r = records[o]
@@ -524,8 +505,33 @@ class OpenItemAnalysisJob:
         for row in summary.iter_rows(min_row=2):
             row[7].alignment = Alignment(wrap_text=False, vertical="top")
 
+        # One sheet per object, named after it, holding just that object's result columns (so no
+        # "Archiving Object" column is needed). Objects without a result have no sheet; the Summary says why.
+        used = {"Summary"}
+        for o in order:
+            res = results.get(o)
+            if not res:
+                continue
+            ws = wb.create_sheet(self._sheet_name(o, used))
+            ws.append([_COLUMN_TITLES.get(c, c) for c in res["columns"]])
+            for row in res["rows"]:
+                ws.append([self._cell(c, row[i]) if i < len(row) else "" for i, c in enumerate(res["columns"])])
+            self._style_header(ws)
+            ws.freeze_panes = "A2"
+            self._autosize(ws)
+
         path = self._save_workbook(wb)
         self._set(output_path=str(path))
+
+    @staticmethod
+    def _sheet_name(obj: str, used: set) -> str:
+        base = re.sub(r"[\\/*?:\[\]]", "_", obj)[:31] or "Object"
+        name, n = base, 2
+        while name.lower() in {u.lower() for u in used}:
+            name = f"{base[:28]}_{n}"
+            n += 1
+        used.add(name)
+        return name
 
     @staticmethod
     def _query_source(r: dict) -> str:
@@ -559,9 +565,9 @@ class OpenItemAnalysisJob:
 
     @staticmethod
     def _save_workbook(wb) -> Path:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        folder = results_folder("OPEN_ITEM_ANALYSIS")
         stem, suffix = Path(OUTPUT_NAME).stem, Path(OUTPUT_NAME).suffix
-        for path in [OUTPUT_DIR / OUTPUT_NAME] + [OUTPUT_DIR / f"{stem} ({n}){suffix}" for n in range(2, 10)]:
+        for path in [folder / OUTPUT_NAME] + [folder / f"{stem} ({n}){suffix}" for n in range(2, 10)]:
             try:
                 wb.save(path)
                 return path

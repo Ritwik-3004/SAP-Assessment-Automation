@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import ProgressBar from "./ProgressBar";
+import SavedNotice from "./SavedNotice";
 import type { OpenItemResult, OpenItemSnapshot } from "../types";
 
 function elapsed(startedSeconds: number, now: number): string {
@@ -9,7 +10,7 @@ function elapsed(startedSeconds: number, now: number): string {
 }
 
 export default function OpenItemAnalysisPanel() {
-  // ── Input source (default: the recommended objects saved by Find Archiving Objects) ──
+  // ── Input source (default: the objects on the Grouped by Object sheet saved by Find Archiving Objects for Tables) ──
   const [outputFiles, setOutputFiles] = useState<string[]>([]);
   const [serverFile, setServerFile] = useState<string | null>(null);
   const [localFile, setLocalFile] = useState<File | null>(null);
@@ -44,10 +45,7 @@ export default function OpenItemAnalysisPanel() {
   async function fetchOutputFiles() {
     setLoadingFiles(true);
     try {
-      const { files } = await api.getOutputFiles();
-      const spreadsheets = files.filter(
-        (f) => !f.startsWith("Table analysis") && !f.startsWith("Archiving object analysis") && !f.startsWith("Open item analysis")
-      );
+      const { files: spreadsheets } = await api.getResultFiles("BATCH");
       setOutputFiles(spreadsheets);
       if (!serverFile) setServerFile(preferred(spreadsheets));
     } catch {
@@ -148,22 +146,6 @@ export default function OpenItemAnalysisPanel() {
     }
   }
 
-  async function handleDownload() {
-    try {
-      const blob = await api.openItemDownload();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "Open item analysis.xlsx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Download failed");
-    }
-  }
-
   const current = snapshot?.current ?? null;
   const resetQuery = focusRec?.default_query ?? "";
   const runLabel =
@@ -172,14 +154,14 @@ export default function OpenItemAnalysisPanel() {
   return (
     <div className="tx-panel">
       <div className="tx-description">
-        <strong>Open Item Analysis</strong> — for each recommended archiving object this looks up the object's open-item
-        query in the <em>Open Closed Item details</em> sheet (<code>backend/resources</code>) and runs it in DB02's SQL
+        <strong>Open Item Analysis</strong> — for each archiving object on the <em>Grouped by Object</em> sheet this looks up the object's open-item
+        query in the <em>Open Closed Item details</em> sheet (<code>backend/resources</code>) and runs it in SAP's SQL
         Editor. The sheet's queries list one row per document, so the tool <strong>counts the documents per year, month and
         category</strong> (that is the query you see below, so you can change it). You can see which query is running and
         edit it to get different results — the edited query runs next and replaces that object's result. An object with no
-        query in the sheet is skipped with a note. Results go to <code>output/Open item analysis.xlsx</code>: the archiving
-        object with all the result columns next to it, plus a Summary sheet. By default the tool uses the recommended
-        objects saved by <em>Find Archiving Objects</em>; you can choose another file. Only read-only <code>SELECT</code>{" "}
+        query in the sheet is skipped with a note. The results are saved automatically in the <em>Open Item Analysis</em> results folder as an Excel file with a Summary sheet
+        and <strong>one sheet per archiving object</strong> holding its result. By default the tool reads the <em>Grouped by Object</em> sheet
+        (the objects with their tables grouped under them, largest first) saved by <em>Find Archiving Objects for Tables</em>; you can choose another file. Only read-only <code>SELECT</code>{" "}
         queries are accepted. The queries can take a while on large tables, and SAP is busy with them meanwhile.
       </div>
 
@@ -188,7 +170,7 @@ export default function OpenItemAnalysisPanel() {
           {mode === "folder" ? (
             <>
               <div className="file-picker-header">
-                <span className="file-picker-title">Output folder</span>
+                <span className="file-picker-title">Saved by Find Archiving Objects for Tables</span>
                 <button
                   type="button"
                   className="btn-refresh"
@@ -203,7 +185,7 @@ export default function OpenItemAnalysisPanel() {
                 <p className="tx-hint">Loading…</p>
               ) : outputFiles.length === 0 ? (
                 <p className="tx-hint">
-                  No Excel files in the output folder. Run <em>Find Archiving Objects</em> and save the result, or upload
+                  Nothing saved yet. Run <em>Find Archiving Objects for Tables</em> first, or upload
                   a file below.
                 </p>
               ) : (
@@ -243,7 +225,7 @@ export default function OpenItemAnalysisPanel() {
               <span className="file-icon-lg">📄</span>
               <span className="uploaded-file-name">{localFile?.name}</span>
               <button type="button" className="btn-clear-upload" onClick={handleClearUpload} disabled={active}>
-                ✕ Use output folder
+                ✕ Use a saved file
               </button>
             </div>
           )}
@@ -298,13 +280,9 @@ export default function OpenItemAnalysisPanel() {
             <div className="saved-notice" style={{ marginTop: 12 }}>
               <strong>{snapshot.message ?? "Finished."}</strong>{" "}
               {records.filter((r) => r.state === "done").length} of {records.length} objects have a result.
-              {snapshot.output_path && (
-                <div className="action-row" style={{ marginTop: 8 }}>
-                  <button className="btn btn-primary" onClick={handleDownload}>Download Excel</button>
-                </div>
-              )}
             </div>
           )}
+          <SavedNotice path={snapshot.output_path} />
 
           {/* The query box */}
           {records.length > 0 && (
@@ -443,7 +421,7 @@ export default function OpenItemAnalysisPanel() {
                             "—"
                           )}
                         </td>
-                        <td className="ref-doc-comment">{r.note}</td>
+                        <td className="ref-doc-comment note-wrap">{r.note}</td>
                         <td>
                           <button className="btn-link" onClick={() => pickObject(r.object)}>
                             {r.default_query || r.edited ? "View / edit query" : "Add a query…"}

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import ResultsTable from "./ResultsTable";
+import SavedNotice from "./SavedNotice";
 import type { ReferenceReview } from "../types";
 
 type Row = Record<string, string>;
@@ -28,15 +28,11 @@ export interface ReferenceReviewConfig {
   extraLabel: string;
   uploadHint: string;
   previewTitle: string;
-  savedPath: string;
-  downloadName: string;
   analyze: (files: File[]) => Promise<ReferenceReview>;
+  /** Saves the final list into the task's results folder; resolves with the full path it was saved to. */
   save: (final: Row[]) => Promise<{ path: string }>;
-  exportFile: (final: Row[]) => Promise<Blob>;
   /** The row after the user accepts the reference document's value (*review* is the analysis result). */
   applyOverride: (row: Row, refValue: string, review: ReferenceReview) => Row;
-  /** Optional "Show Grouped by Object" view of the final list (same as Find Archiving Objects). */
-  groupedView?: { fetch: (rows: Row[]) => Promise<Row[]>; caption: string };
 }
 
 export default function ReferenceReviewPanel({ config }: { config: ReferenceReviewConfig }) {
@@ -53,12 +49,6 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
   const [previewRows, setPreviewRows] = useState<Row[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedPath, setSavedPath] = useState<string | null>(null);
-  const [exporting, setExporting] = useState(false);
-
-  // Grouped by Object view of the preview (only when the config provides one)
-  const [groupedRows, setGroupedRows] = useState<Row[] | null>(null);
-  const [showGrouped, setShowGrouped] = useState(false);
-  const [groupedLoading, setGroupedLoading] = useState(false);
 
   // ── File pick ────────────────────────────────────────────────────────────
 
@@ -69,8 +59,6 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
     setSelected(new Set());
     setPreviewRows(null);
     setSavedPath(null);
-    setGroupedRows(null);
-    setShowGrouped(false);
 
     try {
       const res = await c.analyze(files);
@@ -121,68 +109,23 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
     });
 
     setPreviewRows(preview);
-    setGroupedRows(null);
-    setShowGrouped(false);
     setPhase("preview");
+    void saveFinal(preview);
   }
 
-  // ── Grouped by Object ────────────────────────────────────────────────────
+  // ── Save (automatic, as soon as the final list is shown) ─────────────────
 
-  async function handleToggleGrouped() {
-    if (!c.groupedView || !previewRows) return;
-    if (showGrouped) {
-      setShowGrouped(false);
-      return;
-    }
-    if (groupedRows) {
-      setShowGrouped(true);
-      return;
-    }
-    setGroupedLoading(true);
-    setError("");
-    try {
-      setGroupedRows(await c.groupedView.fetch(previewRows));
-      setShowGrouped(true);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Grouping failed");
-    } finally {
-      setGroupedLoading(false);
-    }
-  }
-
-  // ── Save / export ────────────────────────────────────────────────────────
-
-  async function handleSave() {
-    if (!previewRows) return;
+  async function saveFinal(rows: Row[]) {
     setSaving(true);
     setSavedPath(null);
+    setError("");
     try {
-      const res = await c.save(previewRows);
+      const res = await c.save(rows);
       setSavedPath(res.path);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Save failed");
+      setError(err instanceof Error ? err.message : "Saving the results failed");
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function handleExport() {
-    if (!previewRows) return;
-    setExporting(true);
-    try {
-      const blob = await c.exportFile(previewRows);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = c.downloadName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Export failed");
-    } finally {
-      setExporting(false);
     }
   }
 
@@ -414,7 +357,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
                     <td>{row[c.idKey]}</td>
                     <td>{row[c.valueKey] || "—"}</td>
                     <td>{row[c.extraKey] || "—"}</td>
-                    <td className="ref-doc-comment">{row[c.commentKey] || ""}</td>
+                    <td className="ref-doc-comment note-wrap">{row[c.commentKey] || ""}</td>
                   </tr>
                 ))}
               </tbody>
@@ -424,21 +367,6 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
           {error && <p className="tx-error">{error}</p>}
 
           <div className="action-row" style={{ marginTop: 12 }}>
-            <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-              {saving ? "Saving…" : "Save to output folder"}
-            </button>
-            <button className="btn btn-secondary" onClick={handleExport} disabled={exporting}>
-              {exporting ? "Preparing…" : "Download Excel"}
-            </button>
-            {c.groupedView && (
-              <button
-                className="btn btn-secondary"
-                onClick={handleToggleGrouped}
-                disabled={groupedLoading}
-              >
-                {groupedLoading ? "Grouping…" : showGrouped ? "Hide Grouped by Object" : "Show Grouped by Object"}
-              </button>
-            )}
             <button
               className="btn btn-secondary"
               onClick={() => setPhase("results")}
@@ -447,17 +375,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
             </button>
           </div>
 
-          {savedPath && (
-            <div className="saved-notice">
-              Saved to <code>{c.savedPath}</code>
-            </div>
-          )}
-
-          {c.groupedView && showGrouped && groupedRows && (
-            <div style={{ marginTop: 12 }}>
-              <ResultsTable rows={groupedRows} caption={c.groupedView.caption} />
-            </div>
-          )}
+          {saving ? <p className="tx-hint">Saving the results…</p> : <SavedNotice path={savedPath} />}
         </>
       )}
     </div>

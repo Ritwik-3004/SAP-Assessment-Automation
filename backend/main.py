@@ -20,12 +20,11 @@ import openpyxl
 from openpyxl.styles import Alignment
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from sap_connector import sap
 from progress import ProgressTracker
-from config import INPUT_DIR, OUTPUT_DIR, CREDENTIALS_FILE, SAP_FOR_ME_CREDENTIALS_FILE
+from config import RESULTS_DIR, RESULT_FOLDERS, results_folder, CREDENTIALS_FILE, SAP_FOR_ME_CREDENTIALS_FILE
 import scoring
 import grouping
 import llm
@@ -50,10 +49,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("Input folder:  %s", INPUT_DIR)
-    logger.info("Output folder: %s", OUTPUT_DIR)
+    for task in RESULT_FOLDERS:
+        results_folder(task)
+    logger.info("Results folder: %s", RESULTS_DIR)
     yield
 
 
@@ -141,10 +139,6 @@ class SaraRequest(BaseModel):
     archiving_object: str
 
 
-class Db15ExportRequest(BaseModel):
-    rows: list[dict[str, str]]
-
-
 class Db15ScoreRequest(BaseModel):
     rows: list[dict[str, str]]
 
@@ -154,16 +148,8 @@ class Db15ScoreExportRequest(BaseModel):
     recommended: list[dict[str, str]]
 
 
-class GroupByObjectRequest(BaseModel):
-    recommended: list[dict[str, str]]
-
-
 class Db02TopTablesRequest(BaseModel):
     limit: int = 300
-
-
-class Db02ExportRequest(BaseModel):
-    rows: list[dict[str, str]]
 
 
 class Db02DebugClickRequest(BaseModel):
@@ -186,10 +172,6 @@ HEADER_TABLE_COLUMNS = ["Archiving Object", "Header Table", "Source", "Confidenc
 
 
 class HeaderTableExportRequest(BaseModel):
-    rows: list[dict[str, str]]
-
-
-class SaveTablesRequest(BaseModel):
     rows: list[dict[str, str]]
 
 
@@ -418,77 +400,79 @@ def chat_endpoint(req: ChatRequest):
 # File folder endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/files/input")
-def list_input_files():
-    """List Excel files in the input folder, newest-modified first."""
+@app.get("/api/results/{task}/files")
+def list_result_files(task: str):
+    """List the Excel files in a task's results folder, newest-modified first, plus the folder's full path.
+    A task that builds on an earlier one uses this to offer that earlier task's results."""
+    if task not in RESULT_FOLDERS:
+        raise HTTPException(status_code=404, detail=f"Unknown task '{task}'.")
+    folder = results_folder(task)
     files = sorted(
-        [f for f in INPUT_DIR.glob("*.xlsx")] + [f for f in INPUT_DIR.glob("*.xls")],
+        [f for f in folder.glob("*.xlsx") if not f.name.startswith("~$")] + list(folder.glob("*.xls")),
         key=lambda f: f.stat().st_mtime,
         reverse=True,
     )
-    return {"files": [f.name for f in files]}
+    return {"folder": str(folder), "files": [f.name for f in files]}
 
 
-@app.get("/api/files/output")
-def list_output_files():
-    """List Excel files in the output folder, newest-modified first --
-    mirrors list_input_files() above. Used to auto-detect
-    archiving_objects_scored.xlsx for the header-table lookup tool."""
-    files = sorted(
-        [f for f in OUTPUT_DIR.glob("*.xlsx")] + [f for f in OUTPUT_DIR.glob("*.xls")],
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )
-    return {"files": [f.name for f in files]}
+def _result_file(task: str, filename: str) -> Path:
+    """A file in a task's results folder (the name is reduced to its last part, so it cannot escape the folder)."""
+    path = results_folder(task) / Path(filename).name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"'{path.name}' not found in the {RESULT_FOLDERS[task]} results folder.")
+    return path
 
 
-@app.post("/api/files/input/save")
-def save_tables_to_input(req: SaveTablesRequest):
-    """Save the table list rows to input/list_of_tables.xlsx."""
-    columns = ["Table Name", "Description"] + _optional_size_columns(req.rows)
-    buf = _build_workbook(req.rows, columns=columns, sheet_title="Top Tables")
-    dest = INPUT_DIR / "list_of_tables.xlsx"
-    dest.write_bytes(buf.getvalue())
-    return {"saved": True, "path": str(dest)}
+def _save_result(task: str, filename: str, buffer: io.BytesIO) -> str:
+    """Write a workbook into a task's results folder and return the full path it was saved to.
+    If the file is open in Excel (locked), a numbered copy -- "name (2).xlsx" ... "name (9).xlsx" -- is
+    written instead, like the analysis tasks do, so a locked file never costs a result. The next save
+    tries the original name again. Raises PermissionError only if every name is locked."""
+    folder = results_folder(task)
+    stem, suffix = Path(filename).stem, Path(filename).suffix
+    for dest in [folder / filename] + [folder / f"{stem} ({n}){suffix}" for n in range(2, 10)]:
+        try:
+            dest.write_bytes(buffer.getvalue())
+            return str(dest)
+        except PermissionError:   # open in Excel
+            continue
+    raise PermissionError(f"Could not save {folder / filename} — it and its numbered copies are open in Excel. Close them and try again.")
 
 
-@app.post("/api/files/output/save-archiving")
-def save_archiving_to_output(req: Db15ExportRequest):
-    """Save archiving-objects rows to output/archiving_objects_by_table.xlsx."""
-    buf = _build_workbook(
-        req.rows,
-        columns=["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description"],
-        sheet_title="DB15 Results",
-    )
-    dest = OUTPUT_DIR / "archiving_objects_by_table.xlsx"
-    dest.write_bytes(buf.getvalue())
-    return {"saved": True, "path": str(dest)}
+def _save_result_response(task: str, filename: str, buffer: io.BytesIO) -> dict:
+    try:
+        return {"saved": True, "path": _save_result(task, filename, buffer)}
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
-@app.post("/api/files/output/save-scored")
-def save_scored_to_output(req: Db15ScoreExportRequest):
-    """Save scored archiving-objects to output/archiving_objects_scored.xlsx."""
-    buf = _build_multi_sheet_workbook([
-        (
-            "All Scored Objects",
-            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description", "Housekeeping Program", "Score"],
-            req.rows,
-        ),
-        (
-            "Recommended",
-            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description", "Housekeeping Program", "Score", "Rationale"],
-            req.recommended,
-        ),
-        (
-            "Grouped by Object",
-            GROUPED_COLUMNS,
-            grouping.build_object_groups(req.recommended),
-            GROUPED_MERGE_COLUMNS,
-        ),
+def _autosave(result: dict, task: str, filename: str, build) -> None:
+    """Save a finished job's workbook straight away and note where in the result ("saved_path"), or why not
+    ("save_error"). A failed save never discards the result itself."""
+    try:
+        result["saved_path"] = _save_result(task, filename, build())
+    except Exception as exc:
+        logger.exception("Could not save %s", filename)
+        result["save_error"] = str(exc)
+
+
+SCORED_COLUMNS = ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object",
+                  "Object Description", "Housekeeping Program", "Score"]
+
+
+def _scored_workbook(rows: list[dict], recommended: list[dict]) -> io.BytesIO:
+    return _build_multi_sheet_workbook([
+        ("All Scored Objects", SCORED_COLUMNS, rows),
+        ("Recommended", SCORED_COLUMNS + ["Rationale"], recommended),
+        ("Grouped by Object", GROUPED_COLUMNS, grouping.build_object_groups(recommended), GROUPED_MERGE_COLUMNS),
     ])
-    dest = OUTPUT_DIR / "archiving_objects_scored.xlsx"
-    dest.write_bytes(buf.getvalue())
-    return {"saved": True, "path": str(dest)}
+
+
+@app.post("/api/results/archiving-objects/save")
+def save_scored_results(req: Db15ScoreExportRequest):
+    """Re-save the scored archiving objects (after the assistant changed them) to
+    Find Archiving Objects for Tables / archiving_objects_scored.xlsx."""
+    return _save_result_response("BATCH", "archiving_objects_scored.xlsx", _scored_workbook(req.rows, req.recommended))
 
 
 # ---------------------------------------------------------------------------
@@ -580,15 +564,12 @@ def run_db15_batch(file: UploadFile = File(...)):
 
 @app.post("/api/transactions/db15/batch-from-input")
 def run_db15_batch_from_input(req: Db15BatchFromInputRequest):
-    """Start a DB15 batch job using a file that already exists in the input folder."""
+    """Start the archiving-object lookup using a table list saved by Generate Table List."""
     _require_connection()
     if _db15_batch_progress.is_running():
         raise HTTPException(status_code=409, detail="A batch lookup is already in progress.")
 
-    safe_name = Path(req.filename).name
-    file_path = INPUT_DIR / safe_name
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"'{safe_name}' not found in the input folder.")
+    file_path = _result_file("TOP_TABLES", req.filename)
 
     tables = _parse_table_list(file_path.read_bytes())
     if not tables:
@@ -633,20 +614,6 @@ def debug_db15_grid(table_name: str):
     return result
 
 
-@app.post("/api/transactions/db15/export")
-def export_db15_batch(req: Db15ExportRequest):
-    buffer = _build_workbook(
-        req.rows,
-        columns=["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description"],
-        sheet_title="DB15 Results",
-    )
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=archiving_objects_by_table.xlsx"},
-    )
-
-
 @app.post("/api/transactions/db15/score")
 def score_db15_batch(req: Db15ScoreRequest):
     if _scoring_progress.is_running():
@@ -661,6 +628,8 @@ def score_db15_batch(req: Db15ScoreRequest):
             if result["status"] == "error":
                 _scoring_progress.fail(result["message"])
             else:
+                _autosave(result, "BATCH", "archiving_objects_scored.xlsx",
+                          lambda: _scored_workbook(result.get("rows", []), result.get("recommended", [])))
                 _scoring_progress.finish(result)
         except Exception as exc:
             logger.exception("Scoring job failed")
@@ -675,41 +644,6 @@ def get_db15_score_progress():
     return _scoring_progress.snapshot()
 
 
-@app.post("/api/transactions/db15/score-export")
-def export_db15_scored(req: Db15ScoreExportRequest):
-    buffer = _build_multi_sheet_workbook([
-        (
-            "All Scored Objects",
-            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description", "Housekeeping Program", "Score"],
-            req.rows,
-        ),
-        (
-            "Recommended",
-            ["Table Name", "Table Description", "Volume (GB)", "Volume (MB)", "Archiving Object", "Object Description", "Housekeeping Program", "Score", "Rationale"],
-            req.recommended,
-        ),
-        (
-            "Grouped by Object",
-            GROUPED_COLUMNS,
-            grouping.build_object_groups(req.recommended),
-            GROUPED_MERGE_COLUMNS,
-        ),
-    ])
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=archiving_objects_scored.xlsx"},
-    )
-
-
-@app.post("/api/transactions/db15/group-by-object")
-def group_db15_by_object(req: GroupByObjectRequest):
-    """Group scored tables by their recommended Archiving Object or
-    Housekeeping Program, sorted by cumulative size — pure in-memory
-    computation over already-scored data, so no progress polling needed."""
-    return {"status": "ok", "rows": grouping.build_object_groups(req.recommended)}
-
-
 # ---------------------------------------------------------------------------
 # DB02 (generate a starting table list via the SQL Editor's "top tables by
 # size" query, for users who don't already have a list of tables to check)
@@ -721,22 +655,13 @@ def get_db02_top_tables(req: Db02TopTablesRequest):
     result = db02.run_get_top_tables(req.limit)
     if result["status"] == "error":
         raise HTTPException(status_code=500, detail=result["message"])
+
+    def build() -> io.BytesIO:
+        rows = result.get("rows", [])
+        return _build_workbook(rows, columns=["Table Name", "Description"] + _optional_size_columns(rows), sheet_title="Top Tables")
+
+    _autosave(result, "TOP_TABLES", "list_of_tables.xlsx", build)
     return result
-
-
-@app.post("/api/transactions/db02/export")
-def export_db02_top_tables(req: Db02ExportRequest):
-    columns = ["Table Name", "Description"] + _optional_size_columns(req.rows)
-    buffer = _build_workbook(
-        req.rows,
-        columns=columns,
-        sheet_title="Top Tables",
-    )
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=db02_top_tables.xlsx"},
-    )
 
 
 @app.get("/api/transactions/db02/debug-screen")
@@ -817,22 +742,19 @@ def run_header_table_batch(file: UploadFile = File(...), max_objects: int = 20):
 
 @app.post("/api/transactions/header-tables/batch-from-output")
 def run_header_table_batch_from_output(req: HeaderTableBatchFromOutputRequest):
-    """Start a header-table lookup job using a file that already exists in
-    the output folder (e.g. archiving_objects_scored.xlsx)."""
+    """Start a header-table lookup job using a file saved by Find Archiving Objects for Tables
+    (e.g. archiving_objects_scored.xlsx)."""
     _require_connection()
     if _header_table_progress.is_running():
         raise HTTPException(status_code=409, detail="A header-table lookup is already in progress.")
 
-    safe_name = Path(req.filename).name
-    file_path = OUTPUT_DIR / safe_name
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"'{safe_name}' not found in the output folder.")
+    file_path = _result_file("BATCH", req.filename)
 
     archiving_objects = _parse_top_archiving_objects(file_path.read_bytes(), limit=req.max_objects)
     if not archiving_objects:
         raise HTTPException(
             status_code=400,
-            detail=f"No 'Archiving Object' column with values found in '{safe_name}''s last sheet.",
+            detail=f"No 'Archiving Object' column with values found in '{file_path.name}''s last sheet.",
         )
 
     _header_table_progress.start(len(archiving_objects))
@@ -843,33 +765,6 @@ def run_header_table_batch_from_output(req: HeaderTableBatchFromOutputRequest):
 @app.get("/api/transactions/header-tables/batch/progress")
 def get_header_table_batch_progress():
     return _header_table_progress.snapshot()
-
-
-@app.post("/api/transactions/header-tables/export")
-def export_header_tables(req: HeaderTableExportRequest):
-    buffer = _build_workbook(
-        req.rows,
-        columns=HEADER_TABLE_COLUMNS,
-        sheet_title="Header Tables",
-    )
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=header_tables.xlsx"},
-    )
-
-
-@app.post("/api/files/output/save-header-tables")
-def save_header_tables_to_output(req: HeaderTableExportRequest):
-    """Save header-table rows to output/header_tables.xlsx."""
-    buf = _build_workbook(
-        req.rows,
-        columns=HEADER_TABLE_COLUMNS,
-        sheet_title="Header Tables",
-    )
-    dest = OUTPUT_DIR / "header_tables.xlsx"
-    dest.write_bytes(buf.getvalue())
-    return {"saved": True, "path": str(dest)}
 
 
 @app.get("/api/transactions/se16n/debug-arch-def-screen")
@@ -934,6 +829,8 @@ def _run_header_table_job(archiving_objects: list[str]):
             result.setdefault("errors", []).append(
                 {"archiving_object": "(several)", "message": f"Could not verify that the header tables exist in SAP: {exc}"}
             )
+        _autosave(result, "HEADER_TABLES", "header_tables.xlsx",
+                  lambda: _build_workbook(result.get("rows", []), columns=HEADER_TABLE_COLUMNS, sheet_title="Header Tables"))
         _header_table_progress.finish(result)
     except Exception as exc:
         logger.exception("Header-table batch job failed")
@@ -956,8 +853,8 @@ def start_table_analysis(
     group_by_year: bool = Form(True),
 ):
     """Start the table analysis for the header tables in *file* (an upload) or in *filename* (a file
-    already in the output folder, e.g. header_tables_with_reference.xlsx). Tables listed in
-    resources/Fields for TAANA.xlsx use the fields given there (dates grouped by year if *group_by_year*);
+    saved by Find Header Tables for Archiving Objects, e.g. header_tables_with_reference.xlsx). Tables listed in
+    resources/Fields for Table Analysis.xlsx use the fields given there (dates grouped by year if *group_by_year*);
     for the others the user is asked. Returns immediately; poll /progress and answer the questions it asks."""
     _require_connection()
     if table_analysis.job.is_active():
@@ -966,10 +863,7 @@ def start_table_analysis(
     if file is not None and file.filename:
         contents = file.file.read()
     elif filename:
-        path = OUTPUT_DIR / Path(filename).name
-        if not path.exists():
-            raise HTTPException(status_code=404, detail=f"'{path.name}' not found in the output folder.")
-        contents = path.read_bytes()
+        contents = _result_file("HEADER_TABLES", filename).read_bytes()
     else:
         raise HTTPException(status_code=400, detail="Choose a file or upload one.")
 
@@ -1041,18 +935,6 @@ def table_analysis_cancel():
     return {"ok": True}
 
 
-@app.get("/api/table-analysis/download")
-def table_analysis_download():
-    path = table_analysis.job.snapshot().get("output_path")
-    if not path or not Path(path).exists():
-        raise HTTPException(status_code=404, detail="There is no Table analysis workbook yet.")
-    return FileResponse(
-        path,
-        filename=Path(path).name,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-
 # ---------------------------------------------------------------------------
 # Archiving object analysis (conditions from SARA / DVM Guide / SAP for Me, and what to archive first)
 # ---------------------------------------------------------------------------
@@ -1063,7 +945,7 @@ def start_object_analysis(
     filename: str = Form(""),
 ):
     """Start the archiving object analysis (SARA information page, DVM Guide, dependencies) for the objects
-    in *file* (an upload) or *filename* (a file in the output folder, e.g. archiving_objects_scored.xlsx).
+    in *file* (an upload) or *filename* (a file saved by Find Archiving Objects for Tables, e.g. archiving_objects_scored.xlsx).
     Runs in the background; poll /progress. SAP for Me is a separate, optional second step."""
     _require_connection()
     if object_analysis.job.is_active():
@@ -1072,10 +954,7 @@ def start_object_analysis(
     if file is not None and file.filename:
         contents = file.file.read()
     elif filename:
-        path = OUTPUT_DIR / Path(filename).name
-        if not path.exists():
-            raise HTTPException(status_code=404, detail=f"'{path.name}' not found in the output folder.")
-        contents = path.read_bytes()
+        contents = _result_file("BATCH", filename).read_bytes()
     else:
         raise HTTPException(status_code=400, detail="Choose a file or upload one.")
 
@@ -1114,7 +993,7 @@ def start_open_item_analysis(
     filename: str = Form(""),
 ):
     """Start the open item analysis for the archiving objects in *file* (an upload) or *filename* (a file in
-    the output folder, by default the recommended objects saved by Find Archiving Objects). Objects without
+    the Find Archiving Objects for Tables results folder; the archiving objects are read from its "Grouped by Object" sheet). Objects without
     a query in resources/Open Closed Item details.xlsx are skipped with a note. Runs in the background."""
     _require_connection()
     if open_item_analysis.job.is_active():
@@ -1123,15 +1002,13 @@ def start_open_item_analysis(
     if file is not None and file.filename:
         contents = file.file.read()
     elif filename:
-        path = OUTPUT_DIR / Path(filename).name
-        if not path.exists():
-            raise HTTPException(status_code=404, detail=f"'{path.name}' not found in the output folder.")
-        contents = path.read_bytes()
+        contents = _result_file("BATCH", filename).read_bytes()
     else:
         raise HTTPException(status_code=400, detail="Choose a file or upload one.")
 
     try:
-        objects = object_analysis.parse_objects(contents)
+        # the "Grouped by Object" sheet: the objects ordered by the size of the tables grouped under them
+        objects = object_analysis.parse_objects(contents, prefer="grouped")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -1184,18 +1061,6 @@ def open_item_analysis_cancel():
     """Stop after the query now running; finished objects stay in the workbook."""
     open_item_analysis.job.cancel()
     return {"ok": True}
-
-
-@app.get("/api/open-item-analysis/download")
-def open_item_analysis_download():
-    path = open_item_analysis.job.snapshot().get("output_path")
-    if not path or not Path(path).exists():
-        raise HTTPException(status_code=404, detail="There is no Open item analysis workbook yet.")
-    return FileResponse(
-        path,
-        filename=Path(path).name,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
 
 
 class ObjectReferenceApply(BaseModel):
@@ -1252,18 +1117,6 @@ def object_analysis_cancel():
     """Stop after the current object; objects already analysed stay in the workbook."""
     object_analysis.job.cancel()
     return {"ok": True}
-
-
-@app.get("/api/object-analysis/download")
-def object_analysis_download():
-    path = object_analysis.job.snapshot().get("output_path")
-    if not path or not Path(path).exists():
-        raise HTTPException(status_code=404, detail="There is no archiving object analysis workbook yet.")
-    return FileResponse(
-        path,
-        filename=Path(path).name,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1334,22 +1187,9 @@ def _reference_doc_workbook(req: "ReferenceDocSaveRequest") -> io.BytesIO:
 
 
 @app.post("/api/reference-doc/save")
-def save_reference_doc_to_output(req: ReferenceDocSaveRequest):
-    """Save the reference-doc-annotated recommended list to the output folder."""
-    buf = _reference_doc_workbook(req)
-    dest = OUTPUT_DIR / "archiving_objects_with_reference.xlsx"
-    dest.write_bytes(buf.getvalue())
-    return {"saved": True, "path": str(dest)}
-
-
-@app.post("/api/reference-doc/export")
-def export_reference_doc(req: ReferenceDocSaveRequest):
-    """Download the reference-doc-annotated recommended list as an Excel file."""
-    return StreamingResponse(
-        _reference_doc_workbook(req),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=archiving_objects_with_reference.xlsx"},
-    )
+def save_reference_doc_results(req: ReferenceDocSaveRequest):
+    """Save the reference-doc-annotated recommended list in the Find Archiving Objects for Tables results folder."""
+    return _save_result_response("BATCH", "archiving_objects_with_reference.xlsx", _reference_doc_workbook(req))
 
 
 # ---------------------------------------------------------------------------
@@ -1388,22 +1228,9 @@ def analyze_header_reference(
 
 
 @app.post("/api/header-reference/save")
-def save_header_reference_to_output(req: HeaderReferenceSaveRequest):
-    """Save the reference-reviewed header tables to the output folder."""
-    buf = _header_reference_workbook(req)
-    dest = OUTPUT_DIR / "header_tables_with_reference.xlsx"
-    dest.write_bytes(buf.getvalue())
-    return {"saved": True, "path": str(dest)}
-
-
-@app.post("/api/header-reference/export")
-def export_header_reference(req: HeaderReferenceSaveRequest):
-    """Download the reference-reviewed header tables as an Excel file."""
-    return StreamingResponse(
-        _header_reference_workbook(req),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=header_tables_with_reference.xlsx"},
-    )
+def save_header_reference_results(req: HeaderReferenceSaveRequest):
+    """Save the reference-reviewed header tables in the Find Header Tables for Archiving Objects results folder."""
+    return _save_result_response("HEADER_TABLES", "header_tables_with_reference.xlsx", _header_reference_workbook(req))
 
 
 # ---------------------------------------------------------------------------
@@ -1579,7 +1406,7 @@ def _ensure_table_sizes(tables: list[dict]) -> list[dict]:
 
 def _run_db15_batch_job(tables: list[dict]):
     try:
-        _db15_batch_progress.update(0, "Checking table sizes via DB02…")
+        _db15_batch_progress.update(0, "Checking table sizes…")
         tables = _ensure_table_sizes(tables)
         result = db15.run_batch(tables, on_progress=_db15_batch_progress.update)
         if result["status"] == "error":

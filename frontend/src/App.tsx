@@ -17,10 +17,10 @@ import type { ConnectionState } from "./types";
 import "./App.css";
 
 const TASKS = [
-  { id: "TOP_TABLES", label: "Generate Table List (DB02)" },
+  { id: "TOP_TABLES", label: "Generate Table List" },
   { id: "BATCH", label: "Find Archiving Objects for Tables" },
   { id: "HEADER_TABLES", label: "Find Header Tables for Archiving Objects" },
-  { id: "TABLE_ANALYSIS", label: "Table Analysis (TAANA)" },
+  { id: "TABLE_ANALYSIS", label: "Table Analysis" },
   { id: "OBJECT_ANALYSIS", label: "Archiving Object Analysis" },
   { id: "OPEN_ITEM_ANALYSIS", label: "Open Item Analysis" },
 ] as const;

@@ -7,7 +7,7 @@ interface Props {
 }
 
 /** Reference-document review for Find Header Tables (archiving object → header table):
- *  the same upload / compare / override / preview / save / download flow as Find Archiving Objects. */
+ *  the same upload / compare / override / preview flow (the result is saved automatically) as Find Archiving Objects. */
 export default function HeaderReferencePanel({ rows }: Props) {
   const config: ReferenceReviewConfig = {
     rows,
@@ -27,8 +27,6 @@ export default function HeaderReferencePanel({ rows }: Props) {
       "the header table of each archiving object. The tool will compare it against the header tables " +
       "found above and highlight any differences.",
     previewTitle: "Preview — Final Header Tables",
-    savedPath: "output/header_tables_with_reference.xlsx",
-    downloadName: "header_tables_with_reference.xlsx",
     analyze: async (files) => {
       const res = await api.analyzeHeaderReference(files, rows);
       return {
@@ -41,7 +39,6 @@ export default function HeaderReferencePanel({ rows }: Props) {
       };
     },
     save: (final) => api.saveHeaderReference(rows, final),
-    exportFile: (final) => api.exportHeaderReference(rows, final),
     applyOverride: (row, refValue) => ({
       ...row,
       "Header Table": refValue,

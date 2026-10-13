@@ -48,7 +48,7 @@ def _open_information_page(archiving_object: str) -> dict:
             message = session.findById("wnd[0]/sbar").Text.strip()
             return {
                 "status": "error",
-                "message": f"SARA does not know archiving object {archiving_object}." + (f" SAP says: {message}" if message else ""),
+                "message": f"SAP does not know archiving object {archiving_object}." + (f" SAP says: {message}" if message else ""),
             }
         session.findById(INFO_BUTTON).press()
         time.sleep(1.0)

@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import ProgressBar from "./ProgressBar";
+import SavedNotice from "./SavedNotice";
 import ObjectReferenceReview from "./ObjectReferenceReview";
 import type { ObjectAnalysisDetail, ObjectAnalysisSnapshot } from "../types";
 
-const SOURCES = ["SARA information (SAP Help Portal)", "DVM Guide", "SAP for Me"] as const;
+const SOURCES = ["SAP Help Portal information", "DVM Guide", "SAP for Me"] as const;
 
 const sourceClass = (label: string) =>
-  label.startsWith("SARA")
+  label.startsWith("SAP Help Portal")
     ? "sara"
     : label.startsWith("DVM")
     ? "dvm"
@@ -144,8 +145,7 @@ export default function ObjectAnalysisPanel() {
   async function fetchOutputFiles() {
     setLoadingFiles(true);
     try {
-      const { files } = await api.getOutputFiles();
-      const spreadsheets = files.filter((f) => !f.startsWith("Table analysis") && !f.startsWith("Archiving object analysis") && !f.startsWith("Open item analysis"));
+      const { files: spreadsheets } = await api.getResultFiles("BATCH");
       setOutputFiles(spreadsheets);
       if (!serverFile) setServerFile(preferred(spreadsheets));
     } catch {
@@ -227,22 +227,6 @@ export default function ObjectAnalysisPanel() {
     }
   }
 
-  async function handleDownload() {
-    try {
-      const blob = await api.objectAnalysisDownload();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "Archiving object analysis.xlsx";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Download failed");
-    }
-  }
-
   const records = snapshot?.records ?? [];
   const mainDone = snapshot?.status === "done" && records.length > 0;
 
@@ -252,13 +236,13 @@ export default function ObjectAnalysisPanel() {
         <strong>Archiving Object Analysis</strong> — for each recommended archiving object this finds its{" "}
         <strong>archiving conditions</strong> and which archiving objects must be <strong>archived before it</strong>.
         It works in two steps. <strong>Step 1</strong> (about a minute and a half per object) reads the object's SAP Help
-        Portal page that SARA's information button opens (including its “Checks” pages) and the DVM Guide, and finds the
-        objects to archive first from SARA's network (the data behind its Network Graphic), in archiving order. You see the
+        Portal page of the archiving object (including its “Checks” pages) and the DVM Guide, and finds the
+        objects to archive first from the archiving object network, in archiving order. You see the
         results straight away. If they don't answer your questions, <strong>Step 2</strong> checks SAP for Me as well: it is
         slower, runs in the background, and adds its conditions to the same results and Excel file as it finds them, so you
-        can keep using other tasks meanwhile. Results go to <code>output/Archiving object analysis.xlsx</code> (a Summary
-        sheet and one sheet per object). By default the tool uses the recommended objects saved by{" "}
-        <em>Find Archiving Objects</em>; you can upload a different file. After the results are in you can also upload
+        can keep using other tasks meanwhile. The Excel file (a Summary
+        sheet and one sheet per object) is saved automatically in the <em>Archiving Object Analysis</em> results folder. By default the tool uses the recommended objects saved by{" "}
+        <em>Find Archiving Objects for Tables</em>; you can upload a different file. After the results are in you can also upload
         reference documents (any type) to fill gaps and spot mismatches. During step 1 SAP opens and closes a browser tab
         for each object, so please leave the browser and SAP alone until it finishes.
       </div>
@@ -268,7 +252,7 @@ export default function ObjectAnalysisPanel() {
           {mode === "folder" ? (
             <>
               <div className="file-picker-header">
-                <span className="file-picker-title">Output folder</span>
+                <span className="file-picker-title">Saved by Find Archiving Objects for Tables</span>
                 <button
                   type="button"
                   className="btn-refresh"
@@ -283,7 +267,7 @@ export default function ObjectAnalysisPanel() {
                 <p className="tx-hint">Loading…</p>
               ) : outputFiles.length === 0 ? (
                 <p className="tx-hint">
-                  No Excel files in the output folder. Run <em>Find Archiving Objects</em> and save the result, or upload
+                  Nothing saved yet. Run <em>Find Archiving Objects for Tables</em> first, or upload
                   a file below.
                 </p>
               ) : (
@@ -323,14 +307,14 @@ export default function ObjectAnalysisPanel() {
               <span className="file-icon-lg">📄</span>
               <span className="uploaded-file-name">{localFile?.name}</span>
               <button type="button" className="btn-clear-upload" onClick={handleClearUpload} disabled={active}>
-                ✕ Use output folder
+                ✕ Use a saved file
               </button>
             </div>
           )}
         </div>
 
         <button type="submit" className="btn btn-primary" disabled={!canStart}>
-          {mainRunning ? "Step 1 running…" : starting ? "Starting…" : "Start analysis (SARA + DVM Guide)"}
+          {mainRunning ? "Step 1 running…" : starting ? "Starting…" : "Start analysis"}
         </button>
       </form>
 
@@ -358,6 +342,7 @@ export default function ObjectAnalysisPanel() {
             <p key={i} className="tx-error">{w}</p>
           ))}
           {snapshot.status === "error" && <p className="tx-error">{snapshot.message}</p>}
+          <SavedNotice path={snapshot.output_path} />
 
           {/* Step 2: SAP for Me, in the background */}
           {mainDone && (
@@ -387,9 +372,6 @@ export default function ObjectAnalysisPanel() {
                   <button className="btn btn-secondary" onClick={handleSapForMe}>
                     {sfm?.status === "done" ? "Check SAP for Me again" : "Also check SAP for Me (runs in the background)"}
                   </button>
-                  {snapshot.output_path && (
-                    <button className="btn btn-primary" onClick={handleDownload}>Download Excel</button>
-                  )}
                 </div>
               )}
               {!sfmRunning && sfm && sfm.status !== "idle" && (
@@ -415,7 +397,7 @@ export default function ObjectAnalysisPanel() {
                       <th>Result</th>
                       <th>Conditions</th>
                       {SOURCES.map((s) => (
-                        <th key={s}>{s === "SARA information (SAP Help Portal)" ? "SARA info" : s}</th>
+                        <th key={s}>{s === "SAP Help Portal information" ? "Help Portal info" : s}</th>
                       ))}
                       <th>Archive BEFORE (in order)</th>
                       <th>Notes</th>
@@ -436,7 +418,7 @@ export default function ObjectAnalysisPanel() {
                         <td className={r.archive_first.length > 0 ? "ref-doc-ref-obj" : ""}>
                           {r.archive_first.length > 0 ? r.archive_first.join(" → ") : "none"}
                         </td>
-                        <td className="ref-doc-comment">{r.note}</td>
+                        <td className="ref-doc-comment note-wrap">{r.note}</td>
                       </tr>
                     ))}
                   </tbody>

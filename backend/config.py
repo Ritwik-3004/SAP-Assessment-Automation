@@ -4,10 +4,29 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Input / output folders at the project root (one level above backend/)
 _PROJECT_ROOT = Path(__file__).parent.parent
-INPUT_DIR = _PROJECT_ROOT / "input"
-OUTPUT_DIR = _PROJECT_ROOT / "output"
+
+# One "results" folder at the project root. Every task saves what it produces automatically into a
+# sub-folder named exactly like the task in the sidebar, and a task that builds on an earlier one reads
+# that earlier task's sub-folder. Keys are the sidebar task ids.
+RESULTS_DIR = _PROJECT_ROOT / "results"
+RESULT_FOLDERS = {
+    "TOP_TABLES": "Generate Table List",
+    "BATCH": "Find Archiving Objects for Tables",
+    "HEADER_TABLES": "Find Header Tables for Archiving Objects",
+    "TABLE_ANALYSIS": "Table Analysis",
+    "OBJECT_ANALYSIS": "Archiving Object Analysis",
+    "OPEN_ITEM_ANALYSIS": "Open Item Analysis",
+}
+# Screenshots/text dumped when a SAP for Me sign-in fails (diagnostics, not results)
+DEBUG_DIR = _PROJECT_ROOT / "debug"
+
+
+def results_folder(task: str) -> Path:
+    """The (created) results sub-folder of a task, e.g. results_folder("BATCH")."""
+    path = RESULTS_DIR / RESULT_FOLDERS[task]
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 CREDENTIALS_FILE = _PROJECT_ROOT / "sap_credentials.json"
 SAP_FOR_ME_CREDENTIALS_FILE = _PROJECT_ROOT / "sap_for_me_credentials.json"
 LLM_SETTINGS_FILE = _PROJECT_ROOT / "llm_settings.json"

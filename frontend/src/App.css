@@ -463,6 +463,7 @@ body {
   padding: 8px 12px;
 }
 .saved-notice code, .tx-hint code {
+  word-break: break-all;
   font-family: "Consolas", "Courier New", monospace;
   font-size: 11.5px;
 }
@@ -917,6 +918,8 @@ body {
 .ref-doc-ref-obj { color: #7a5200; font-weight: 500; }
 
 .ref-doc-comment { color: var(--text-muted); font-size: 12px; max-width: 260px; }
+/* Notes/comments are free text: add .note-wrap to wrap them inside their cell (table cells are nowrap by default) */
+.results-table td.note-wrap { white-space: normal; min-width: 220px; max-width: 320px; overflow-wrap: anywhere; }
 
 /* Saved credentials dropdown */
 .saved-profile-row { display: flex; gap: 8px; align-items: stretch; }

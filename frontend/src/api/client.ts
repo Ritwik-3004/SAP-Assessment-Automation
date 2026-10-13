@@ -112,34 +112,8 @@ export const api = {
   pollDb15Batch: (onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").Db15BatchResult>) => void) =>
     pollUntilDone(() => api.db15BatchProgress(), onTick),
 
-  db15Export: async (rows: Record<string, string>[]) => {
-    const res = await fetch(`${BASE}/api/transactions/db15/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail ?? res.statusText);
-    }
-    return res.blob();
-  },
-
   db02TopTables: (body: { limit: number }) =>
     post<import("../types").Db02TopTablesResult>("/api/transactions/db02/top-tables", body),
-
-  db02Export: async (rows: Record<string, string>[]) => {
-    const res = await fetch(`${BASE}/api/transactions/db02/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail ?? res.statusText);
-    }
-    return res.blob();
-  },
 
   db15Score: (rows: Record<string, string>[]) =>
     post<import("../types").JobStarted>("/api/transactions/db15/score", { rows }),
@@ -151,19 +125,6 @@ export const api = {
 
   pollDb15Score: (onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").ScoredResult>) => void) =>
     pollUntilDone(() => api.db15ScoreProgress(), onTick),
-
-  db15ScoreExport: async (rows: Record<string, string>[], recommended: Record<string, string>[]) => {
-    const res = await fetch(`${BASE}/api/transactions/db15/score-export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows, recommended }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail ?? res.statusText);
-    }
-    return res.blob();
-  },
 
   chat: (
     message: string,
@@ -205,19 +166,6 @@ export const api = {
   saveReferenceDoc: (rows: Record<string, string>[], recommended: Record<string, string>[]) =>
     post<{ saved: boolean; path: string }>("/api/reference-doc/save", { rows, recommended }),
 
-  exportReferenceDoc: async (rows: Record<string, string>[], recommended: Record<string, string>[]) => {
-    const res = await fetch(`${BASE}/api/reference-doc/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows, recommended }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail ?? res.statusText);
-    }
-    return res.blob();
-  },
-
   analyzeHeaderReference: async (files: File[], rows: Record<string, string>[]) => {
     const formData = new FormData();
     files.forEach((f) => formData.append("files", f));
@@ -236,19 +184,6 @@ export const api = {
   saveHeaderReference: (rows: Record<string, string>[], final: Record<string, string>[]) =>
     post<{ saved: boolean; path: string }>("/api/header-reference/save", { rows, final }),
 
-  exportHeaderReference: async (rows: Record<string, string>[], final: Record<string, string>[]) => {
-    const res = await fetch(`${BASE}/api/header-reference/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows, final }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail ?? res.statusText);
-    }
-    return res.blob();
-  },
-
   openItemStart: async (source: { filename?: string; file?: File }) => {
     const formData = new FormData();
     if (source.file) formData.append("file", source.file);
@@ -266,14 +201,6 @@ export const api = {
   openItemRunQuery: (object: string, query: string) =>
     post<{ status: string }>("/api/open-item-analysis/query", { object, query }),
   openItemCancel: () => post<{ ok: boolean }>("/api/open-item-analysis/cancel", {}),
-  openItemDownload: async () => {
-    const res = await fetch(`${BASE}/api/open-item-analysis/download`);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail ?? res.statusText);
-    }
-    return res.blob();
-  },
   objectAnalysisStart: async (source: { filename?: string; file?: File }) => {
     const formData = new FormData();
     if (source.file) formData.append("file", source.file);
@@ -308,14 +235,6 @@ export const api = {
   objectAnalysisSapForMe: () => post<{ status: string }>("/api/object-analysis/sap-for-me", {}),
   objectAnalysisSapForMeCancel: () => post<{ ok: boolean }>("/api/object-analysis/sap-for-me/cancel", {}),
   objectAnalysisCancel: () => post<{ ok: boolean }>("/api/object-analysis/cancel", {}),
-  objectAnalysisDownload: async () => {
-    const res = await fetch(`${BASE}/api/object-analysis/download`);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail ?? res.statusText);
-    }
-    return res.blob();
-  },
   tableAnalysisStart: async (source: { filename?: string; file?: File }, groupByYear = true) => {
     const formData = new FormData();
     if (source.file) formData.append("file", source.file);
@@ -336,33 +255,16 @@ export const api = {
   tableAnalysisSkip: () => post<{ ok: boolean }>("/api/table-analysis/skip", {}),
   tableAnalysisStopWaiting: (table: string) => post<{ ok: boolean }>("/api/table-analysis/stop-waiting", { table }),
   tableAnalysisCancel: () => post<{ ok: boolean }>("/api/table-analysis/cancel", {}),
-  tableAnalysisDownload: async () => {
-    const res = await fetch(`${BASE}/api/table-analysis/download`);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail ?? res.statusText);
-    }
-    return res.blob();
-  },
+  /** The Excel files a task saved in its results folder (newest first) and the folder's full path. */
+  getResultFiles: (task: import("../types").TaskId) =>
+    get<{ folder: string; files: string[] }>(`/api/results/${task}/files`),
 
-  getInputFiles: () => get<{ files: string[] }>("/api/files/input"),
+  /** Re-save the scored results after the assistant changed them. */
+  saveScoredResults: (rows: Record<string, string>[], recommended: Record<string, string>[]) =>
+    post<{ saved: boolean; path: string }>("/api/results/archiving-objects/save", { rows, recommended }),
 
   db15BatchFromInput: (filename: string) =>
     post<import("../types").JobStarted>("/api/transactions/db15/batch-from-input", { filename }),
-
-  saveToInput: (rows: Record<string, string>[]) =>
-    post<{ saved: boolean; path: string }>("/api/files/input/save", { rows }),
-
-  saveArchivingToOutput: (rows: Record<string, string>[]) =>
-    post<{ saved: boolean; path: string }>("/api/files/output/save-archiving", { rows }),
-
-  saveScoredToOutput: (rows: Record<string, string>[], recommended: Record<string, string>[]) =>
-    post<{ saved: boolean; path: string }>("/api/files/output/save-scored", { rows, recommended }),
-
-  groupByObject: (recommended: Record<string, string>[]) =>
-    post<{ status: "ok"; rows: Record<string, string>[] }>("/api/transactions/db15/group-by-object", { recommended }),
-
-  getOutputFiles: () => get<{ files: string[] }>("/api/files/output"),
 
   headerTablesBatch: async (file: File, maxObjects: number) => {
     const formData = new FormData();
@@ -393,19 +295,4 @@ export const api = {
     onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").HeaderTableBatchResult>) => void
   ) => pollUntilDone(() => api.headerTablesBatchProgress(), onTick),
 
-  headerTablesExport: async (rows: Record<string, string>[]) => {
-    const res = await fetch(`${BASE}/api/transactions/header-tables/export`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail ?? res.statusText);
-    }
-    return res.blob();
-  },
-
-  saveHeaderTablesToOutput: (rows: Record<string, string>[]) =>
-    post<{ saved: boolean; path: string }>("/api/files/output/save-header-tables", { rows }),
 };

@@ -41,8 +41,6 @@ export default function ReferenceDocPanel({ scored }: Props) {
       "Upload one or more reference documents containing past archiving object recommendations. " +
       "The tool will compare it against your scored results and highlight any differences.",
     previewTitle: "Preview — Final Recommendations",
-    savedPath: "output/archiving_objects_with_reference.xlsx",
-    downloadName: "archiving_objects_with_reference.xlsx",
     analyze: async (files) => {
       const res = await api.analyzeReferenceDoc(files, recommended, knownDescriptions());
       return {
@@ -56,7 +54,6 @@ export default function ReferenceDocPanel({ scored }: Props) {
       };
     },
     save: (final) => api.saveReferenceDoc(allRows, final),
-    exportFile: (final) => api.exportReferenceDoc(allRows, final),
     // Taking the document's object must not leave the old object's details behind. The score comes
     // from the scored list when that table was scored against the new object, otherwise it is blank.
     // The description belongs to the object, so it is never blank: the scored pair's, else the one
@@ -90,11 +87,6 @@ export default function ReferenceDocPanel({ scored }: Props) {
         Comments: `Updated from ${previous} per reference document`,
         "Ref Doc Object": "",
       };
-    },
-    groupedView: {
-      fetch: async (rows) => (await api.groupByObject(rows)).rows,
-      caption:
-        "Grouped by Object — tables sharing an archiving object/housekeeping program, sorted by cumulative size (largest first; tables with neither are grouped last)",
     },
   };
 

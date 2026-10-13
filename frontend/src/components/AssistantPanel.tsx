@@ -10,7 +10,7 @@ interface Message {
 const SUGGESTIONS = [
   "Which archiving object does the DVM Guide recommend for BKPF?",
   "Does BC_SBAL exist in this SAP system?",
-  "What does transaction SARA do?",
+  "Which archiving object has to be archived before FI_DOCUMNT?",
   "Find the housekeeping program for table COSP on SAP for Me",
   "How many rows does BSEG have?",
 ];
@@ -96,7 +96,7 @@ export default function AssistantPanel() {
         {history.length === 0 && (
           <div className="chat-empty">
             <p className="chat-placeholder">
-              Ask about tables, archiving objects, housekeeping programs or SAP transactions. I say which
+              Ask about tables, archiving objects, housekeeping programs or your SAP system. I say which
               source each answer came from. Try:
             </p>
             <div className="chat-suggestions">

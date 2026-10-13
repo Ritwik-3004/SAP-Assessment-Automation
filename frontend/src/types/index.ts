@@ -33,7 +33,7 @@ export interface TableAnalysisRecord {
   table: string;
   state: "running" | "done" | "skipped" | "failed";
   fields: string[];
-  /** who chose the fields: the Fields for TAANA sheet, the user, or a re-run with additional fields */
+  /** who chose the fields: the fields sheet, the user, or a re-run with additional fields */
   source?: "sheet" | "you" | "re-run";
   rows: number;
   note: string;
@@ -43,7 +43,7 @@ export interface TableAnalysisSnapshot {
   status: "idle" | "running" | "waiting" | "done" | "error";
   /** "redo" while one table is being re-run with additional fields */
   mode?: "run" | "redo";
-  /** the Fields for TAANA sheet: how many tables it lists, or why it could not be used */
+  /** the fields sheet: how many tables it lists, or why it could not be used */
   fields_sheet?: { tables: number; problem: string };
   total: number;
   /** tables whose questions are answered (or skipped) */
@@ -192,6 +192,9 @@ export interface ConnectionState {
   user?: string;
 }
 
+/** The sidebar tasks; each saves into its own folder under "results". */
+export type TaskId = "TOP_TABLES" | "BATCH" | "HEADER_TABLES" | "TABLE_ANALYSIS" | "OBJECT_ANALYSIS" | "OPEN_ITEM_ANALYSIS";
+
 export type TransactionId = "TAANA" | "DB15" | "SE16N" | "SE11" | "AOBJ" | "SARA";
 
 export interface TransactionResult {
@@ -219,6 +222,9 @@ export interface Db02TopTablesResult {
   transaction: string;
   message?: string;
   rows?: Record<string, string>[];
+  /** full path of the file the results were saved to automatically, or why saving failed */
+  saved_path?: string;
+  save_error?: string;
 }
 
 export interface HeaderTableBatchResult {
@@ -226,6 +232,8 @@ export interface HeaderTableBatchResult {
   message?: string;
   rows?: Record<string, string>[];
   errors?: { archiving_object: string; message: string }[];
+  saved_path?: string;
+  save_error?: string;
 }
 
 export interface ScoredResult {
@@ -233,6 +241,8 @@ export interface ScoredResult {
   message?: string;
   rows?: Record<string, string>[];
   recommended?: Record<string, string>[];
+  saved_path?: string;
+  save_error?: string;
 }
 
 export interface JobStarted {

@@ -351,7 +351,7 @@ def _check_one(session, table: str, before: list[str]) -> dict:
     tree = session.findById(TREE_ID)
     table_key = _find_table_node(tree, table)
     if table_key is None:
-        return {"state": "waiting", "status": "The analysis is not listed in TAANA yet."}
+        return {"state": "waiting", "status": "The analysis is not listed yet."}
     tree.expandNode(table_key)
     date_col, time_col = _tree_column(tree, "Start date"), _tree_column(tree, "Start time")
 

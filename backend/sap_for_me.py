@@ -48,7 +48,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 import credentials_store
 import llm
 from config import (
-    OUTPUT_DIR,
+    DEBUG_DIR,
     SAP_FOR_ME_CHROME_PATH,
     SAP_FOR_ME_CHROMEDRIVER_PATH,
     SAP_FOR_ME_CREDENTIALS_FILE,
@@ -484,9 +484,9 @@ def _dump_debug(driver):
     """Saves a screenshot and the visible page text next to the outputs so a
     failed sign-in can be diagnosed without re-running. Never raises."""
     try:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        png = OUTPUT_DIR / "sap_for_me_debug.png"
-        txt = OUTPUT_DIR / "sap_for_me_debug.txt"
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        png = DEBUG_DIR / "sap_for_me_debug.png"
+        txt = DEBUG_DIR / "sap_for_me_debug.txt"
         driver.save_screenshot(str(png))
         body = driver.find_element(By.TAG_NAME, "body").text
         buttons = [

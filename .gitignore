@@ -60,7 +60,7 @@ sap_for_me_credentials.json
 llm_settings.json
 llm_usage.json
 
-input
-output
+results
+debug
 # Excel lock files
 ~$*
