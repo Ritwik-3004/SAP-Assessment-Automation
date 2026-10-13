@@ -7,6 +7,7 @@ Start with:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -20,6 +21,7 @@ import openpyxl
 from openpyxl.styles import Alignment
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from sap_connector import sap
@@ -433,6 +435,74 @@ def chat_endpoint(req: ChatRequest):
         history=[{"role": h.role, "content": h.content} for h in req.history],
     )
     return result
+
+
+class _ChatStopped(Exception):
+    """The browser stopped listening to a streamed chat answer."""
+
+
+@app.post("/api/chat/stream")
+async def chat_stream_endpoint(req: ChatRequest):
+    """The same turn as /api/chat, streamed as newline-delimited JSON so the answer appears while it is written.
+    One JSON object per line: {"type": "token", "text"} for each piece of the reply, {"type": "status", "text"}
+    before a tool runs, then one {"type": "done", "reply", "updated_rows", "updated_recommended"} (the full reply:
+    the same text as the tokens, or the refusal / error message when no model was involved) or
+    {"type": "error", "message"}.
+
+    The turn runs on its own thread (the model and the SAP tools block); this async generator relays its events.
+    When the browser goes away the generator is cancelled, which stops the model at its next piece of text."""
+    import chat as chat_module
+
+    loop = asyncio.get_running_loop()
+    events: "asyncio.Queue[Optional[dict]]" = asyncio.Queue()
+    stopped = threading.Event()
+
+    def emit(event: Optional[dict]) -> None:
+        loop.call_soon_threadsafe(events.put_nowait, event)
+
+    def on_token(piece: str) -> None:
+        if stopped.is_set():
+            raise _ChatStopped()
+        emit({"type": "token", "text": piece})
+
+    def on_status(text: str) -> None:
+        if stopped.is_set():
+            raise _ChatStopped()
+        emit({"type": "status", "text": text})
+
+    def work() -> None:
+        try:
+            result = chat_module.run_chat(
+                message=req.message,
+                scored_rows=req.scored_rows,
+                recommended=req.recommended,
+                history=[{"role": h.role, "content": h.content} for h in req.history],
+                on_token=on_token,
+                on_status=on_status,
+            )
+            emit({"type": "done", **result})
+        except _ChatStopped:
+            pass
+        except Exception as exc:
+            logger.exception("Streamed chat failed")
+            emit({"type": "error", "message": f"The assistant hit an unexpected error: {exc}"})
+        finally:
+            emit(None)
+
+    async def stream():
+        threading.Thread(target=work, daemon=True).start()
+        try:
+            while True:
+                event = await events.get()
+                if event is None:
+                    break
+                yield json.dumps(event) + "\n"
+        finally:
+            stopped.set()   # also runs when the browser went away (the generator is cancelled)
+
+    return StreamingResponse(
+        stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
 
 
 # ---------------------------------------------------------------------------

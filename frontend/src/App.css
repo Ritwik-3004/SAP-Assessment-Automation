@@ -792,6 +792,21 @@ body {
   40%            { transform: scale(1);  opacity: 1;  }
 }
 
+/* The reply while it is being written: a blinking cursor at the end; what the assistant is doing beside the dots or under it */
+.chat-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--text-muted);
+  animation: chat-blink 1s steps(1) infinite;
+}
+@keyframes chat-blink { 50% { opacity: 0; } }
+
+.chat-status-inline { margin-left: 8px; font-size: 12px; color: var(--text-muted); }
+.chat-status { margin: 0; padding: 0 4px; font-size: 12px; color: var(--text-muted); }
+
 .chat-error {
   color: var(--danger);
   font-size: 12px;

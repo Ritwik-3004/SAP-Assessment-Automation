@@ -172,6 +172,61 @@ export const api = {
       history,
     }),
 
+  /** The same turn as chat(), streamed: onToken gets each piece of the reply as the model writes it, onStatus a short
+   *  sentence while a tool runs or a rate limit is waited out. Resolves with the complete reply (the same text). */
+  chatStream: async (
+    message: string,
+    scoredRows: Record<string, string>[],
+    recommended: Record<string, string>[],
+    history: { role: string; content: string }[],
+    handlers: { onToken: (text: string) => void; onStatus: (text: string) => void },
+    signal?: AbortSignal
+  ) => {
+    type ChatResult = {
+      reply: string;
+      updated_rows: Record<string, string>[] | null;
+      updated_recommended: Record<string, string>[] | null;
+    };
+    const res = await fetch(`${BASE}/api/chat/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, scored_rows: scoredRows, recommended, history }),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    const out: { value: ChatResult | null } = { value: null };
+    const handle = (line: string) => {
+      if (!line.trim()) return;
+      const event = JSON.parse(line);
+      if (event.type === "token") handlers.onToken(event.text);
+      else if (event.type === "status") handlers.onStatus(event.text);
+      else if (event.type === "done") {
+        out.value = {
+          reply: event.reply,
+          updated_rows: event.updated_rows,
+          updated_recommended: event.updated_recommended,
+        };
+      } else if (event.type === "error") throw new Error(event.message);
+    };
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      lines.forEach(handle);
+    }
+    handle(buffer + decoder.decode());
+    if (!out.value) throw new Error("The assistant stopped answering before it finished. Please try again.");
+    return out.value;
+  },
+
   /** Starts reading the documents in the backend (it keeps going if the screen is left); follow it with referenceDocProgress. */
   startReferenceDoc: async (
     files: File[],

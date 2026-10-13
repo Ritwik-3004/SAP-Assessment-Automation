@@ -20,7 +20,7 @@ without re-running scoring.
 import logging
 import re
 from copy import deepcopy
-from typing import Any
+from typing import Any, Callable, Optional
 
 import llm
 from sap_connector import sap
@@ -743,14 +743,34 @@ def wants_table_contents(message: str) -> bool:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+# What the chat window says while a tool runs (no transaction codes in the UI)
+TOOL_STATUS = {
+    "lookup_archiving_objects": "Looking up the archiving objects for the table…",
+    "check_archiving_object": "Checking the archiving object in the SAP system…",
+    "get_table_counts": "Counting the entries of the table…",
+    "get_table_definition": "Reading the table's structure…",
+    "get_archiving_sessions": "Reading the archiving history…",
+    "get_largest_tables": "Finding the largest tables…",
+    "get_table_sizes": "Reading the table sizes…",
+    "search_dvm_guide": "Searching the DVM Guide…",
+    "search_sap_for_me": "Searching SAP for Me (this one is slow)…",
+    "update_table_result": "Updating the result…",
+}
+
+
 def run_chat(
     message: str,
     scored_rows: list[dict],
     recommended: list[dict],
     history: list[dict],
+    on_token: Optional[Callable[[str], None]] = None,
+    on_status: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
     Run one conversational turn.
+
+    With *on_token* the reply is streamed: each piece of text is passed to it as the model writes it (the returned
+    "reply" is the same text). *on_status* is called with a short sentence before each tool runs.
 
     Returns::
 
@@ -795,6 +815,9 @@ def run_chat(
 
     def execute_tool(name: str, inp: dict) -> str:
         nonlocal was_modified
+
+        if on_status and name in TOOL_STATUS:
+            on_status(TOOL_STATUS[name])
 
         if name == "lookup_archiving_objects":
             return _exec_lookup((inp.get("table_name") or "").strip().upper())
@@ -845,13 +868,25 @@ def run_chat(
 
         return f"Unknown tool: {name}"
 
+    streamed: list[str] = []
+
+    def stream_token(piece: str) -> None:
+        streamed.append(piece)
+        on_token(piece)   # type: ignore[misc]  (only passed to the model when on_token is set)
+
+    llm.set_thread_wait_hook(on_status)   # "Waiting for the Groq rate limit…" is shown in the chat window
     try:
         reply = llm.run_tool_loop(
             system, messages, tools, execute_tool,
             max_rounds=limits["chat_max_rounds"], settings=settings,
+            **({"on_token": stream_token} if on_token else {}),
         )
     except llm.LLMError as exc:
-        reply = str(exc)
+        # whatever was already shown stays; the reason follows it
+        shown = "".join(streamed).strip()
+        reply = f"{shown}\n\n{exc}" if shown else str(exc)
+    finally:
+        llm.set_thread_wait_hook(None)
 
     if reply is None:
         reply = "Too many tool calls without finishing. Please try rephrasing."

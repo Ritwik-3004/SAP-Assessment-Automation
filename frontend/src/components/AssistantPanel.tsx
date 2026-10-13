@@ -33,6 +33,11 @@ export default function AssistantPanel({
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // The reply while it is being written, and what the assistant is doing while it is not writing (running a tool,
+  // waiting for a rate limit)
+  const [streamText, setStreamText] = useState("");
+  const [status, setStatus] = useState("");
+  const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // A reply that arrives while only the floating button is showing is flagged on the button
@@ -64,8 +69,12 @@ export default function AssistantPanel({
   }, [mode, onModeChange]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [history, loading]);
+    // while the reply is being written, follow it without the smooth-scroll animation restarting on every word
+    bottomRef.current?.scrollIntoView({ behavior: loading ? "auto" : "smooth" });
+  }, [history, loading, streamText, status]);
+
+  // Leaving the page (or closing the app) stops the answer being written
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   async function send(raw: string) {
     const msg = raw.trim();
@@ -76,19 +85,39 @@ export default function AssistantPanel({
     setInput("");
     setLoading(true);
     setError("");
+    setStreamText("");
+    setStatus("");
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
-      const res = await api.chat(msg, results?.rows ?? [], results?.recommended ?? [], history);
+      const res = await api.chatStream(
+        msg,
+        results?.rows ?? [],
+        results?.recommended ?? [],
+        history,
+        {
+          onToken: (text) => {
+            setStatus("");
+            setStreamText((so_far) => so_far + text);
+          },
+          onStatus: setStatus,
+        },
+        controller.signal
+      );
       setHistory([...nextHistory, { role: "assistant", content: res.reply }]);
       if (modeRef.current === "collapsed") setUnread(true);
       if (results && res.updated_rows && res.updated_recommended) {
         results.apply(res.updated_rows, res.updated_recommended);
       }
     } catch (err: unknown) {
+      if (controller.signal.aborted) return;
       setError(err instanceof Error ? err.message : "Chat failed");
       setHistory(history);
       setInput(msg);
     } finally {
+      setStreamText("");
+      setStatus("");
       setLoading(false);
       setTimeout(() => textareaRef.current?.focus(), 50);
     }
@@ -184,13 +213,22 @@ export default function AssistantPanel({
 
         {loading && (
           <div className="chat-message assistant">
-            <div className="chat-bubble chat-thinking">
-              <span className="chat-dot" />
-              <span className="chat-dot" />
-              <span className="chat-dot" />
-            </div>
+            {streamText ? (
+              <div className="chat-bubble chat-streaming">
+                {streamText.trimEnd()}
+                <span className="chat-caret" aria-hidden="true" />
+              </div>
+            ) : (
+              <div className="chat-bubble chat-thinking">
+                <span className="chat-dot" />
+                <span className="chat-dot" />
+                <span className="chat-dot" />
+                {status && <span className="chat-status-inline">{status}</span>}
+              </div>
+            )}
           </div>
         )}
+        {loading && streamText && status && <p className="chat-status">{status}</p>}
         <div ref={bottomRef} />
       </div>
 

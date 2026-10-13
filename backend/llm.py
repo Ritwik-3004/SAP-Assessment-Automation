@@ -30,6 +30,7 @@ import logging
 import re
 import threading
 import time
+import types
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable, Optional
@@ -341,8 +342,17 @@ def set_wait_hook(hook: Optional[Callable[[str], None]]) -> None:
     _wait_hook = hook
 
 
+_thread_hook = threading.local()
+
+
+def set_thread_wait_hook(hook: Optional[Callable[[str], None]]) -> None:
+    """Like set_wait_hook, but only for waits that happen on the calling thread (and taking priority over the global
+    hook there), so a chat answer can show its own wait without borrowing a running job's progress line."""
+    _thread_hook.hook = hook
+
+
 def _notify(message: str) -> None:
-    hook = _wait_hook
+    hook = getattr(_thread_hook, "hook", None) or _wait_hook
     if hook:
         try:
             hook(message)
@@ -466,7 +476,10 @@ def _groq_chat(
     max_tokens: int,
     response_format: Optional[dict] = None,
     tools: Optional[list] = None,
+    on_token: Optional[Callable[[str], None]] = None,
 ):
+    """One Groq request. With *on_token* the answer is streamed: each piece of text is passed to it as it arrives,
+    and the same response object is returned as without streaming (the pieces put back together)."""
     import groq
 
     model = settings.model
@@ -489,6 +502,8 @@ def _groq_chat(
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
+    if on_token:
+        kwargs["stream"] = True      # Groq reports the usage in the last chunk by itself (x_groq.usage)
 
     client = _groq_client(settings.groq_api_key)
     window = _window(model)
@@ -555,6 +570,15 @@ def _groq_chat(
             window.release(event)
             raise LLMError("Could not reach Groq. Check the internet connection.") from exc
 
+        if on_token:
+            # Refusals (rate limits, bad requests) arrive before any text, so the retry loop above never resends a
+            # request whose text the user has already seen; a failure part-way through is raised, not retried.
+            try:
+                response = _groq_collect(response, on_token)
+            except BaseException:
+                window.release(event)
+                raise
+
         usage = getattr(response, "usage", None)
         total = getattr(usage, "total_tokens", None) or reserve
         actual_out = getattr(usage, "completion_tokens", None)
@@ -567,6 +591,51 @@ def _groq_chat(
         + ". Wait a minute and try again, or switch to Claude.",
         daily=False,
     )
+
+
+def _groq_collect(stream, on_token: Callable[[str], None]):
+    """Read a streamed Groq answer to its end, passing each piece of text to *on_token*, and return an object shaped
+    like the non-streamed response (choices[0].message.content / .tool_calls, usage)."""
+    import groq
+
+    content: list[str] = []
+    calls: dict[int, dict[str, str]] = {}
+    usage = None
+    finish = None
+    try:
+        for chunk in stream:
+            usage = getattr(chunk, "usage", None) or getattr(getattr(chunk, "x_groq", None), "usage", None) or usage
+            if not getattr(chunk, "choices", None):
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+            piece = getattr(delta, "content", None)
+            if piece:
+                content.append(piece)
+                on_token(piece)
+            for tc in getattr(delta, "tool_calls", None) or []:
+                slot = calls.setdefault(tc.index or 0, {"id": "", "name": "", "arguments": ""})
+                slot["id"] = tc.id or slot["id"]
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    slot["name"] = fn.name or slot["name"]
+                    slot["arguments"] += fn.arguments or ""
+            finish = choice.finish_reason or finish
+    except groq.APIError as exc:
+        raise LLMError(f"Groq stopped answering part-way ({exc}). Please try again.") from exc
+
+    tool_calls = [
+        types.SimpleNamespace(id=c["id"], function=types.SimpleNamespace(name=c["name"], arguments=c["arguments"]))
+        for _, c in sorted(calls.items())
+    ]
+    message = types.SimpleNamespace(content="".join(content), tool_calls=tool_calls or None)
+    return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message, finish_reason=finish)], usage=usage)
+
+
+def _join_rounds(earlier: list[str], last: str) -> str:
+    """The answer of a streamed chat turn: the text the model wrote before each tool call, then its final text,
+    separated by blank lines -- exactly what was streamed to the user."""
+    return "\n\n".join(p for p in [*earlier, last] if p)
 
 
 _DROP_KEYS = {
@@ -687,6 +756,7 @@ def _groq_tool_loop(
     tools: list[dict],
     execute_tool: Callable[[str, dict], str],
     max_rounds: int,
+    on_token: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
     oa_tools = [
         {
@@ -700,13 +770,18 @@ def _groq_tool_loop(
         for t in tools
     ]
     messages: list[dict] = [{"role": "system", "content": system}] + list(history)
+    earlier: list[str] = []     # text written before a tool call (only kept when streaming)
 
     for _ in range(max_rounds):
-        response = _groq_chat(settings, messages, max_tokens=1500, tools=oa_tools)
+        response = _groq_chat(settings, messages, max_tokens=1500, tools=oa_tools, on_token=on_token)
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
+        written = (message.content or "").strip()
         if not tool_calls:
-            return (message.content or "").strip()
+            return _join_rounds(earlier, written)
+        if on_token and written:
+            earlier.append(written)
+            on_token("\n\n")
 
         messages.append({
             "role": "assistant",
@@ -766,12 +841,90 @@ def _ollama_base() -> str:
     return url
 
 
-def _ollama_request(method: str, path: str, payload: Optional[dict] = None, timeout: float = 10.0):
+def _read_ollama_stream(response, on_piece: Callable[[str], None]) -> dict:
+    """Read Ollama's streamed answer (one JSON object per line), passing each piece of text to *on_piece*, and return
+    one dict shaped like the non-streamed answer."""
+    content: list[str] = []
+    calls: list = []
+    last: dict = {}
+    for line in response.iter_lines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("error"):
+            raise LLMError(f"Ollama error: {str(obj['error'])[:300]}")
+        message = obj.get("message") or {}
+        piece = message.get("content") or ""
+        if piece:
+            content.append(piece)
+            on_piece(piece)
+        calls.extend(message.get("tool_calls") or [])
+        if obj.get("done"):
+            last = obj
+    merged = dict(last)
+    merged["message"] = {"role": "assistant", "content": "".join(content), "tool_calls": calls or None}
+    return merged
+
+
+def _hide_think(on_token: Callable[[str], None]):
+    """Wrap *on_token* so text inside <think>...</think> is not passed on (the non-streamed path strips it too).
+    Returns (feed, flush); call flush() when the answer is complete."""
+    OPEN, CLOSE = "<think>", "</think>"
+    state = {"buf": "", "hidden": False}
+
+    def feed(piece: str) -> None:
+        state["buf"] += piece
+        out: list[str] = []
+        while True:
+            buf = state["buf"]
+            if state["hidden"]:
+                end = buf.find(CLOSE)
+                if end < 0:
+                    state["buf"] = buf[-(len(CLOSE) - 1):]      # a closing tag may be split across pieces
+                    break
+                state["buf"], state["hidden"] = buf[end + len(CLOSE):], False
+                continue
+            start = buf.find(OPEN)
+            if start >= 0:
+                out.append(buf[:start])
+                state["buf"], state["hidden"] = buf[start + len(OPEN):], True
+                continue
+            keep = next((n for n in range(min(len(OPEN) - 1, len(buf)), 0, -1) if OPEN.startswith(buf[-n:])), 0)
+            out.append(buf[:len(buf) - keep])
+            state["buf"] = buf[len(buf) - keep:]
+            break
+        text = "".join(out)
+        if text:
+            on_token(text)
+
+    def flush() -> None:
+        if not state["hidden"] and state["buf"]:
+            on_token(state["buf"])
+        state["buf"] = ""
+
+    return feed, flush
+
+
+def _ollama_request(
+    method: str, path: str, payload: Optional[dict] = None, timeout: float = 10.0,
+    on_piece: Optional[Callable[[str], None]] = None,
+):
     base = _ollama_base()
+    streamed: Optional[dict] = None
     try:
         # trust_env=False: never send local traffic through a corporate proxy
         with httpx.Client(timeout=httpx.Timeout(timeout, connect=3.0), trust_env=False) as client:
-            response = client.request(method, base + path, json=payload)
+            if on_piece is None:
+                response = client.request(method, base + path, json=payload)
+            else:
+                with client.stream(method, base + path, json=payload) as response:
+                    if response.status_code < 400:
+                        streamed = _read_ollama_stream(response, on_piece)
+                    else:
+                        response.read()
     except httpx.ConnectError as exc:
         raise LLMError(
             f"Could not reach Ollama at {base}. Start the Ollama app (or run 'ollama serve') and try again."
@@ -783,6 +936,8 @@ def _ollama_request(method: str, path: str, payload: Optional[dict] = None, time
         ) from exc
     except httpx.HTTPError as exc:
         raise LLMError(f"Ollama request failed: {exc}") from exc
+    if streamed is not None:
+        return streamed
     if response.status_code >= 400:
         try:
             detail = str(response.json().get("error") or response.text)
@@ -987,6 +1142,7 @@ def _ollama_chat(
     max_tokens: int,
     schema: Optional[dict] = None,
     tools: Optional[list] = None,
+    on_piece: Optional[Callable[[str], None]] = None,
 ) -> dict:
     model = settings.model
     info = _ollama_model_info(model) or {}
@@ -1009,7 +1165,9 @@ def _ollama_chat(
     if info.get("thinking"):   # thinking tokens are slow on a local CPU; gpt-oss can only be turned down
         payload["think"] = "low" if model.lower().startswith("gpt-oss") else False
 
-    data = _ollama_request("POST", "/api/chat", payload, timeout=OLLAMA_TIMEOUT)
+    if on_piece:
+        payload["stream"] = True
+    data = _ollama_request("POST", "/api/chat", payload, timeout=OLLAMA_TIMEOUT, on_piece=on_piece)
     _record_usage(model, int(data.get("prompt_eval_count") or 0) + int(data.get("eval_count") or 0))
     return data
 
@@ -1064,6 +1222,7 @@ def _ollama_tool_loop(
     tools: list[dict],
     execute_tool: Callable[[str, dict], str],
     max_rounds: int,
+    on_token: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
     info = _ollama_model_info(settings.model)
     if info is not None and not info["tools"]:
@@ -1077,12 +1236,21 @@ def _ollama_tool_loop(
     ]
     messages: list[dict] = [{"role": "system", "content": system}] + list(history)
 
+    earlier: list[str] = []     # text written before a tool call (only kept when streaming)
+
     for _ in range(max_rounds):
-        data = _ollama_chat(settings, messages, max_tokens=1500, tools=oa_tools)
+        feed, flush = _hide_think(on_token) if on_token else (None, None)
+        data = _ollama_chat(settings, messages, max_tokens=1500, tools=oa_tools, on_piece=feed)
+        if flush:
+            flush()
         message = data.get("message") or {}
         calls = message.get("tool_calls") or []
+        written = _ollama_content(data)
         if not calls:
-            return _ollama_content(data)
+            return _join_rounds(earlier, written)
+        if on_token and written:
+            earlier.append(written)
+            on_token("\n\n")
 
         messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
         for call in calls:
@@ -1170,18 +1338,32 @@ def _anthropic_tool_loop(
     tools: list[dict],
     execute_tool: Callable[[str, dict], str],
     max_rounds: int,
+    on_token: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
     client = _anthropic_client()
     messages: list[dict[str, Any]] = list(history)
+    earlier: list[str] = []     # text written before a tool call (only kept when streaming)
 
     for _ in range(max_rounds):
-        response = client.messages.create(
-            model=settings.model, max_tokens=1500, system=system, messages=messages, tools=tools
-        )
+        if on_token:
+            with client.messages.stream(
+                model=settings.model, max_tokens=1500, system=system, messages=messages, tools=tools
+            ) as stream:
+                for piece in stream.text_stream:
+                    on_token(piece)
+                response = stream.get_final_message()
+        else:
+            response = client.messages.create(
+                model=settings.model, max_tokens=1500, system=system, messages=messages, tools=tools
+            )
         _record_usage(settings.model, _usage_of(response))
 
+        written = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
         if response.stop_reason != "tool_use":
-            return "".join(b.text for b in response.content if hasattr(b, "text")).strip()
+            return _join_rounds(earlier, written)
+        if on_token and written:
+            earlier.append(written)
+            on_token("\n\n")
 
         assistant_content = list(response.content)
         tool_results = []
@@ -1243,16 +1425,20 @@ def run_tool_loop(
     execute_tool: Callable[[str, dict], str],
     max_rounds: int = 8,
     settings: Optional[Settings] = None,
+    on_token: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
     """Let the model call *tools* (Anthropic-format schemas) until it answers.
     *execute_tool(name, input)* runs a tool and returns its result as text. Returns the final
-    reply, or None if *max_rounds* tool rounds were used without a final answer."""
+    reply, or None if *max_rounds* tool rounds were used without a final answer.
+
+    With *on_token* the answer is streamed: every piece of text the model writes is passed to it as it arrives
+    (text written before a tool call is followed by a blank line), and the reply returned is that same text."""
     s = _ready(settings)
     if s.provider == OLLAMA:
-        return _ollama_tool_loop(s, system, messages, tools, execute_tool, max_rounds)
+        return _ollama_tool_loop(s, system, messages, tools, execute_tool, max_rounds, on_token)
     if s.provider == GROQ:
-        return _groq_tool_loop(s, system, messages, tools, execute_tool, max_rounds)
-    return _anthropic_tool_loop(s, system, messages, tools, execute_tool, max_rounds)
+        return _groq_tool_loop(s, system, messages, tools, execute_tool, max_rounds, on_token)
+    return _anthropic_tool_loop(s, system, messages, tools, execute_tool, max_rounds, on_token)
 
 
 def test_connection(settings: Optional[Settings] = None) -> dict:
