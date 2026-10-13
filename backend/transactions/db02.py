@@ -169,6 +169,44 @@ def _run_get_table_sizes(table_names: list[str]) -> dict:
         return {"status": "error", "transaction": "DB02", "message": str(exc)}
 
 
+def run_get_table_counts(table_names: list[str]) -> dict:
+    """
+    How many entries each of *table_names* has, from HANA's own statistics (RECORD_COUNT of M_CS_TABLES and
+    M_RS_TABLES) via the SQL Editor. This is a number per table: no row, field value or any other table content
+    is read. Used by the chat assistant, which must never see table data.
+
+    Returns {"status": "ok", "counts": {TABLE: int}}; a table that is not in the system is simply absent.
+    """
+    return sap.run(_run_get_table_counts, table_names)
+
+
+def _run_get_table_counts(table_names: list[str]) -> dict:
+    sanitized = sorted({n for n in (_sanitize_table_name(t) for t in table_names) if n})
+    if not sanitized:
+        return {"status": "ok", "transaction": "DB02", "counts": {}}
+    try:
+        session = sap.get_session()
+        _open_sql_editor(session)
+        table_list = ", ".join(f"'{n}'" for n in sanitized)
+        in_schema = "SCHEMA_NAME IN (SELECT SCHEMA_NAME FROM \"SYS\".\"TABLES\" WHERE TABLE_NAME = 'T000')"
+        rows = _run_sql_query(
+            session,
+            f"SELECT TABLE_NAME TNAME, RECORD_COUNT RCOUNT FROM M_CS_TABLES WHERE {in_schema} AND TABLE_NAME IN ({table_list}) "
+            f"UNION ALL "
+            f"SELECT TABLE_NAME TNAME, RECORD_COUNT RCOUNT FROM M_RS_TABLES WHERE {in_schema} AND TABLE_NAME IN ({table_list})",
+        )
+        counts: dict[str, int] = {}
+        for r in rows:
+            name = (r.get("TNAME") or "").strip().upper()
+            digits = "".join(ch for ch in str(r.get("RCOUNT") or "") if ch.isdigit())   # SAP formats numbers with separators
+            if name and digits:
+                counts[name] = int(digits)
+        return {"status": "ok", "transaction": "DB02", "counts": counts}
+    except Exception as exc:
+        logger.exception("DB02 table-count lookup failed")
+        return {"status": "error", "transaction": "DB02", "message": str(exc)}
+
+
 def run_get_archiving_network() -> dict:
     """
     The archiving-object dependency network -- the data SARA's "Network Graphic" button draws -- from table

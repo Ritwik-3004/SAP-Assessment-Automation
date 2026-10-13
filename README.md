@@ -165,7 +165,7 @@ dedicated panel; the chat assistant uses them.
 
 | Transaction | Purpose |
 |---|---|
-| **TAANA** | Table analysis. The **Table Analysis** task (below) drives it with ad hoc variants; the older `taana.run()` function behind the chat's `analyze_table` tool has not been verified against the real screens |
+| **TAANA** | Table analysis. The **Table Analysis** task (below) drives it with ad hoc variants; the older single-item `taana.run()` endpoint is no longer used by the chat (see [Data sent to the AI model](#data-sent-to-the-ai-model)) and has not been verified against the real screens |
 | **DB15** | Find which archiving objects reference a given table |
 | **DB02** | HANA database administration cockpit (used here for its SQL Editor) |
 | **SE16N** | Browse table contents with optional WHERE filter; also used for a specific ARCH_DEF header-table lookup (see below) |
@@ -401,7 +401,8 @@ user decides what to do.
 
 Flow:
 
-1. Click **Upload Reference Document(s)** and select one or several files. The backend (`backend/reference_doc.py`,
+1. Click **Upload Reference Document(s)** and select one or several files. A dialog then says the text will be sent to the AI model and asks you to tick that the
+   documents contain no client data or other sensitive information (Cancel or Esc sends nothing; see [Data sent to the AI model](#data-sent-to-the-ai-model)). The backend (`backend/reference_doc.py`,
    `POST /api/reference-doc/analyze`) extracts the document's text (`openpyxl` for Excel,
    `pypdf` for PDF, `python-pptx` for PowerPoint) and asks the selected AI model to pull out
    explicit table → archiving object pairs. Only mappings stated in the document are used;
@@ -524,10 +525,10 @@ start, so switching mid-run can't mix two models in one result set. Endpoints:
   today's requests and tokens used (counted locally in `llm_usage.json`).
 - Answers can differ from Claude's: the prompts were written and tuned on Claude Haiku.
   Compare both models on the same ~10 tables before relying on Groq results.
-- **Data handling:** in Groq mode, table names, descriptions and sizes, DVM Guide excerpts,
-  SAP for Me article text, uploaded reference documents and (via chat) SE16N/TAANA table
-  rows are sent to Groq instead of Anthropic. Check this against the client's data-handling
-  rules and Groq's free-tier data terms first.
+- **Data handling:** in Groq mode, table names and descriptions, DVM Guide excerpts, SAP for Me
+  article text and the uploaded reference documents you confirm are sent to Groq instead of
+  Anthropic (see [Data sent to the AI model](#data-sent-to-the-ai-model); table contents never are).
+  Check this against the client's data-handling rules and Groq's free-tier data terms first.
 
 Ollama verification: checked **live** against Ollama 0.34 with `gemma3:270m` (the only model installed): model listing,
 automatic pick, test call, schema-constrained JSON, usage count, cloud/uninstalled models rejected. Ranking with several models,
@@ -540,6 +541,27 @@ first run). The request shape, strict JSON-schema output, retries, daily-limit a
 tool calls were also checked offline with fake clients. Still open: how Groq's answers
 compare with Claude's on the same tables, and Qwen 3.8's exact reasoning behaviour and the
 free tier's admission rules under a long batch — watch the first big run.
+
+## Data sent to the AI model
+
+The rule is that **no table data and no client data goes to the AI model.** What that means in the app:
+
+- **Table contents are never read for the model.** No tool can return the rows, records or field values of any SAP
+  table. The chat assistant has counts, sizes and structure only (see [Chat assistant](#chat-assistant)); the earlier row-browsing and table-statistics tools
+  were removed. A message asking for table contents is refused before any model is called (`wants_table_contents()` in
+  `backend/chat.py`), with a fixed reply, and the system prompt carries the same rule.
+- **Reference documents are the one place document content reaches the model**, because the model has to read them. Before the text of a document
+  is sent, a dialog (`frontend/src/components/SendToModelDialog.tsx`) says it will go to the AI model (naming it, and whether it is an online service or runs on this
+  computer), tells the user to make sure it holds no client data or other sensitive information, and only enables **Send to the AI model** once the user
+  ticks that they checked. Cancel or Esc sends nothing. It covers the table and header-table reviews and the Archiving Object Analysis check. The app cannot
+  inspect a document for sensitive content, and the check is in the user interface only: the upload endpoints themselves do not ask.
+- **Metadata that does reach the model:** table names and descriptions (including custom `Z*` tables), archiving object names and descriptions, the archiving
+  definition structure (segment names) when settling a header table, public SAP text (DVM Guide, SAP Notes and Knowledge Base Articles, SAP Community, Help Portal),
+  the chat's table names, sizes and entry counts, archiving-session facts (dates, record counts, file sizes), and whatever the user types in the chat.
+- **Never sent:** table sizes during scoring, results workbooks, SAP and SAP for Me credentials, and anything from Table Analysis, Open Item Analysis or Final
+  report generation (those tasks do not use the model).
+- **Where it goes:** Claude and Groq are online services; Ollama runs on this computer and refuses any other address. Choose Ollama if even the metadata must
+  stay on the machine.
 
 ## Chat assistant
 
@@ -568,15 +590,19 @@ How it works (`backend/chat.py`, endpoint `POST /api/chat`):
    |---|---|---|
    | `lookup_archiving_objects` | DB15 | Which archiving objects cover a table |
    | `check_archiving_object` | AOBJ | Whether an object name exists, or listing by prefix (`MM_*`) |
-   | `browse_table_contents` | SE16N | Actual rows in a table (default 50, max 200; Claude sees at most 10 rows and 8 columns) |
+   | `get_table_counts` | DB02 | How many entries named tables have (HANA statistics; a number only, never rows or values) |
    | `get_table_definition` | SE11 | A table's fields, types and key fields (first 30 fields) |
-   | `analyze_table` | TAANA | Row counts, size, archiving statistics |
    | `get_archiving_sessions` | SARA | Whether and when an object has been run (latest 10 sessions) |
    | `get_largest_tables` | DB02 | The biggest tables by size (top N, default 10, max 50) — the same HANA size query as Generate Table List; column-store tables only |
    | `get_table_sizes` | DB02 | Size in GB/MB of named tables |
    | `search_dvm_guide` | — (DVM Guide) | Which object / cleanup program fits a table, by table name or keywords (`dvm_guide.search`); fast, offline |
    | `search_sap_for_me` | — (SAP for Me) | SAP Notes / Knowledge Base Articles (SAP Community as a fallback); **slow** - opens the browser and signs in with the active SAP for Me account |
    | `update_table_result` | — (in memory) | Change a table's archiving object, score or rationale (only offered when results are loaded) |
+
+   **Table contents are never read.** There is no tool that returns rows, records or field values, and a request to see them ("show me rows
+   of T001", a SQL query, "what is in table X") is refused before the model is called, with: "I'm not allowed to read or show table data. I can tell
+   you how many entries a table has, its size, its structure, which archiving objects cover it and its archiving history." A count for a subset (one year,
+   one company code) is not available either; Table Analysis gives such breakdowns without the model.
 
 3. For `update_table_result`, the backend edits a copy of the rows, recomputes the
    Recommended list (highest score per table) and returns both; the frontend swaps them
@@ -587,9 +613,9 @@ How it works (`backend/chat.py`, endpoint `POST /api/chat`):
    and SAP's own documents from the model's recollection. This is a rule in the system prompt in
    `backend/chat.py`.
 
-The eight SAP tools (DB15, AOBJ, SE16N, SE11, TAANA, SARA and two for DB02) use the shared SAP GUI session, so SAP must be connected for them; without it the
+The seven SAP tools (DB15, AOBJ, SE11, SARA and three for DB02) use the shared SAP GUI session, so SAP must be connected for them; without it the
 assistant says live checks are unavailable and still uses the DVM Guide, SAP for Me and its general knowledge.
-Other transactions (DB02, SE38/SA38, SM36/SM37, SARI, …) it can explain but not run. It cannot run arbitrary
+Other transactions (SE16N, TAANA, SE38/SA38, SM36/SM37, SARI, …) it can explain but not run. It cannot run arbitrary
 transactions or read everything in the system, only what these tools expose.
 
 **Number formats:** DB02 returns each table's size as a raw byte count formatted with the SAP user's separators (`2,823,527,885` or `2.823.527.885`). `db02._read_result_grid()` keeps only the digits, so sizes are no longer blank for users whose format uses dots.
@@ -610,9 +636,8 @@ and `aobj.py` clears popups right after opening AOBJ and again after executing.
   `archiving_objects_with_reference.xlsx` or the later tasks' results; run those steps again to pick it up.
 - There is no guard against asking a live-SAP question while a DB15 batch is running;
   both drive the same SAP GUI session.
-- SE16N and TAANA results (real table rows from the client system) are sent to the
-  Anthropic API as part of the conversation — check this against the client's data-handling
-  rules before using those tools.
+- Anything the user types or pastes into the chat is sent to the model as written. A note under the question box
+  says not to paste client data, but nothing checks it.
 - The scored rows sent to the chat have no Rationale field, so Claude never sees the
   reasons behind the scores.
 - A SAP for Me search signs in and loads articles every time (no session is kept between messages), so it can
@@ -813,7 +838,7 @@ contains "Recommended" and that has an "Archiving Object" column (otherwise the 
 
 **Reference documents (optional, after step 1).** Below the results, **Reference document(s)** lets you upload any readable document —
 **Excel (.xlsx), PowerPoint (.pptx), Word (.docx), PDF, CSV or text/Markdown**, one or several — with past analysis or SME notes, to fill gaps and
-spot mismatches (`backend/object_reference.py`; runs in the background, AI model only). The tool reads, per archiving object, what the document
+spot mismatches (`backend/object_reference.py`; runs in the background, AI model only; the same confirmation dialog asks you to confirm the documents hold no client data before anything is sent). The tool reads, per archiving object, what the document
 says about its **archiving conditions** and the **objects to archive first**, and compares that with the results:
 - **Objects to archive first** are compared by name: *confirmed* (in both), *only in the document* (a **gap**: SAP's network doesn't list it) and *only in the
   tool* (in SAP's network but the document doesn't mention it; shown for information).

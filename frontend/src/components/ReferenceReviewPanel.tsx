@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import SavedNotice from "./SavedNotice";
+import SendToModelDialog from "./SendToModelDialog";
 import type { ReferenceReview } from "../types";
 
 type Row = Record<string, string>;
@@ -41,6 +42,8 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
   const [phase, setPhase] = useState<Phase>("idle");
   const [result, setResult] = useState<ReferenceReview | null>(null);
   const [error, setError] = useState("");
+  // Documents picked but not yet confirmed: nothing is sent to the AI model until the user confirms
+  const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
 
   // Mismatches the user selected for override (set of id values)
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -72,7 +75,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const picked = Array.from(e.target.files ?? []);
-    if (picked.length) handleFiles(picked);
+    if (picked.length) setPendingFiles(picked);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -153,6 +156,10 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
           {phase === "idle" ? (
             <>
               <p className="ref-doc-upload-hint">{c.uploadHint}</p>
+              <p className="ref-doc-upload-hint">
+                <strong>The text of the documents is sent to the AI model.</strong> You will be asked to confirm that
+                they contain no client data or other sensitive information.
+              </p>
               <p className="ref-doc-upload-hint">
                 You can select several documents at once. If two documents name different values for the
                 same item, the one listed first is used and the comment says what the others suggested.
@@ -377,6 +384,18 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
 
           {saving ? <p className="tx-hint">Saving the results…</p> : <SavedNotice path={savedPath} />}
         </>
+      )}
+
+      {pendingFiles && (
+        <SendToModelDialog
+          files={pendingFiles}
+          onCancel={() => setPendingFiles(null)}
+          onConfirm={() => {
+            const files = pendingFiles;
+            setPendingFiles(null);
+            handleFiles(files);
+          }}
+        />
       )}
     </div>
   );

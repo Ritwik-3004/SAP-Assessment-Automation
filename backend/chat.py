@@ -4,14 +4,21 @@ The always-available assistant (right-hand chat column of the app).
 It answers from, in order of authority:
   1. the DVM Guide (SAP's Data Management Guide)        -- search_dvm_guide
   2. SAP for Me (Notes / Knowledge Base Articles)       -- search_sap_for_me
-  3. the live SAP system, through six transactions      -- DB15, AOBJ, SE16N, SE11, TAANA, SARA
+  3. the live SAP system, through metadata tools only   -- DB15, AOBJ, SE11, SARA, DB02 (sizes, entry counts)
   4. the current scored results, if any are loaded      -- and it can change them (update_table_result)
   5. the model's own SAP knowledge, which it must flag as such.
+
+DATA PROTECTION: the assistant never reads or shows what is INSIDE a table (rows, field values, records),
+and nothing of that kind is ever sent to the AI model. It can give a table's number of entries, size, structure
+(field names and types), the archiving objects that cover it and its archiving history -- never its contents.
+Requests for table contents are refused before any model is called (see wants_table_contents()), the tools that
+could return rows do not exist, and the system prompt says the same.
 
 Modified rows are returned alongside the text reply so the frontend can update its state
 without re-running scoring.
 """
 import logging
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -22,9 +29,7 @@ import sap_for_me
 import transactions.db02 as db02
 import transactions.db15 as db15
 import transactions.aobj as aobj
-import transactions.se16n as se16n
 import transactions.se11 as se11
-import transactions.taana as taana
 import transactions.sara as sara
 
 logger = logging.getLogger(__name__)
@@ -65,24 +70,23 @@ _TOOLS = [
         },
     },
     {
-        "name": "browse_table_contents",
+        "name": "get_table_counts",
         "description": (
-            "[SE16N] Use when the user wants to SEE ACTUAL DATA ROWS inside a table, "
-            "e.g. 'show me rows from T001', 'how many entries does BKPF have for 2023?', "
-            "'what does a MKPF record look like?'. Accepts an optional WHERE clause "
-            "and a row limit (default 50, max 200)."
+            "[DB02] Use when the user asks HOW MANY ENTRIES (rows) one or more tables have, e.g. "
+            "'how many rows does BSEG have?', 'row counts of BKPF and BSEG'. Returns a number per "
+            "table, never any table content. A count for a subset (for example one year) is not "
+            "available; say so."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "table_name": {"type": "string", "description": "SAP table name"},
-                "max_rows": {"type": "integer", "description": "Max rows to return (default 50)"},
-                "where_clause": {
-                    "type": "string",
-                    "description": "Optional WHERE clause, e.g. \"GJAHR = '2023'\"",
+                "table_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "SAP table names (uppercase), at most 30",
                 },
             },
-            "required": ["table_name"],
+            "required": ["table_names"],
         },
     },
     {
@@ -97,23 +101,6 @@ _TOOLS = [
             "type": "object",
             "properties": {
                 "table_name": {"type": "string", "description": "SAP table name"},
-            },
-            "required": ["table_name"],
-        },
-    },
-    {
-        "name": "analyze_table",
-        "description": (
-            "[TAANA] Use when the user asks about TABLE STATISTICS — row count, size, "
-            "last archiving run, or archivability analysis. Examples: 'how many rows "
-            "does BKPF have?', 'what is the size of BSEG?', 'has VBAP ever been "
-            "archived?', 'analyze KNA1'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "table_name": {"type": "string", "description": "SAP table name or pattern"},
-                "max_rows": {"type": "integer", "description": "Max result rows (default 100)"},
             },
             "required": ["table_name"],
         },
@@ -158,8 +145,7 @@ _TOOLS = [
         "name": "get_table_sizes",
         "description": (
             "[DB02] Use when the user asks how BIG one or more NAMED tables are (size in GB/MB), "
-            "or wants to compare tables: 'how big is BSEG?', 'size of BKPF and VBAK'. Prefer this "
-            "over analyze_table for plain size questions."
+            "or wants to compare tables: 'how big is BSEG?', 'size of BKPF and VBAK'."
         ),
         "input_schema": {
             "type": "object",
@@ -265,10 +251,9 @@ When sources disagree, follow the order above and point out the disagreement.
 LIVE TRANSACTIONS you can run (each needs SAP to be connected):
   DB15 (lookup_archiving_objects)   archiving objects that cover a table
   DB02 (get_largest_tables, get_table_sizes)  biggest tables in the system; size of named tables
+  DB02 (get_table_counts)           how many entries named tables have (a number only)
   AOBJ (check_archiving_object)     archiving object definitions: does X exist, list MM_*
-  SE16N (browse_table_contents)     rows in any table, optional WHERE
-  SE11 (get_table_definition)       any table's fields, types, keys
-  TAANA (analyze_table)             row counts, size, archiving statistics
+  SE11 (get_table_definition)       any table's fields, types, keys (structure, not data)
   SARA (get_archiving_sessions)     archive runs / sessions of an object
 Other transactions you can EXPLAIN but cannot run here (say so if asked to run them): SE38/SA38 (run an ABAP report, e.g. a cleanup program), \
 SM36/SM37 (schedule / monitor background jobs), SARI (archive information system), SM30/SM31 \
@@ -278,13 +263,19 @@ TOOL SELECTION:
   - "which archiving object / cleanup program for table X" -> search_dvm_guide first, then \
 lookup_archiving_objects (DB15) for what this system really has
   - "does object Y exist / list MM_ objects" -> check_archiving_object
-  - "show rows" -> browse_table_contents; "fields / structure" -> get_table_definition
+  - "fields / structure" -> get_table_definition
   - "largest / biggest tables, top N" -> get_largest_tables; "how big is table X" -> get_table_sizes
-  - "how many rows / archived?" -> analyze_table; "archiving history" -> get_archiving_sessions
+  - "how many rows / entries" -> get_table_counts; "archiving history" -> get_archiving_sessions
   - concept or transaction questions -> answer directly (source 5), or check the DVM Guide
   - change a result -> update_table_result (only when results are loaded)
 
 RULES:
+  - DATA PROTECTION - you can NEVER access, show or discuss what is inside a table: no rows, records, \
+field values, document contents or filtered selections, and no tool exists for it. If the user asks for \
+any of that, answer only: "I'm not allowed to read or show table data. I can tell you how many entries a \
+table has, its size, its structure, which archiving objects cover it and its archiving history." Do not \
+suggest a workaround that sends data to you, and if the user pastes real table data or client details, ask \
+them not to share such data here.
   - Always say where an answer came from: "DVM Guide: ...", "SAP for Me (Note 12345): ...", \
 "Checked in AOBJ: ...", "DB15 shows ...", "From my general SAP knowledge: ...". Never present \
 general knowledge as if it came from the system or SAP's documents.
@@ -431,28 +422,27 @@ def _exec_check_archiving_object(object_filter: str) -> str:
         return f"Error checking archiving object '{object_filter}': {exc}"
 
 
-def _exec_browse_table(table_name: str, max_rows: int, where_clause: str | None) -> str:
+def _exec_table_counts(table_names: list[str]) -> str:
     if not sap.is_connected:
-        return "SAP is not connected — reconnect via the login panel first."
+        return "SAP is not connected - connect via the login panel first."
+    names = [str(n).strip().upper() for n in (table_names or []) if str(n).strip()][:30]
+    if not names:
+        return "No table names given."
     try:
-        result = se16n.run(table_name.upper(), max_rows=max_rows, where_clause=where_clause or None)
+        result = db02.run_get_table_counts(names)
         if result.get("status") == "error":
-            return f"SE16N error for {table_name}: {result.get('message', 'unknown error')}"
-        rows = result.get("rows", [])
-        if not rows:
-            return f"No rows returned for {table_name} (table may be empty or the filter returned nothing)."
-        # Summarise: show column headers + up to 10 rows as compact text
-        cols = list(rows[0].keys())
-        header = " | ".join(cols[:8])  # cap columns shown
-        lines = [f"{table_name}: {len(rows)} row(s) returned", header, "-" * len(header)]
-        for r in rows[:10]:
-            lines.append(" | ".join(str(r.get(c, "")) for c in cols[:8]))
-        if len(rows) > 10:
-            lines.append(f"... {len(rows) - 10} more rows not shown")
-        return "\n".join(lines)
+            return f"DB02 error: {result.get('message', 'unknown error')}"
+        counts = result.get("counts", {})
+        lines = []
+        for n in names:
+            if n in counts:
+                lines.append(f"  {n}: {counts[n]:,} entries")
+            else:
+                lines.append(f"  {n}: no count found (the table does not exist in this system, or HANA has no statistics for it)")
+        return "Number of entries (HANA table statistics; counts only, no table content is read):\n" + "\n".join(lines)
     except Exception as exc:
-        logger.exception("Chat tool: SE16N failed for %s", table_name)
-        return f"Error browsing {table_name}: {exc}"
+        logger.exception("Chat tool: DB02 table counts failed")
+        return f"Error running DB02: {exc}"
 
 
 def _exec_get_table_definition(table_name: str) -> str:
@@ -486,28 +476,6 @@ def _exec_get_table_definition(table_name: str) -> str:
     except Exception as exc:
         logger.exception("Chat tool: SE11 failed for %s", table_name)
         return f"Error getting definition for {table_name}: {exc}"
-
-
-def _exec_analyze_table(table_name: str, max_rows: int) -> str:
-    if not sap.is_connected:
-        return "SAP is not connected — reconnect via the login panel first."
-    try:
-        result = taana.run(table_name=table_name.upper(), max_rows=max_rows)
-        if result.get("status") == "error":
-            return f"TAANA error for {table_name}: {result.get('message', 'unknown error')}"
-        rows = result.get("rows", [])
-        if not rows:
-            return f"No TAANA data for {table_name} — it may not be included in the analysis."
-        lines = [f"TAANA analysis for {table_name}:"]
-        for r in rows[:5]:
-            for k, v in r.items():
-                if v and str(v).strip():
-                    lines.append(f"  {k}: {v}")
-            lines.append("")
-        return "\n".join(lines).strip()
-    except Exception as exc:
-        logger.exception("Chat tool: TAANA failed for %s", table_name)
-        return f"Error analyzing {table_name}: {exc}"
 
 
 def _exec_get_archiving_sessions(archiving_object: str) -> str:
@@ -737,6 +705,41 @@ def _exec_update(
 
 
 # ---------------------------------------------------------------------------
+# Table data is never read or shown
+# ---------------------------------------------------------------------------
+
+TABLE_DATA_REFUSAL = (
+    "I'm not allowed to read or show table data. I can tell you how many entries a table has, its size, "
+    "its structure (fields and types), which archiving objects cover it and its archiving history."
+)
+
+_FORBIDDEN_TOOLS = {"browse_table_contents", "analyze_table"}
+
+_COUNT_OR_SIZE = re.compile(r"\b(how many|count|number of|total|size|volume|largest|biggest)\b", re.IGNORECASE)
+_TABLE_CONTENT_REQUEST = re.compile(
+    r"""
+      \bselect\b.{1,80}\bfrom\b\s+[\w/]+                                   # a SQL query
+    | \bse16n?\b                                                            # the table browser itself
+    | \bbrowse\b[^.?!\n]{0,20}\btables?\b
+    | \bwhat(?:'s|\s+is|\s+are)\s+(?:inside|in)\s+(?:the\s+)?tables?\b
+    | \b(?:show|display|list|print|give|fetch|read|dump|view|see|get)\b
+        [^.?!\n]{0,40}\b(?:rows?|records?|contents?|field\s+values?|line\s+items?|entries)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def wants_table_contents(message: str) -> bool:
+    """True if *message* asks to see what is inside a table (rows, records, contents, field values, a SQL query).
+    A question about a count or a size ("how many entries ...") does not count. Checked before any model call, so
+    such a request never reaches the model at all."""
+    text = message or ""
+    if not _TABLE_CONTENT_REQUEST.search(text):
+        return False
+    return not _COUNT_OR_SIZE.search(text)
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -757,6 +760,10 @@ def run_chat(
             "updated_recommended": list | None,  # present when rows were modified
         }
     """
+    # Asked to show what is inside a table: refuse here, without calling any model
+    if wants_table_contents(message):
+        return {"reply": TABLE_DATA_REFUSAL, "updated_rows": None, "updated_recommended": None}
+
     settings = llm.load_settings()
     problem = llm.not_configured_message(settings)
     if problem:
@@ -795,20 +802,16 @@ def run_chat(
         if name == "check_archiving_object":
             return _exec_check_archiving_object(inp.get("object_filter") or "")
 
-        if name == "browse_table_contents":
-            return _exec_browse_table(
-                (inp.get("table_name") or "").strip().upper(),
-                int(inp.get("max_rows") or 50),
-                inp.get("where_clause") or None,
-            )
+        if name in _FORBIDDEN_TOOLS:
+            # These tools no longer exist; a model that still asks for one gets the policy, not data.
+            return TABLE_DATA_REFUSAL
 
         if name == "get_table_definition":
             return _exec_get_table_definition((inp.get("table_name") or "").strip().upper())
 
-        if name == "analyze_table":
-            return _exec_analyze_table(
-                (inp.get("table_name") or "").strip().upper(), int(inp.get("max_rows") or 100)
-            )
+        if name == "get_table_counts":
+            names = inp.get("table_names") or []
+            return _exec_table_counts(names if isinstance(names, list) else [names])
 
         if name == "get_archiving_sessions":
             return _exec_get_archiving_sessions((inp.get("archiving_object") or "").strip().upper())

@@ -162,8 +162,9 @@ export default function AssistantPanel({
         {history.length === 0 && (
           <div className="chat-empty">
             <p className="chat-placeholder">
-              Ask about tables, archiving objects, housekeeping programs or your SAP system. I say which
-              source each answer came from. Try:
+              Ask about tables, archiving objects, housekeeping programs or your SAP system. I never read what
+              is inside a table, only how many entries it has, its size and its structure. I say which source
+              each answer came from. Try:
             </p>
             <div className="chat-suggestions">
               {SUGGESTIONS.map((s) => (
@@ -216,6 +217,9 @@ export default function AssistantPanel({
           Send
         </button>
       </form>
+      <p className="assistant-note">
+        Table contents are never read or shared. Please don't paste client data here: your messages go to the AI model.
+      </p>
     </aside>
 
     {mode === "collapsed" && (

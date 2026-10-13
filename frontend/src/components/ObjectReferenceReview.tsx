@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { ObjectReferenceReview as Review } from "../types";
+import SendToModelDialog from "./SendToModelDialog";
 
 type ReviewState = { status: "idle" | "running" | "done" | "error"; message: string | null; filename: string; warnings: string[] };
 
@@ -20,6 +21,8 @@ export default function ObjectReferenceReview({ enabled, onApplied }: Props) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [applying, setApplying] = useState(false);
+  // Documents picked but not yet confirmed: nothing is sent to the AI model until the user confirms
+  const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const running = state.status === "running";
@@ -45,10 +48,13 @@ export default function ObjectReferenceReview({ enabled, onApplied }: Props) {
     return () => clearInterval(timer);
   }, [running]);
 
-  async function handleFiles(e: React.ChangeEvent<HTMLInputElement>) {
+  function handlePick(e: React.ChangeEvent<HTMLInputElement>) {
     const picked = Array.from(e.target.files ?? []);
     if (fileInputRef.current) fileInputRef.current.value = "";
-    if (!picked.length) return;
+    if (picked.length) setPendingFiles(picked);
+  }
+
+  async function analyzeFiles(picked: File[]) {
     setError("");
     setNotice("");
     setSelected(new Set());
@@ -102,7 +108,9 @@ export default function ObjectReferenceReview({ enabled, onApplied }: Props) {
           Upload past analysis or SME notes to fill gaps and spot mismatches. Any kind of document works — Excel,
           PowerPoint, Word, PDF, CSV or text — and you can select several. The tool reads what each says about the
           archiving conditions and the objects to archive first, compares it with the results above, and changes
-          nothing until you tick what to apply.
+          nothing until you tick what to apply.{" "}
+          <strong>The text of the documents is sent to the AI model</strong>, so you will be asked to confirm that they
+          contain no client data or other sensitive information.
         </p>
         <div className="action-row">
           <label className={`btn btn-secondary ${!enabled || running ? "disabled" : ""}`} style={{ cursor: enabled && !running ? "pointer" : "not-allowed" }}>
@@ -112,7 +120,7 @@ export default function ObjectReferenceReview({ enabled, onApplied }: Props) {
               type="file"
               multiple
               accept=".xlsx,.xlsm,.pdf,.pptx,.docx,.csv,.txt,.md"
-              onChange={handleFiles}
+              onChange={handlePick}
               disabled={!enabled || running}
               style={{ display: "none" }}
             />
@@ -233,6 +241,18 @@ export default function ObjectReferenceReview({ enabled, onApplied }: Props) {
           </>
         )}
       </div>
+
+      {pendingFiles && (
+        <SendToModelDialog
+          files={pendingFiles}
+          onCancel={() => setPendingFiles(null)}
+          onConfirm={() => {
+            const files = pendingFiles;
+            setPendingFiles(null);
+            analyzeFiles(files);
+          }}
+        />
+      )}
     </div>
   );
 }
