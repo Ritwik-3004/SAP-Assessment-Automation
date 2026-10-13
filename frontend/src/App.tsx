@@ -8,6 +8,7 @@ import HeaderTablePanel from "./components/HeaderTablePanel";
 import TableAnalysisPanel from "./components/TableAnalysisPanel";
 import ObjectAnalysisPanel from "./components/ObjectAnalysisPanel";
 import OpenItemAnalysisPanel from "./components/OpenItemAnalysisPanel";
+import FinalReportPanel from "./components/FinalReportPanel";
 import AssistantPanel from "./components/AssistantPanel";
 import { AssistantProvider } from "./assistantContext";
 import ObjectAnalysisBadge from "./components/ObjectAnalysisBadge";
@@ -23,6 +24,7 @@ const TASKS = [
   { id: "TABLE_ANALYSIS", label: "Table Analysis" },
   { id: "OBJECT_ANALYSIS", label: "Archiving Object Analysis" },
   { id: "OPEN_ITEM_ANALYSIS", label: "Open Item Analysis" },
+  { id: "FINAL_REPORT", label: "Final report generation" },
 ] as const;
 
 type Tab = (typeof TASKS)[number]["id"];
@@ -58,6 +60,7 @@ export default function App() {
     TABLE_ANALYSIS: <TableAnalysisPanel />,
     OBJECT_ANALYSIS: <ObjectAnalysisPanel />,
     OPEN_ITEM_ANALYSIS: <OpenItemAnalysisPanel />,
+    FINAL_REPORT: <FinalReportPanel />,
   };
 
   return (

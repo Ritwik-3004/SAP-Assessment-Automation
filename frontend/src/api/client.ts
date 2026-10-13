@@ -259,6 +259,10 @@ export const api = {
   getResultFiles: (task: import("../types").TaskId) =>
     get<{ folder: string; files: string[] }>(`/api/results/${task}/files`),
 
+  finalReportSources: () =>
+    get<{ sources: import("../types").FinalReportSource[] }>("/api/final-report/sources"),
+  finalReportGenerate: () => post<import("../types").FinalReportResult>("/api/final-report/generate", {}),
+
   /** Re-save the scored results after the assistant changed them. */
   saveScoredResults: (rows: Record<string, string>[], recommended: Record<string, string>[]) =>
     post<{ saved: boolean; path: string }>("/api/results/archiving-objects/save", { rows, recommended }),

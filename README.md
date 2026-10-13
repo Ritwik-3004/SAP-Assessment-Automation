@@ -19,7 +19,7 @@ Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeepi
 (housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (the always-visible
 assistant), `credentials_store.py` (several saved logins per credentials file), `reference_doc.py`
 (reference document analysis), `table_analysis.py` (the Table Analysis task) with `transactions/taana_analysis.py`
-(its TAANA screens), `open_item_analysis.py` (the Open Item Analysis task), `object_analysis.py` (the Archiving Object Analysis task) with `object_reference.py` (its reference-document check) and `transactions/sara_info.py`,
+(its TAANA screens), `open_item_analysis.py` (the Open Item Analysis task), `final_report.py` (the Final report generation task), `object_analysis.py` (the Archiving Object Analysis task) with `object_reference.py` (its reference-document check) and `transactions/sara_info.py`,
 `help_browser.py` and `helpportal.py` (its SARA / SAP Help Portal steps), `progress.py` (progress
 polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 
@@ -32,8 +32,9 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Housekeeping program lookup — DVM Guide stage | Working |
 | Housekeeping program lookup — SAP for Me stage | Working in `debug_sap_for_me.py` (COSP → `RK_PLAN_DEL_ZERO_RECORDS`); **not yet verified through a full scoring run in the app**. Needs Chrome for Testing + IT approval. |
 | SAP Community fallback (when SAP for Me has no usable Note/KBA) | Implemented for both the housekeeping and header-table lookups and checked offline with a stubbed browser. **Confirmed live (COSP, via `debug_sap_for_me.py`):** the Community search returns posts, they are recognised by their address shape (`/t5/…/(ba\|qaq\|td\|m)-p/<id>`) and a post's text reads cleanly. **Not yet seen live:** the fallback actually being used in a lookup (COSP has Notes, so it was never needed) and how good Community evidence is — for COSP the posts returned were mostly unrelated, which is why the model must see a program clearly named for the table before using one. Run `backend/.venv/Scripts/python.exe backend/debug_sap_for_me.py TABLE_NAME` to see what it finds (see [below](#housekeepingcleanup-program-lookup-for-tables-with-no-archiving-object)) |
-| Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet). The app has no button for it any more; the sheet stays in the saved workbooks because Find Header Tables and Open Item Analysis read it |
+| Grouped by Object sheet | Working (no Rationale column — it is on the Recommended sheet). The app has no button for it any more; the sheet stays in the saved workbooks because Find Header Tables, Open Item Analysis and the final report read it |
 | `results/` folder: one sub-folder per task, results saved automatically (no save/download buttons), exact path shown, numbered copy when a file is open in Excel | Working and used in the app. The locked-file fallback was tested with read-only files, not with a real Excel lock |
+| Final report generation (Overview workbook with an archiving-object sheet and a housekeeping-program sheet; Object details workbook with one sheet per object) | Run in the app on the current results (3 archiving objects) and on synthetic results, and the layout was checked in Excel. **Not yet tried** with many objects, or with several objects sharing one header table |
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
 | Archiving Object Analysis (conditions from SARA's information page, DVM Guide and SAP for Me; objects to archive first from SARA's network) | **Run end to end against a live system** on FI_DOCUMNT and SD_VBAK (all three sources, dependencies, workbook); the two-step split (step 1, then SAP for Me in the background) was tested offline with fakes and live on SD_VBAK. The reference-document check was tested offline with real PowerPoint/Excel/Word files and canned model answers, and live with a generated deck. The tab handling, failure cases and ordering were also tested offline with fakes. Not yet run on the full list of recommended objects (about 5 minutes per object with all sources) or on a machine whose default browser is not Edge/Chrome — see [Archiving Object Analysis](#archiving-object-analysis) |
@@ -169,6 +170,7 @@ sub-folder per task, named exactly like the task in the sidebar:
 | `results/Table Analysis/` | `Table analysis.xlsx` |
 | `results/Archiving Object Analysis/` | `Archiving object analysis.xlsx` |
 | `results/Open Item Analysis/` | `Open item analysis.xlsx` |
+| `results/Final report generation/` | `Final report - Overview.xlsx` and `Final report - Object details.xlsx` |
 
 There is no Save or Download button anywhere: a task writes its workbook the moment its
 results are populated (the three analysis tasks keep updating theirs as objects/tables
@@ -966,6 +968,49 @@ The result is shown by selecting a field node under the run and choosing *Table 
 a day-level date together with several other fields on a big table can give a very large sheet — group by year and add fields sparingly.
 The step that reads the field types assumes SAP HANA, like the other DB02 SQL features.
 
+## Final report generation
+
+The **Final report generation** task (`frontend/src/components/FinalReportPanel.tsx`, `backend/final_report.py`) combines the important
+results of the other tasks into two Excel files, saved automatically in `results/Final report generation/` (no save or download button;
+the panel shows both full paths). It only reads files the earlier tasks saved, so it does not talk to SAP. The panel first lists the
+files it will use and whether each is found, using the plain file as a fallback, or missing; **Generate final report** then builds both.
+
+**Where the data comes from.** Nothing is recomputed; each value is read from a result file:
+
+| Content | File | Fallback |
+|---|---|---|
+| Archiving object, description, tables, the four size columns | `Find Archiving Objects for Tables/archiving_objects_with_reference.xlsx`, sheet *Grouped by Object* (columns A, B, D and F-I) | `archiving_objects_scored.xlsx` |
+| Housekeeping program, its tables, the four size columns | the same sheet (columns C, D and F-I), for the groups that have no archiving object | the same fallback |
+| Header table | `Find Header Tables for Archiving Objects/header_tables_with_reference.xlsx`, sheet *Header Tables (with Reference)*, column B, matched to the object by column A | `header_tables.xlsx` |
+| Archiving conditions | `Archiving Object Analysis/Archiving object analysis.xlsx`, the Condition column of each object's sheet | none (column left blank) |
+| Table analysis | `Table Analysis/Table analysis.xlsx`, the sheet of the object's header table | none |
+| Open item analysis | `Open Item Analysis/Open item analysis.xlsx`, the object's sheet | none (the object's sheet simply has no open item part) |
+
+If both files of a pair exist the "with reference" one is used; a warning appears when it is older than the plain one (it may be from an
+earlier run). Of the analysis files the newest `<name>*.xlsx` is used, so a numbered copy written while the original was open in Excel
+counts. Only the archiving objects file is required; anything else that is missing is left out and the panel says so.
+
+**Overview** (`Final report - Overview.xlsx`), sheet *Overview*. One row per table, in the order of the *Grouped by Object* sheet (largest
+cumulative size first): Archiving Object, Archiving Object Description, Header Table, Tables, Archiving Conditions (numbered, one per
+line), Volume (GB), Volume (MB), Cumulative Size (GB), Cumulative Size (MB). What is common to an object, which is its name,
+description, header table, conditions and cumulative sizes, is merged into one cell across its tables, and a heavier line separates objects.
+Merged cells do not auto-size, so each group's row height is set from its longest wrapped text.
+
+The second sheet, *Housekeeping Programs*, holds the groups of the *Grouped by Object* sheet that have a housekeeping program instead of an
+archiving object: Housekeeping Program, Tables, Volume (GB), Volume (MB), Cumulative Size (GB), Cumulative Size (MB), with the program and the
+cumulative sizes merged across its tables, in the same style and order. (A program that merely appears on an archiving object's rows is not
+listed: a table has either an archiving object or a housekeeping program.) The sheet is always present; with no such groups it only has its header.
+
+**Object details** (`Final report - Object details.xlsx`, one sheet per archiving object). Each sheet has the object, its description and
+header table at the top and, side by side below, the object's *Table analysis* (green banner, the fields analysed, the grid with its Total
+row highlighted) and its *Open item analysis* (counts as real numbers). When the object has no open item analysis there is no mention of
+it. An object that has neither analysis gets no sheet, and the panel's warning says how many were left out (the analyses normally cover
+only the top N objects). Several objects sharing one header table each get that table's analysis. The older single-sheet Open item
+analysis file is still understood.
+
+API: `GET /api/final-report/sources` (the files that would be used and their status) and `POST /api/final-report/generate` (builds and saves both
+files; returns `{files: [{name, path}], objects: [...], warnings: [...]}`; HTTP 400 if the archiving objects file is missing).
+
 ## Session persistence
 
 The tool keeps the SAP session alive in the backend process — closing or refreshing the browser tab does **not** disconnect from SAP. On page load the frontend calls `GET /api/sap/info`; if the backend is still connected it restores the connected state (system name, username) without requiring the user to re-enter credentials or re-authenticate.
@@ -1078,6 +1123,8 @@ Key endpoints:
 | GET | `/api/open-item-analysis/result?object=` | One object's result (columns and the first 500 rows) for the preview |
 | POST | `/api/open-item-analysis/query` | Run the user's own or edited query for an object: body `{object, query}` (read-only SELECT only; HTTP 400 otherwise); it replaces that object's result |
 | POST | `/api/open-item-analysis/cancel` | Stop after the query now running |
+| GET | `/api/final-report/sources` | The result files the final report would be built from, with each one's status (found / fallback / missing) |
+| POST | `/api/final-report/generate` | Build `Final report - Overview.xlsx` and `Final report - Object details.xlsx` from the saved results and save them in `results/Final report generation/`; returns the two full paths, one summary row per archiving object and warnings |
 | POST | `/api/object-analysis/cancel` | Stop after the current object; finished objects stay in the workbook |
 | POST | `/api/table-analysis/start` | Start the Table Analysis for the header tables in an uploaded `file` or in `filename` (a file in `results/Find Header Tables for Archiving Objects/`); form field `group_by_year` (default true) applies to tables taken from the Fields for Table Analysis sheet; returns the tables found and runs in the background |
 | GET | `/api/table-analysis/progress` | Status, current table/step, the open question (if any), the per-table records and the output path |

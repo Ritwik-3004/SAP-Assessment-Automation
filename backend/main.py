@@ -35,6 +35,7 @@ import credentials_store
 import table_analysis
 import object_analysis
 import open_item_analysis
+import final_report
 import transactions.taana as taana
 import transactions.db15 as db15
 import transactions.db02 as db02
@@ -1061,6 +1062,27 @@ def open_item_analysis_cancel():
     """Stop after the query now running; finished objects stay in the workbook."""
     open_item_analysis.job.cancel()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Final report generation (the results of the other tasks combined into two workbooks)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/final-report/sources")
+def final_report_sources():
+    """Which result files the final report would be built from (and which are missing)."""
+    return {"sources": final_report.describe_sources()}
+
+
+@app.post("/api/final-report/generate")
+def final_report_generate():
+    """Build both final-report workbooks from the saved results and save them in results/Final report generation/."""
+    try:
+        return final_report.generate(_save_result)
+    except final_report.ReportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 class ObjectReferenceApply(BaseModel):

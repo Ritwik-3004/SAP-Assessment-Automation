@@ -193,7 +193,38 @@ export interface ConnectionState {
 }
 
 /** The sidebar tasks; each saves into its own folder under "results". */
-export type TaskId = "TOP_TABLES" | "BATCH" | "HEADER_TABLES" | "TABLE_ANALYSIS" | "OBJECT_ANALYSIS" | "OPEN_ITEM_ANALYSIS";
+export type TaskId =
+  | "TOP_TABLES"
+  | "BATCH"
+  | "HEADER_TABLES"
+  | "TABLE_ANALYSIS"
+  | "OBJECT_ANALYSIS"
+  | "OPEN_ITEM_ANALYSIS"
+  | "FINAL_REPORT";
+
+export interface FinalReportSource {
+  label: string;
+  file: string;
+  folder: string;
+  status: "found" | "fallback" | "missing";
+  note: string;
+}
+
+export interface FinalReportResult {
+  files: { name: string; path: string }[];
+  objects: {
+    object: string;
+    description: string;
+    header_table: string;
+    tables: number;
+    conditions: number;
+    table_analysis: boolean;
+    open_items: boolean;
+  }[];
+  warnings: string[];
+  /** the Housekeeping Programs sheet of the overview */
+  housekeeping: { programs: number; tables: number };
+}
 
 export type TransactionId = "TAANA" | "DB15" | "SE16N" | "SE11" | "AOBJ" | "SARA";
 
