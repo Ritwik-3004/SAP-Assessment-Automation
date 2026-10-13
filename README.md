@@ -28,7 +28,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Area | Status |
 |---|---|
 | Generate Table List (DB02), Find Archiving Objects (DB15), table sizes | Working |
-| Find archiving objects → score & recommend in one click (AI-scored, grounded in the DVM Guide) | Working as separate steps; the one-click combination is a UI change checked by building the frontend only — not yet run end to end |
+| Find archiving objects → score & recommend in one click (AI-scored, grounded in the DVM Guide) | Run end to end in the app: the one-click run is how the saved results that the later tasks were run on were produced |
 | Housekeeping program lookup — DVM Guide stage | Working |
 | Housekeeping program lookup — SAP for Me stage | Working in `debug_sap_for_me.py` (COSP → `RK_PLAN_DEL_ZERO_RECORDS`); **not yet verified through a full scoring run in the app**. Needs Chrome for Testing + IT approval. |
 | SAP Community fallback (when SAP for Me has no usable Note/KBA) | Implemented for both the housekeeping and header-table lookups and checked offline with a stubbed browser. **Confirmed live (COSP, via `debug_sap_for_me.py`):** the Community search returns posts, they are recognised by their address shape (`/t5/…/(ba\|qaq\|td\|m)-p/<id>`) and a post's text reads cleanly. **Not yet seen live:** the fallback actually being used in a lookup (COSP has Notes, so it was never needed) and how good Community evidence is — for COSP the posts returned were mostly unrelated, which is why the model must see a program clearly named for the table before using one. Run `backend/.venv/Scripts/python.exe backend/debug_sap_for_me.py TABLE_NAME` to see what it finds (see [below](#housekeepingcleanup-program-lookup-for-tables-with-no-archiving-object)) |
@@ -38,8 +38,8 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
 | Archiving Object Analysis (conditions from SARA's information page, DVM Guide and SAP for Me; objects to archive first from SARA's network) | **Run end to end against a live system** on FI_DOCUMNT and SD_VBAK (all three sources, dependencies, workbook); the two-step split (step 1, then SAP for Me in the background) was tested offline with fakes and live on SD_VBAK. The reference-document check was tested offline with real PowerPoint/Excel/Word files and canned model answers, and live with a generated deck. The tab handling, failure cases and ordering were also tested offline with fakes. Not yet run on the full list of recommended objects (about 5 minutes per object with all sources) or on a machine whose default browser is not Edge/Chrome — see [Archiving Object Analysis](#archiving-object-analysis) |
-| Open Item Analysis (the sheet's open-item query per archiving object, run in DB02's SQL Editor, results to Excel — objects read from the Grouped by Object sheet, one workbook sheet per object) | **Run live on the OTE sandbox (client 100)** with the real DB02 SQL Editor: the query runner (SQL errors caught, zero rows, 2,500-row results, recovery after errors), and the whole job on IDOC, BC_SBAL, WORKITEM and an object without a query (workbook and Summary checked). Editing a query while another runs, cancel and the endpoints were tested offline with a fake DB02. **Not yet run:** the long queries (FI_DOCUMNT, SD_VBAK, MM_EKKO … on big tables), and the sheet's BC_SBAL and WORKITEM queries fail until their client column is corrected — see [Open Item Analysis](#open-item-analysis) |
-| Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on tiny tables (SWWWIHEAD and BKPF, including two tables in parallel and a month field): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the download were tested offline with a fake SAP, as were the Fields for Table Analysis sheet (listed table skips the questions, unlisted or unusable table is asked, sheet missing) and the re-run with additional fields (replaces the result; cancelled or failed re-run keeps the old one). The sheet-driven run and the re-run have **not yet been run against a live system**. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis) |
+| Open Item Analysis (the sheet's open-item query per archiving object, run in DB02's SQL Editor, results to Excel — objects read from the Grouped by Object sheet, one workbook sheet per object) | **Run live on the OTE sandbox (client 100)** with the real DB02 SQL Editor: the query runner (SQL errors caught, zero rows, 2,500-row results, recovery after errors), and the whole job on IDOC, BC_SBAL, WORKITEM and an object without a query (workbook and Summary checked). Editing a query while another runs, cancel and the endpoints were tested offline with a fake DB02. **Not yet run:** the long queries (FI_DOCUMNT, SD_VBAK, MM_EKKO … on big tables). The sheet's WORKITEM query still fails until its client column is corrected (BC_SBAL's already was, and ran in the app) — see [Open Item Analysis](#open-item-analysis) |
+| Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on tiny tables (SWWWIHEAD and BKPF, including two tables in parallel and a month field): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the saving were tested offline with a fake SAP, as were the Fields for Table Analysis sheet (listed table skips the questions, unlisted or unusable table is asked, sheet missing) and the re-run with additional fields (replaces the result; cancelled or failed re-run keeps the old one). The sheet-driven run and the re-run have **not yet been run against a live system**. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis) |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
 | SAP Assistant (always-visible chat column: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
 | Several saved SAP / SAP for Me logins with a dropdown | Working; storage and endpoints tested offline with temporary files — see [Saved connection details](#saved-connection-details) |
@@ -140,12 +140,14 @@ machines with no internet access.
 
 Each of the following has its own `backend/transactions/*.py` module and single-item
 FastAPI endpoint (see [API Reference](#api-reference)), usable directly (e.g. via
-`/docs` or curl) for development/debugging. Only the task-oriented tools below (Find
-Archiving Objects for Tables, Generate Table List, Score & Recommend Objects, Find
-Header Tables for Archiving Objects) are exposed in the UI — **SE16N is the one
-exception with a real, task-specific automation** (looking up a header table via
-`ARCH_DEF`, see [Find Header Tables for Archiving Objects](#find-header-tables-for-archiving-objects)); its generic table-browsing `run()` function, like the other
-transactions below, has no dedicated panel.
+`/docs` or curl) for development/debugging. The UI only offers the task-oriented tools
+(Generate Table List, Find Archiving Objects for Tables, Find Header Tables for Archiving
+Objects, Table Analysis, Archiving Object Analysis, Open Item Analysis and Final report
+generation), each of which (except the last, which only reads the others' results) drives one or
+more of the transactions below with its own automation — for example SE16N looks up a header table via `ARCH_DEF` (see
+[Find Header Tables for Archiving Objects](#find-header-tables-for-archiving-objects)). The generic
+single-item `run()` functions (browse a table, show a definition, list objects, …) have no
+dedicated panel; the chat assistant uses them.
 
 | Transaction | Purpose |
 |---|---|
@@ -155,7 +157,7 @@ transactions below, has no dedicated panel.
 | **SE16N** | Browse table contents with optional WHERE filter; also used for a specific ARCH_DEF header-table lookup (see below) |
 | **SE11** | ABAP Dictionary — view table field definitions and data types |
 | **AOBJ** | List all archiving objects with customizing settings |
-| **SARA** | Archive Administration — view sessions and statistics for an archiving object |
+| **SARA** | Archive Administration — view sessions and statistics for an archiving object; the Archiving Object Analysis task also uses its information button |
 
 ## Results folder
 
@@ -241,8 +243,7 @@ automates that judgment call:
 Requires `ANTHROPIC_API_KEY` in `backend/.env` (see [Configuration](#configuration)).
 Backend implementation: `scoring.py` (new top-level module, not under `transactions/`
 since it's a post-processing/LLM step, not a SAP transaction), plus
-`/api/transactions/db15/score` and `/api/transactions/db15/score-export` in
-`backend/main.py`.
+`/api/transactions/db15/score` in `backend/main.py`, which also saves the scored workbook when the run finishes.
 
 #### Grounded in SAP's official DVM Guide
 
@@ -349,15 +350,15 @@ browser couldn't start).
 #### Grouped by Object
 
 Open the "Grouped by Object" sheet in the scored workbook (the app no longer has a button
-for it; Find Header Tables reads this sheet) to see which tables share the same archiving object or housekeeping program,
+for it; Find Header Tables, Open Item Analysis and Final report generation read this sheet) to see which tables share the same archiving object or housekeeping program,
 and how much data that represents together — useful for prioritizing which
 object/program to tackle first. `backend/grouping.py`'s `build_object_groups()`:
 
 - Groups tables by Archiving Object (if set), else Housekeeping Program (if set), else
   a "nothing found" bucket.
 - Computes a `Cumulative Size (GB)`/`Cumulative Size (MB)`/`Table Count` per group,
-  repeated on every member row (so the sheet stays directly sortable/filterable in
-  Excel with no merged-cell ambiguity when read back programmatically).
+  repeated on every member row in the data (so the rows stay directly sortable and can be
+  read back programmatically); the Excel export then merges them visually, see below.
 - Sorts groups by `(cumulative GB, cumulative MB)` descending — MB breaks ties, since GB
   alone is rounded to 2 decimals and different groups can tie on it. The "nothing
   found" bucket is always last, regardless of its own total.
@@ -419,7 +420,7 @@ Flow:
    "All Scored Objects", "Recommended (with Ref Doc)" — which includes Comments — and
    **"Grouped by Object"**, built from the final list after your overrides, with the same
    columns, order and merged group cells as in `archiving_objects_scored.xlsx`). Grouped by
-   Object is the last sheet on purpose: Find Header Tables reads an output file's last sheet,
+   Object is the last sheet on purpose: Find Header Tables reads a results file's last sheet,
    so this file can be used as its input too, and then reflects the SME corrections.
    The panel shows the full path. **Back to comparison** returns to the previous step.
 
@@ -443,8 +444,8 @@ object appears. After an override, the new object's description is found through
    wording). If no model is available the value is `(description not found)`.
 
 The lookup runs once, during **Upload Reference Document** (it may call SAP and the model, so
-that step takes a few seconds longer when objects are unknown). Saving and downloading only use
-layers 1 and 2 to fill any remaining gap, so they never call SAP or the model. In the Grouped by
+that step takes a few seconds longer when objects are unknown). Saving (which happens automatically when the preview
+opens) only uses layers 1 and 2 to fill any remaining gap, so it never calls SAP or the model. In the Grouped by
 Object sheet a group shows the real description in preference to an AI-suggested one.
 
 Requires `ANTHROPIC_API_KEY`. PowerPoint support needs `python-pptx` (now in
@@ -571,7 +572,7 @@ How it works (`backend/chat.py`, endpoint `POST /api/chat`):
    and SAP's own documents from the model's recollection. This is a rule in the system prompt in
    `backend/chat.py`.
 
-The six SAP transaction tools use the shared SAP GUI session, so SAP must be connected for them; without it the
+The eight SAP tools (DB15, AOBJ, SE16N, SE11, TAANA, SARA and two for DB02) use the shared SAP GUI session, so SAP must be connected for them; without it the
 assistant says live checks are unavailable and still uses the DVM Guide, SAP for Me and its general knowledge.
 Other transactions (DB02, SE38/SA38, SM36/SM37, SARI, …) it can explain but not run. It cannot run arbitrary
 transactions or read everything in the system, only what these tools expose.
@@ -590,7 +591,8 @@ and `aobj.py` clears popups right after opening AOBJ and again after executing.
   Archiving Object, Object Description, Score and Rationale — they lack Volume (GB),
   Volume (MB) and Housekeeping Program, so exports and the Grouped sheet can show blanks
   for them.
-- Edits live only in the browser's state until the results are saved or downloaded.
+- A chat edit is saved to `archiving_objects_scored.xlsx` straight away, but it does not reach
+  `archiving_objects_with_reference.xlsx` or the later tasks' results; run those steps again to pick it up.
 - There is no guard against asking a live-SAP question while a DB15 batch is running;
   both drive the same SAP GUI session.
 - SE16N and TAANA results (real table rows from the client system) are sent to the
@@ -632,6 +634,10 @@ for tables with no archiving object. If any table needs the SAP for Me stage, th
 stays full while its message cycles through "Searching SAP for Me for TABLE (i of n)…"
 (`housekeeping.find_housekeeping_programs(on_progress=…)`), since each table involves
 real browser navigation and can take a while.
+
+Table Analysis, Archiving Object Analysis and Open Item Analysis use the same start-then-poll idea with their own
+job state (`/api/table-analysis/progress`, `/api/object-analysis/progress`, `/api/open-item-analysis/progress`), polled by
+their panels every second or two; Final report generation is a single quick request.
 
 `POST /api/transactions/db02/top-tables` is unchanged (still a single blocking
 request) — a single SQL query execution has no sub-step to poll, so its panel shows
@@ -855,7 +861,8 @@ failure or cancel; if it is open in Excel, a numbered copy is written instead.
 ## Open Item Analysis
 
 The **Open Item Analysis** task (`frontend/src/components/OpenItemAnalysisPanel.tsx`, `backend/open_item_analysis.py`) runs an open-item query for each
-recommended archiving object in DB02's SQL Editor and collects the results in one Excel file.
+archiving object of the *Grouped by Object* sheet in DB02's SQL Editor and collects the results in one Excel file
+(a Summary sheet and one sheet per object).
 
 **Input.** By default the archiving objects on the **"Grouped by Object" sheet** saved by **Find Archiving Objects for Tables** (the panel lists `results/Find Archiving Objects for Tables/` and preselects `archiving_objects_with_reference.xlsx`,
 else `archiving_objects_scored.xlsx`); **Upload a different file** to use another. Each object is taken once, in the sheet's order (largest cumulative size first); housekeeping-program-only groups have no object and are skipped. A file without a "Grouped by Object" sheet falls back to its "Recommended" sheet (`parse_objects(contents, prefer="grouped")` in `object_analysis.py`; Archiving Object Analysis keeps reading the "Recommended" sheet).
@@ -889,7 +896,7 @@ The same works after the run has finished.
 - A query can run for minutes on large tables (waits up to 30 minutes each) and SAP is busy meanwhile, so the SAP Assistant's live-SAP tools wait too. A ⏳ indicator stays in the header if you switch tasks.
 - **SQL errors.** SAP does not show HANA's error message in the SQL Editor: a failing statement leaves a success-style status bar message "Exception CX_DBA_ADBC in class CL_HDB_SQL_EXECUTOR" and an empty result grid with no columns (a valid query with zero rows still has its columns). The runner recognises both and reports "SAP could not run the query - usually a SQL error such as an unknown table or column…" instead of an empty result.
 - **Row limit.** The SQL Editor cuts a result off at its *Max. No. of Rows* field (1,000 by default). The runner raises it to 10,000 and notes when a result reaches that.
-- **Sheet queries that fail.** The sheet's BC_SBAL query filters on `MANDT`, but BALHDR's client column is `MANDANT`; WORKITEM's SWWWIHEAD uses `CLIENT`. On this system both fail until the sheet is corrected (`L.MANDANT = '300'` / `W.CLIENT = '300'`; checked live — 8 and 35 result rows with client 100). The client substitution handles those column names too. An edit in the query box also fixes a single run.
+- **Sheet queries that fail.** WORKITEM's query filters SWWWIHEAD on `MANDT`, but that table's client column is `CLIENT`, so it fails on this system until the sheet says `W.CLIENT = '300'` (checked live — 35 result rows with client 100). BC_SBAL's query used to have the same problem with BALHDR (`MANDANT`); the sheet now has `L.MANDANT = '300'` and it runs. The client substitution handles those column names too. An edit in the query box also fixes a single run.
 
 ## Table Analysis
 
@@ -1067,12 +1074,16 @@ SAP_SCREEN_WAIT=1.5
 API_HOST=127.0.0.1
 API_PORT=8000
 
-# Required only for "Score & Recommend Objects" (backend/scoring.py)
+# Needed for every AI step while Claude is the selected model (backend/llm.py)
 ANTHROPIC_API_KEY=sk-ant-...
 SCORING_MODEL=claude-haiku-4-5
 
 # Only needed if you select Groq in the app's AI Model panel
 # GROQ_API_KEY=gsk_...
+
+# Only if Ollama is not on its default address (must be this computer); seconds to wait for one answer
+# OLLAMA_URL=http://127.0.0.1:11434
+# OLLAMA_TIMEOUT=900
 
 # SAP for Me scraper (backend/sap_for_me.py): Chrome for Testing + matching
 # chromedriver (see the housekeeping section for setup); headless by default,
@@ -1109,7 +1120,7 @@ Key endpoints:
 | GET | `/api/llm/usage` | Today's request/token count for the active model |
 | POST | `/api/llm/test` | One tiny call to check the saved key and model work |
 | POST | `/api/chat` | One chat turn over scored results (body: `{message, scored_rows, recommended, history}`); returns `{reply, updated_rows, updated_recommended}` — the last two are `null` unless Claude changed a result |
-| GET | `/api/results/{task}/files` | List the `.xlsx`/`.xls` files in a task's `results/` sub-folder (newest first) and return the folder's full path; `{task}` is `TOP_TABLES`, `BATCH`, `HEADER_TABLES`, `TABLE_ANALYSIS`, `OBJECT_ANALYSIS` or `OPEN_ITEM_ANALYSIS` |
+| GET | `/api/results/{task}/files` | List the `.xlsx`/`.xls` files in a task's `results/` sub-folder (newest first) and return the folder's full path; `{task}` is `TOP_TABLES`, `BATCH`, `HEADER_TABLES`, `TABLE_ANALYSIS`, `OBJECT_ANALYSIS`, `OPEN_ITEM_ANALYSIS` or `FINAL_REPORT` |
 | POST | `/api/results/archiving-objects/save` | Re-save the scored rows + recommended list + grouped list (body: `{rows, recommended}`) to `results/Find Archiving Objects for Tables/archiving_objects_scored.xlsx` — used after the chat assistant changed them; the first save happens automatically when scoring finishes |
 | POST | `/api/object-analysis/start` | Start step 1 of the Archiving Object Analysis (information page, DVM Guide, dependencies) for the objects in an uploaded `file` or in `filename` (a file in `results/Find Archiving Objects for Tables/`); runs in the background |
 | GET | `/api/object-analysis/progress` | Step 1 status, current object/step, per-object records (conditions per source, objects to archive first, notes), output path, and the `sap_for_me` step's status/progress |
@@ -1132,6 +1143,7 @@ Key endpoints:
 | POST | `/api/table-analysis/answer` | Answer the open question: body `{prompt_id, answer}` — `{selected, group_by_year}` (date fields), `{add}` (other fields?), `{selected}` (other fields) |
 | POST | `/api/table-analysis/redo` | After the run is done, re-run one table with additional fields: body `{table}`; the question comes back through `/progress` as a `redo_fields` prompt answered with `{selected, group_by_year}` (HTTP 409 if the run isn't done or the table has no finished analysis) |
 | POST | `/api/table-analysis/skip` | Skip the table being worked on |
+| POST | `/api/table-analysis/stop-waiting` | Stop waiting for one table whose SAP job is running: body `{table}` (the job keeps running in SAP; HTTP 409 if that table is not waiting) |
 | POST | `/api/table-analysis/cancel` | Stop after the current step; finished tables stay in the workbook |
 | POST | `/api/reference-doc/analyze` | Multipart upload: `files` (one or more Excel/PDF/PowerPoint) + `recommended` (JSON string of the recommended rows); returns matches, mismatches, not-in-reference rows and the annotated recommended list |
 | POST | `/api/reference-doc/save` | Save the reference-annotated results (body: `{rows, recommended}`) to `results/Find Archiving Objects for Tables/archiving_objects_with_reference.xlsx`; returns the full path |
