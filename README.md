@@ -495,7 +495,9 @@ follow it. The header shows the active model (e.g. "AI: Groq · GPT-OSS 120B").
 
 - **Claude** (default) — `claude-haiku-4-5` (`SCORING_MODEL`), billed to your Anthropic
   account; needs `ANTHROPIC_API_KEY` in `backend/.env`. Behaves exactly as before.
-- **Groq (free tier)** — pick **GPT-OSS 120B** or **Qwen 3.8 27B**. The Groq API key is
+- **Groq (free tier)** — pick **GPT-OSS 120B**, **GPT-OSS 20B** or **Qwen 3.8 27B**. Each model has its own daily allowance, so when one is used up
+  you can carry on with another. (GPT-OSS 20B is the smaller, faster sibling of the 120B: same free-tier limits, checked live with a structured answer;
+  its scoring quality has not yet been compared with the other two.) The Groq API key is
   **not** entered in the app: put `GROQ_API_KEY=gsk_...` in `backend/.env` and restart the
   backend (the panel warns if it is missing). **Save** applies your choice (stored in
   `llm_settings.json`, git-ignored, which holds no keys); **Test** makes one tiny call to

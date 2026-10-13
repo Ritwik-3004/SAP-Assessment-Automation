@@ -59,6 +59,7 @@ PROVIDERS = (CLAUDE, GROQ, OLLAMA)
 # (model id, label). Kept in one place so adding/removing a model is a one-line change.
 GROQ_MODELS = (
     ("openai/gpt-oss-120b", "GPT-OSS 120B"),
+    ("openai/gpt-oss-20b", "GPT-OSS 20B"),
     ("qwen/qwen3.8-27b", "Qwen 3.8 27B"),
 )
 GROQ_MODEL_IDS = tuple(m[0] for m in GROQ_MODELS)
