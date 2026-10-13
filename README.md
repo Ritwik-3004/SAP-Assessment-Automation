@@ -45,6 +45,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Several saved SAP / SAP for Me logins with a dropdown | Working; storage and endpoints tested offline with temporary files — see [Saved connection details](#saved-connection-details) |
 | AI model switch (Claude, Groq free tier, or Ollama on this computer) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared**. Ollama: tested live with a tiny 270M model and offline with a fake server; **not yet tried with a real 7–8B model** — see [AI model selection](#ai-model-selection-claude-groq-or-ollama) |
 | Leaving a task and coming back (every task keeps its state in the backend; runs and reviews continue while another task is open) | Tested in a browser with a faked SAP, AI model and results folder: leaving mid-run and returning, finished results, reference-review step and ticks, page refresh. **Not yet checked** against live SAP or a real AI model, or with very long runs |
+| Scoring on free-tier models: parts and playoff for big candidate lists, output-limit pacing, unscored tables and retry | Written after live tests showed Qwen's 1,000 output tokens/min limit and 374-candidate tables (CDHDR, CDPOS) failing. Tested offline with fake models and a fake Groq client (chunk sizes, playoff, cut-off splitting, limit stops, retry merge, limiter) and in a browser with fakes. **Checked live on Qwen 3.8 27B (2026-10-13):** CDHDR (374 candidates) and BALDAT (34) scored completely with no refusal, and Groq accepted the "reasoning off" setting. **Not yet run live:** a full batch including CDPOS, a daily-limit stop, and Retry the unscored tables against Groq — see [Big tables and limits](#big-tables-and-limits) |
 | Reference document analysis (Excel / PDF / PowerPoint, one or several files) | Implemented; the multi-document merge was tested offline with canned model answers, not yet run end to end against real documents — see [Reference document analysis](#reference-document-analysis) |
 
 ## Prerequisites
@@ -238,13 +239,15 @@ the right one has always required manual judgment (experience, search, or asking
 LLM by hand). Right after the lookup, in the same run as the lookup above (no second button), the tool
 automates that judgment call:
 
-1. The backend groups the results by table and sends each table's full candidate list
-   to Claude (`claude-haiku-4-5`) in one request, asking for a 0–100 relevance score
-   and a short rationale for every candidate. Tables with only one candidate skip the
-   API call entirely (score is trivially 100). This runs concurrently (~8 tables at a
-   time) since a large batch (e.g. 300 tables from the DB02 tool) can mean hundreds of
-   calls — a progress bar tracks tables resolved, not individual API calls, so it still
-   advances one table at a time even though several are scored in parallel underneath.
+1. The backend groups the results by table and sends each table's candidate list to the selected AI model
+   (Claude `claude-haiku-4-5` by default) asking for a 0–100 relevance score per candidate; the model also names
+   its best pick and gives **one short rationale for that pick only** (nothing in the app shows a rationale for the other candidates, and output tokens
+   are what free-tier models are short of). Tables with only one candidate skip the model entirely (score is
+   trivially 100). A table with more candidates than one answer can carry is scored in parts (see
+   [Big tables and limits](#big-tables-and-limits)). Claude scores about 8 tables at a time (Groq 2, Ollama 1) since a large batch
+   (e.g. 300 tables from the DB02 tool) can mean hundreds of calls — a progress bar tracks tables resolved, not
+   individual calls, so it advances one table at a time even though several are scored in parallel underneath;
+   the message under it names the step of a big table ("CDHDR: scoring part 3 of 10").
 2. The results render as two tabs with ← → pagination: **All objects identified** (every table/object pair with its score) and **Recommended objects** (the highest-scoring object per table, one row per table). The recommended list is also rolled up by shared archiving object/housekeeping program on the workbook's "Grouped by Object" sheet (see below). The results are saved automatically as `results/Find Archiving Objects for Tables/archiving_objects_scored.xlsx`, a 3-sheet workbook: "All Scored Objects" (every table/object pair with its Score), "Recommended" (the top pick per table, plus the Rationale), and "Grouped by Object".
 3. Scores and rationale are the model's best-effort judgment. For a table covered by
    the DVM Guide (see below), the rationale explicitly says so when it draws on it
@@ -279,18 +282,29 @@ knowledge for anything the guide doesn't mention.
 If you replace `DVM_Guide.pdf` with a different or updated version, just delete
 `dvm_guide_index.json` (or touch the PDF) — the index rebuilds on the next scoring run.
 
-**Token-budget gotcha (found while testing against a real table with ~20+
-candidates):** each table's candidates are scored in a single structured-output
-response, so the response's required length grows with the candidate count. An
-initial flat `max_tokens` (later a per-candidate estimate capped too low) silently
-truncated the JSON for large tables, which failed to parse and — because of a second
-bug in the recommended-list aggregation — caused the whole table to disappear from the
-Recommended sheet with no visible error. Both are fixed: `max_tokens` scales with
-candidate count up to 16,000 (Haiku 4.5's ceiling is 64,000; 16,000 is the point past
-which non-streaming responses risk HTTP timeouts, and comfortably covers even a
-~60-candidate table), the rationale prompt asks for one short sentence per candidate to
-keep actual usage well under that, and a table that still fails to score now shows up
-in both sheets with an explicit "Scoring failed: ..." message instead of vanishing.
+#### Big tables and limits
+
+DB15 can return hundreds of candidate objects for a table (CDHDR and CDPOS had 374 each on the test system, because almost every archiving object
+uses change documents). One answer for that many candidates would need ~15,000 output tokens, which no free-tier model can give and which is
+beyond even Claude's 16,000 cap. So (`backend/scoring.py`):
+
+- **Parts, then a playoff.** A table above the model's part size (`score_chunk` in `llm.budget()`: 120 for Claude, 40 for Groq and Ollama) is scored
+  part by part, scores only. Then the best 8 candidates (and up to 4 the DVM Guide excerpt names) are scored **together** with the rationale, because scores
+  from different parts are not comparable. Nothing outside the playoff keeps a score above a finalist, so "highest score" still means "best".
+- **Complete or asked again.** A part whose answer comes back cut off or malformed is split in two and asked again; candidates the model left out
+  are asked for once more; whatever is still missing stays unscored instead of being guessed. A request never asks for more output than the model can give
+  (`llm.max_output_tokens`).
+- **Groq's output limit.** Some free-tier models also cap *output* tokens per minute, which is not in Groq's general limits table: Qwen 3.8 27B
+  answered `Request too large ... on output tokens per minute (OTPM): Limit 1000`. `llm.GROQ_MODEL_LIMITS` knows that one, and a model that is not listed
+  teaches itself from the text of its first refusal (`_learned_otpm`). The rate window (`llm._RateWindow`) now paces output tokens too (by what the model actually produced — checked live: Groq does not charge the unused part of
+  `max_completion_tokens`), requests are capped at the limit, a "request too large" refusal is never re-sent unchanged, and the error shown to the user quotes Groq's own words. Reasoning is switched off for Qwen
+  (thinking tokens would use up the small allowance); if Groq refuses that parameter the app goes on without it.
+- **Nothing is lost or guessed.** When a rate or daily limit stops the run, the tables that are finished keep their scores and the rest are listed under
+  `unscored` with the reason; the results screen says so and offers **Retry the unscored tables**, which re-scores only those and merges them into the
+  earlier result (`scoring.merge_results`, `_run_scoring` in `main.py`; a retry that is refused again keeps the earlier result). A table where no candidate
+  could be scored has **no recommended object** (Object Description "(not scored)", the reason as Rationale) instead of the first candidate by accident, so it
+  does not feed Open Item Analysis or the final report until it is scored. Only a rejected key, or a limit reached before a single table was scored, ends the
+  whole run with an error.
 
 #### Housekeeping/cleanup program lookup for tables with no archiving object
 
@@ -514,16 +528,19 @@ start, so switching mid-run can't mix two models in one result set. Endpoints:
 
 **What to expect on the Groq free tier** (limits per model, from Groq's docs: 30 requests/min,
 **8,000 tokens/min**, 1,000 requests/day, **200,000 tokens/day**):
-- The per-minute token cap is the real limit. Groq mode paces itself, waits out per-minute
+- The per-minute token cap is a real limit. Groq mode paces itself, waits out per-minute
   limits automatically (the progress bar says "Waiting for the Groq rate limit…"), runs 2
   requests at a time instead of 8, and uses smaller prompts (shorter DVM Guide excerpts, SAP
   for Me articles and reference-document text; fewer tables and history in chat).
-- Scoring runs at roughly 2–3 tables per minute, and the daily token cap allows very roughly
-  60–90 scored tables per day. A large batch will not finish in one day. Chat is usable only
-  lightly (about one tool round per minute).
-- When a **daily** limit is reached, the run **stops with a clear message** — it never
-  silently switches to Claude. Switch the model in the panel to continue. The panel shows
-  today's requests and tokens used (counted locally in `llm_usage.json`).
+- **Qwen 3.8 27B also allows only 1,000 output tokens per minute** (found when scoring failed with "kept rate-limiting" — the app did not know about this
+  limit). Scoring is shaped around it ([Big tables and limits](#big-tables-and-limits)): small answers, rationale for the top pick only, and pacing of output.
+  **Measured live (2026-10-13):** a table with 374 candidates (CDHDR) was scored completely in about 10 minutes and ~32,000 tokens (10 parts, then a playoff of the best 8),
+  and a table with 34 candidates in a single call. A batch with two such tables (CDHDR and CDPOS) plus a score of smaller ones therefore takes roughly 30–45 minutes and
+  about half of the 200,000 daily tokens (an estimate from those measurements, not a measured full run); on Claude it takes a minute or two.
+- The daily token cap therefore allows about 1–2 such batches per day. Chat is usable only lightly (about one tool round per minute).
+- When a **daily** limit is reached, the run **stops** — it never silently switches to Claude. Tables already scored are kept and the rest are listed as
+  unscored (**Retry the unscored tables** after the reset, or switch the model in the panel). If the limit is reached before any table is scored the run ends with a
+  clear message. The panel shows today's requests and tokens used (counted locally in `llm_usage.json`).
 - Answers can differ from Claude's: the prompts were written and tuned on Claude Haiku.
   Compare both models on the same ~10 tables before relying on Groq results.
 - **Data handling:** in Groq mode, table names and descriptions, DVM Guide excerpts, SAP for Me
@@ -694,8 +711,8 @@ reference-document reviews now work the same way:
   (`GET .../progress`): a run still going shows its live progress bar, a finished one shows its results and saved path, a failed one shows why.
 - **Find Archiving Objects is one run in the backend.** The lookup thread continues into the scoring by itself (`_run_db15_batch_job()` in `main.py`),
   and marks the scoring as started *before* it marks the lookup done, so a screen that sees the lookup finished never sees the previous run's scoring.
-  Leaving during the lookup therefore no longer stops the scoring from starting. **Retry scoring** (`POST /api/transactions/db15/score`) is only for a
-  failed scoring step.
+  Leaving during the lookup therefore no longer stops the scoring from starting. **Retry scoring** / **Retry the unscored tables** (`POST /api/transactions/db15/score`)
+  is only for a scoring step that failed or left tables unscored.
 - **Chat edits are remembered.** When the assistant changes the scored results they are saved to `archiving_objects_scored.xlsx` and also replace the
   remembered result, so a screen opened later shows the changed version.
 - **Reference-document reviews are jobs too** (`/api/reference-doc/analyze`, `/api/header-reference/analyze`: start, then `/progress`). What the user
@@ -1223,8 +1240,8 @@ Key endpoints:
 | GET | `/api/transactions/db15/batch/progress` | Poll for batch lookup progress; `result` is populated once `status` is `"done"` |
 | GET | `/api/transactions/db15/debug-screen` | Diagnostic: dump DB15 selection-screen elements |
 | GET | `/api/transactions/db15/debug-grid` | Diagnostic: filter DB15 by a table and report grid-read details |
-| POST | `/api/transactions/db15/score` | (Re)starts scoring every table/object row for archiving relevance in the background (including the housekeeping-program lookup for zero-candidate tables); returns `{status: "started", total}` immediately. A normal run needs no call to this: the lookup continues into the scoring by itself, and this is for **Retry scoring**. When done, the scored workbook is saved automatically and `result.saved_path` holds its full path (`result.save_error` if saving failed) |
-| GET | `/api/transactions/db15/score/progress` | Poll for scoring progress; `result` (rows + recommended) is populated once `status` is `"done"` |
+| POST | `/api/transactions/db15/score` | (Re)starts scoring every table/object row for archiving relevance in the background (including the housekeeping-program lookup for zero-candidate tables); returns `{status: "started", total}` immediately. A normal run needs no call to this: the lookup continues into the scoring by itself, and this is for **Retry scoring**. Body `{rows, only_unscored}`: with `only_unscored: true` just the tables the last run could not score are re-scored (from that run's own result, so `rows` may be empty) and merged into it (HTTP 400 if there are none). When done, the scored workbook is saved automatically and `result.saved_path` holds its full path (`result.save_error` if saving failed) |
+| GET | `/api/transactions/db15/score/progress` | Poll for scoring progress; `result` (rows, recommended, `unscored: [{table, reason}]`, `message`) is populated once `status` is `"done"` |
 | POST | `/api/transactions/db02/top-tables` | Start the "top tables by size" SQL query via DB02's SQL Editor in the background; returns `{status: "started"}` (HTTP 409 if one is running) |
 | GET | `/api/transactions/db02/top-tables/progress` | The query's state; `result` has Table Name, Description, Volume (GB), Volume (MB) and `saved_path` / `save_error` for `results/Generate Table List/list_of_tables.xlsx` once `status` is `"done"` |
 | GET | `/api/transactions/db02/debug-screen` | Diagnostic: dump DB02 screen elements under a given container |

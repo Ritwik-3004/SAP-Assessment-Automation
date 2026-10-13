@@ -140,8 +140,10 @@ export const api = {
     stop?: () => boolean
   ) => pollUntilDone(() => api.topTablesProgress(), onTick, 700, stop),
 
-  db15Score: (rows: Record<string, string>[]) =>
-    post<import("../types").JobStarted>("/api/transactions/db15/score", { rows }),
+  /** (Re)start the scoring. With onlyUnscored the backend re-scores just the tables the last run could not score
+   *  (taken from its own result) and merges them in. */
+  db15Score: (rows: Record<string, string>[], onlyUnscored = false) =>
+    post<import("../types").JobStarted>("/api/transactions/db15/score", { rows, only_unscored: onlyUnscored }),
 
   db15ScoreProgress: () =>
     get<import("../types").ProgressSnapshot<import("../types").ScoredResult>>(

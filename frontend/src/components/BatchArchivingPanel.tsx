@@ -158,11 +158,11 @@ export default function BatchArchivingPanel() {
   }
 
   /** "Retry scoring" after a failed scoring step: run it again without repeating the SAP lookup. */
-  async function runScoring(rows: Record<string, string>[]) {
+  async function runScoring(rows: Record<string, string>[], onlyUnscored = false) {
     setError("");
     setScoreProgress(null);
     try {
-      await api.db15Score(rows);
+      await api.db15Score(rows, onlyUnscored);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Scoring failed");
       return;
@@ -366,6 +366,28 @@ export default function BatchArchivingPanel() {
 
       {scored?.rows && scored.rows.length > 0 && (
         <>
+          {(scored.unscored?.length ?? 0) > 0 && (
+            <div className="scoring-notice">
+              <p>
+                <strong>
+                  {scored.unscored!.length} table{scored.unscored!.length !== 1 ? "s" : ""} could not be scored.
+                </strong>{" "}
+                {scored.message} Tables not scored: {scored.unscored!.map((u) => u.table).join(", ")}. They have no
+                recommended archiving object until they are scored.
+              </p>
+              <div className="action-row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => runScoring([], true)}
+                  disabled={scoring || loading}
+                >
+                  Retry the unscored tables
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="sheet-tabs" role="tablist">
             <button
               type="button"

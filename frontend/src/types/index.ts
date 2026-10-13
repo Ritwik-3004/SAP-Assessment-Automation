@@ -272,6 +272,8 @@ export interface ScoredResult {
   message?: string;
   rows?: Record<string, string>[];
   recommended?: Record<string, string>[];
+  /** Tables the run could not score (a limit stopped it); the others are scored and kept. */
+  unscored?: { table: string; reason: string }[];
   saved_path?: string;
   save_error?: string;
 }

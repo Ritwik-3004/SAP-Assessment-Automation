@@ -178,6 +178,8 @@ class SaraRequest(BaseModel):
 
 class Db15ScoreRequest(BaseModel):
     rows: list[dict[str, str]]
+    # Re-score only the tables the last run could not score (taken from that run's own result, so *rows* may be empty)
+    only_unscored: bool = False
 
 
 class Db15ScoreExportRequest(BaseModel):
@@ -688,33 +690,51 @@ def _distinct_table_count(rows: list[dict]) -> int:
     return len({row.get("Table Name", "") for row in rows})
 
 
-def _run_scoring(rows: list[dict]) -> None:
-    """The scoring step, run in the calling (background) thread; _scoring_progress was started by the caller."""
+def _run_scoring(rows: list[dict], previous: Optional[dict] = None) -> None:
+    """The scoring step, run in the calling (background) thread; _scoring_progress was started by the caller.
+    *previous* is the earlier result when only its unscored tables are being re-scored: the new scores are merged
+    into it, and if the re-run itself stops, the earlier result stays instead of being lost."""
     try:
         result = scoring.score_archiving_objects(rows, on_progress=_scoring_progress.update)
         if result["status"] == "error":
-            _scoring_progress.fail(result["message"])
-        else:
-            _autosave(result, "BATCH", "archiving_objects_scored.xlsx",
-                      lambda: _scored_workbook(result.get("rows", []), result.get("recommended", [])))
-            _scoring_progress.finish(result)
+            if previous is None:
+                _scoring_progress.fail(result["message"])
+                return
+            result = {**previous, "message": f"The retry stopped: {result['message']}"}
+        elif previous is not None:
+            result = scoring.merge_results(previous, result)
+        _autosave(result, "BATCH", "archiving_objects_scored.xlsx",
+                  lambda: _scored_workbook(result.get("rows", []), result.get("recommended", [])))
+        _scoring_progress.finish(result)
     except Exception as exc:
         logger.exception("Scoring job failed")
-        _scoring_progress.fail(str(exc))
+        if previous is not None:
+            _scoring_progress.finish({**previous, "message": f"The retry failed: {exc}"})
+        else:
+            _scoring_progress.fail(str(exc))
 
 
 @app.post("/api/transactions/db15/score")
 def score_db15_batch(req: Db15ScoreRequest):
-    """(Re)run the scoring for *rows* in the background (Retry scoring). A normal run needs no call to this: the
-    lookup job continues into the scoring by itself."""
+    """(Re)run the scoring in the background (Retry scoring). A normal run needs no call to this: the lookup job
+    continues into the scoring by itself. With *only_unscored* just the tables the last run could not score are
+    re-scored (their rows come from that run's result) and merged into it."""
     if _scoring_progress.is_running() or _db15_batch_progress.is_running():
         raise HTTPException(status_code=409, detail="A lookup or scoring run is already in progress.")
 
+    rows, previous = req.rows, None
+    if req.only_unscored:
+        previous = _scoring_progress.snapshot().get("result")
+        unscored = {u["table"] for u in (previous or {}).get("unscored", [])}
+        if not unscored:
+            raise HTTPException(status_code=400, detail="There are no unscored tables to retry.")
+        rows = [r for r in previous["rows"] if r.get("Table Name") in unscored]
+
     _reference_progress.reset()
     _clear_ui_state("ref-doc-tables")
-    total = _distinct_table_count(req.rows)
+    total = _distinct_table_count(rows)
     _scoring_progress.start(total)
-    threading.Thread(target=_run_scoring, args=(req.rows,), daemon=True).start()
+    threading.Thread(target=_run_scoring, args=(rows, previous), daemon=True).start()
     return {"status": "started", "total": total}
 
 
