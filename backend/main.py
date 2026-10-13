@@ -77,6 +77,42 @@ app.add_middleware(
 _db15_batch_progress = ProgressTracker()
 _scoring_progress = ProgressTracker()
 _header_table_progress = ProgressTracker()
+_top_tables_progress = ProgressTracker()          # Generate Table List
+# Reference-document reviews of Find Archiving Objects (tables) and Find Header Tables. The analysis runs as a
+# background job like the others; what the user then did on screen is kept in _ui_state (below).
+_reference_progress = ProgressTracker()
+_header_reference_progress = ProgressTracker()
+
+# Small bits of screen state that belong to a result (which step of a review the user is on, what they ticked), kept
+# here so a screen that is left and opened again picks up where it was. Lost when the backend restarts, like the
+# analysis tasks' jobs.
+UI_STATE_KEYS = {"ref-doc-tables", "ref-doc-headers"}
+_ui_state: dict[str, dict] = {}
+_ui_state_lock = threading.Lock()
+
+
+def _clear_ui_state(key: str) -> None:
+    with _ui_state_lock:
+        _ui_state.pop(key, None)
+
+
+def _guard_find_run() -> None:
+    """The archiving-object lookup and the scoring after it are one run: no new one while either is working."""
+    if _db15_batch_progress.is_running() or _scoring_progress.is_running():
+        raise HTTPException(status_code=409, detail="A lookup or scoring run is already in progress.")
+
+
+def _begin_find_run() -> None:
+    """A new lookup: the earlier scoring and the reference review of it no longer describe the results."""
+    _scoring_progress.reset()
+    _reference_progress.reset()
+    _clear_ui_state("ref-doc-tables")
+
+
+def _begin_header_run() -> None:
+    """A new header-table lookup: forget the earlier reference review."""
+    _header_reference_progress.reset()
+    _clear_ui_state("ref-doc-headers")
 
 # Column order for the "Grouped by Object" sheet/endpoint — mirrors the
 # "Recommended" row shape (grouping.build_object_groups() only adds fields,
@@ -473,7 +509,40 @@ def _scored_workbook(rows: list[dict], recommended: list[dict]) -> io.BytesIO:
 def save_scored_results(req: Db15ScoreExportRequest):
     """Re-save the scored archiving objects (after the assistant changed them) to
     Find Archiving Objects for Tables / archiving_objects_scored.xlsx."""
-    return _save_result_response("BATCH", "archiving_objects_scored.xlsx", _scored_workbook(req.rows, req.recommended))
+    response = _save_result_response("BATCH", "archiving_objects_scored.xlsx", _scored_workbook(req.rows, req.recommended))
+    _scoring_progress.set_result({"status": "ok", "rows": req.rows, "recommended": req.recommended, "saved_path": response["path"]})
+    return response
+
+
+class UiStateRequest(BaseModel):
+    state: dict
+
+
+def _ui_key(key: str) -> str:
+    if key not in UI_STATE_KEYS:
+        raise HTTPException(status_code=404, detail=f"Unknown screen state '{key}'.")
+    return key
+
+
+@app.get("/api/ui-state/{key}")
+def get_ui_state(key: str):
+    """The remembered screen state of a review (or null), so a screen that is opened again can carry on."""
+    with _ui_state_lock:
+        return {"state": _ui_state.get(_ui_key(key))}
+
+
+@app.put("/api/ui-state/{key}")
+def put_ui_state(key: str, req: UiStateRequest):
+    with _ui_state_lock:
+        _ui_state[_ui_key(key)] = req.state
+    return {"ok": True}
+
+
+@app.delete("/api/ui-state/{key}")
+def delete_ui_state(key: str):
+    _ui_key(key)
+    _clear_ui_state(key)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -545,8 +614,7 @@ def run_sara(req: SaraRequest):
 @app.post("/api/transactions/db15/batch")
 def run_db15_batch(file: UploadFile = File(...)):
     _require_connection()
-    if _db15_batch_progress.is_running():
-        raise HTTPException(status_code=409, detail="A batch lookup is already in progress.")
+    _guard_find_run()
 
     contents = file.file.read()
     tables = _parse_table_list(contents)
@@ -558,6 +626,7 @@ def run_db15_batch(file: UploadFile = File(...)):
             "starting from row 2.",
         )
 
+    _begin_find_run()
     _db15_batch_progress.start(len(tables))
     threading.Thread(target=_run_db15_batch_job, args=(tables,), daemon=True).start()
     return {"status": "started", "total": len(tables)}
@@ -567,8 +636,7 @@ def run_db15_batch(file: UploadFile = File(...)):
 def run_db15_batch_from_input(req: Db15BatchFromInputRequest):
     """Start the archiving-object lookup using a table list saved by Generate Table List."""
     _require_connection()
-    if _db15_batch_progress.is_running():
-        raise HTTPException(status_code=409, detail="A batch lookup is already in progress.")
+    _guard_find_run()
 
     file_path = _result_file("TOP_TABLES", req.filename)
 
@@ -580,6 +648,7 @@ def run_db15_batch_from_input(req: Db15BatchFromInputRequest):
             "(and optionally a description in column B), starting from row 2.",
         )
 
+    _begin_find_run()
     _db15_batch_progress.start(len(tables))
     threading.Thread(target=_run_db15_batch_job, args=(tables,), daemon=True).start()
     return {"status": "started", "total": len(tables)}
@@ -615,29 +684,38 @@ def debug_db15_grid(table_name: str):
     return result
 
 
+def _distinct_table_count(rows: list[dict]) -> int:
+    return len({row.get("Table Name", "") for row in rows})
+
+
+def _run_scoring(rows: list[dict]) -> None:
+    """The scoring step, run in the calling (background) thread; _scoring_progress was started by the caller."""
+    try:
+        result = scoring.score_archiving_objects(rows, on_progress=_scoring_progress.update)
+        if result["status"] == "error":
+            _scoring_progress.fail(result["message"])
+        else:
+            _autosave(result, "BATCH", "archiving_objects_scored.xlsx",
+                      lambda: _scored_workbook(result.get("rows", []), result.get("recommended", [])))
+            _scoring_progress.finish(result)
+    except Exception as exc:
+        logger.exception("Scoring job failed")
+        _scoring_progress.fail(str(exc))
+
+
 @app.post("/api/transactions/db15/score")
 def score_db15_batch(req: Db15ScoreRequest):
-    if _scoring_progress.is_running():
-        raise HTTPException(status_code=409, detail="A scoring run is already in progress.")
+    """(Re)run the scoring for *rows* in the background (Retry scoring). A normal run needs no call to this: the
+    lookup job continues into the scoring by itself."""
+    if _scoring_progress.is_running() or _db15_batch_progress.is_running():
+        raise HTTPException(status_code=409, detail="A lookup or scoring run is already in progress.")
 
-    distinct_tables = {row.get("Table Name", "") for row in req.rows}
-    _scoring_progress.start(len(distinct_tables))
-
-    def job():
-        try:
-            result = scoring.score_archiving_objects(req.rows, on_progress=_scoring_progress.update)
-            if result["status"] == "error":
-                _scoring_progress.fail(result["message"])
-            else:
-                _autosave(result, "BATCH", "archiving_objects_scored.xlsx",
-                          lambda: _scored_workbook(result.get("rows", []), result.get("recommended", [])))
-                _scoring_progress.finish(result)
-        except Exception as exc:
-            logger.exception("Scoring job failed")
-            _scoring_progress.fail(str(exc))
-
-    threading.Thread(target=job, daemon=True).start()
-    return {"status": "started", "total": len(distinct_tables)}
+    _reference_progress.reset()
+    _clear_ui_state("ref-doc-tables")
+    total = _distinct_table_count(req.rows)
+    _scoring_progress.start(total)
+    threading.Thread(target=_run_scoring, args=(req.rows,), daemon=True).start()
+    return {"status": "started", "total": total}
 
 
 @app.get("/api/transactions/db15/score/progress")
@@ -650,19 +728,38 @@ def get_db15_score_progress():
 # size" query, for users who don't already have a list of tables to check)
 # ---------------------------------------------------------------------------
 
+def _run_top_tables_job(limit: int) -> None:
+    try:
+        result = db02.run_get_top_tables(limit)
+        if result["status"] == "error":
+            _top_tables_progress.fail(result["message"])
+            return
+
+        def build() -> io.BytesIO:
+            rows = result.get("rows", [])
+            return _build_workbook(rows, columns=["Table Name", "Description"] + _optional_size_columns(rows), sheet_title="Top Tables")
+
+        _autosave(result, "TOP_TABLES", "list_of_tables.xlsx", build)
+        _top_tables_progress.finish(result)
+    except Exception as exc:
+        logger.exception("Top-tables job failed")
+        _top_tables_progress.fail(str(exc))
+
+
 @app.post("/api/transactions/db02/top-tables")
 def get_db02_top_tables(req: Db02TopTablesRequest):
+    """Start the "top tables by size" query in the background; poll /top-tables/progress. The list is saved when done."""
     _require_connection()
-    result = db02.run_get_top_tables(req.limit)
-    if result["status"] == "error":
-        raise HTTPException(status_code=500, detail=result["message"])
+    if _top_tables_progress.is_running():
+        raise HTTPException(status_code=409, detail="A table list is already being generated.")
+    _top_tables_progress.start(1)
+    threading.Thread(target=_run_top_tables_job, args=(req.limit,), daemon=True).start()
+    return {"status": "started", "total": 1}
 
-    def build() -> io.BytesIO:
-        rows = result.get("rows", [])
-        return _build_workbook(rows, columns=["Table Name", "Description"] + _optional_size_columns(rows), sheet_title="Top Tables")
 
-    _autosave(result, "TOP_TABLES", "list_of_tables.xlsx", build)
-    return result
+@app.get("/api/transactions/db02/top-tables/progress")
+def get_db02_top_tables_progress():
+    return _top_tables_progress.snapshot()
 
 
 @app.get("/api/transactions/db02/debug-screen")
@@ -736,6 +833,7 @@ def run_header_table_batch(file: UploadFile = File(...), max_objects: int = 20):
             "archiving_objects_scored.xlsx.",
         )
 
+    _begin_header_run()
     _header_table_progress.start(len(archiving_objects))
     threading.Thread(target=_run_header_table_job, args=(archiving_objects,), daemon=True).start()
     return {"status": "started", "total": len(archiving_objects)}
@@ -758,6 +856,7 @@ def run_header_table_batch_from_output(req: HeaderTableBatchFromOutputRequest):
             detail=f"No 'Archiving Object' column with values found in '{file_path.name}''s last sheet.",
         )
 
+    _begin_header_run()
     _header_table_progress.start(len(archiving_objects))
     threading.Thread(target=_run_header_table_job, args=(archiving_objects,), daemon=True).start()
     return {"status": "started", "total": len(archiving_objects)}
@@ -1150,15 +1249,28 @@ class ReferenceDocSaveRequest(BaseModel):
     recommended: list[dict]
 
 
+def _run_reference_job(tracker: ProgressTracker, analyze, *args) -> None:
+    """Run a reference-document analysis in the background; the result (or the reason it failed) stays in *tracker*."""
+    try:
+        result = analyze(*args)
+        if result.get("status") == "error":
+            tracker.fail(result["message"])
+        else:
+            tracker.finish(result)
+    except Exception as exc:
+        logger.exception("Reference document analysis failed")
+        tracker.fail(str(exc))
+
+
 @app.post("/api/reference-doc/analyze")
 def analyze_reference_doc(
     files: list[UploadFile] = File(...),
     recommended: str = Form(...),
     known_descriptions: str = Form("{}"),
 ):
-    """Parse the uploaded reference document(s) and compare their archiving-object
-    mappings against the current scored recommendations. Several documents are merged in
-    upload order (the first to mention a table wins). *known_descriptions* is a JSON object
+    """Start reading the uploaded reference document(s) and comparing their archiving-object mappings with the
+    current scored recommendations, in the background; poll /api/reference-doc/progress. Several documents are
+    merged in upload order (the first to mention a table wins). *known_descriptions* is a JSON object
     {archiving object: description} from the current run."""
     documents = [(f.file.read(), f.filename or "document") for f in files]
     try:
@@ -1170,10 +1282,21 @@ def analyze_reference_doc(
         known = known if isinstance(known, dict) else {}
     except Exception:
         known = {}
-    result = ref_doc_mod.analyze_reference_doc(documents, recommended_rows, known)
-    if result.get("status") == "error":
-        raise HTTPException(status_code=400, detail=result["message"])
-    return result
+    if _reference_progress.is_running():
+        raise HTTPException(status_code=409, detail="A reference document is already being checked.")
+    _clear_ui_state("ref-doc-tables")
+    _reference_progress.start(1)
+    threading.Thread(
+        target=_run_reference_job,
+        args=(_reference_progress, ref_doc_mod.analyze_reference_doc, documents, recommended_rows, known),
+        daemon=True,
+    ).start()
+    return {"status": "started", "total": 1}
+
+
+@app.get("/api/reference-doc/progress")
+def reference_doc_progress():
+    return _reference_progress.snapshot()
 
 
 def _reference_doc_workbook(req: "ReferenceDocSaveRequest") -> io.BytesIO:
@@ -1235,18 +1358,29 @@ def analyze_header_reference(
     files: list[UploadFile] = File(...),
     rows: str = Form(...),
 ):
-    """Parse the uploaded reference document(s) and compare their archiving object ->
-    header table mappings against the header tables the app found. Several documents are
-    merged in upload order (the first to mention an object wins)."""
+    """Start reading the uploaded reference document(s) and comparing their archiving object -> header table
+    mappings with the header tables the app found, in the background; poll /api/header-reference/progress. Several
+    documents are merged in upload order (the first to mention an object wins)."""
     documents = [(f.file.read(), f.filename or "document") for f in files]
     try:
         header_rows = json.loads(rows)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON in 'rows' field.")
-    result = ref_doc_mod.analyze_header_reference(documents, header_rows)
-    if result.get("status") == "error":
-        raise HTTPException(status_code=400, detail=result["message"])
-    return result
+    if _header_reference_progress.is_running():
+        raise HTTPException(status_code=409, detail="A reference document is already being checked.")
+    _clear_ui_state("ref-doc-headers")
+    _header_reference_progress.start(1)
+    threading.Thread(
+        target=_run_reference_job,
+        args=(_header_reference_progress, ref_doc_mod.analyze_header_reference, documents, header_rows),
+        daemon=True,
+    ).start()
+    return {"status": "started", "total": 1}
+
+
+@app.get("/api/header-reference/progress")
+def header_reference_progress():
+    return _header_reference_progress.snapshot()
 
 
 @app.post("/api/header-reference/save")
@@ -1427,21 +1561,31 @@ def _ensure_table_sizes(tables: list[dict]) -> list[dict]:
 
 
 def _run_db15_batch_job(tables: list[dict]):
+    """The lookup, then -- in the same background thread -- the scoring of what it found, so the whole run goes on
+    when the user leaves the screen. The scoring is marked as started *before* the lookup is marked done, so a
+    screen that sees the lookup finished always sees the scoring running (never the previous run's result)."""
+    rows: list[dict] = []
     try:
         _db15_batch_progress.update(0, "Checking table sizes…")
         tables = _ensure_table_sizes(tables)
         result = db15.run_batch(tables, on_progress=_db15_batch_progress.update)
         if result["status"] == "error":
             _db15_batch_progress.fail(result["message"])
-        else:
-            try:
-                object_descriptions.remember_from_rows(result.get("rows", []))
-            except Exception:
-                logger.warning("Could not remember archiving object descriptions", exc_info=True)
-            _db15_batch_progress.finish(result)
+            return
+        try:
+            object_descriptions.remember_from_rows(result.get("rows", []))
+        except Exception:
+            logger.warning("Could not remember archiving object descriptions", exc_info=True)
+        rows = result.get("rows", [])
+        if rows:
+            _scoring_progress.start(_distinct_table_count(rows))
+        _db15_batch_progress.finish(result)
     except Exception as exc:
         logger.exception("DB15 batch job failed")
         _db15_batch_progress.fail(str(exc))
+        return
+    if rows:
+        _run_scoring(rows)
 
 
 def _build_workbook(rows: list[dict], columns: list[str], sheet_title: str) -> io.BytesIO:

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useScreenEpoch } from "../useScreenEpoch";
 import { api } from "../api/client";
 import ResultsTable from "./ResultsTable";
 import ProgressBar from "./ProgressBar";
@@ -10,6 +11,41 @@ export default function GenerateTableListPanel() {
   const [result, setResult] = useState<Db02TopTablesResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // Bumped when the screen is left, so a poll started by this screen stops (the work itself goes on in the backend)
+  const epoch = useScreenEpoch();
+
+  /** Follow the query in the backend until it ends. Used after Generate and when the screen is opened again. */
+  async function follow(isCurrent: () => boolean) {
+    setLoading(true);
+    try {
+      const final = await api.pollTopTables(() => {}, () => !isCurrent());
+      if (!isCurrent()) return;
+      if (final.status === "error") setError(final.message ?? "Generating the table list failed");
+      else setResult(final.result);
+    } catch (err: unknown) {
+      if (isCurrent()) setError(err instanceof Error ? err.message : "Generating the table list failed");
+    } finally {
+      if (isCurrent()) setLoading(false);
+    }
+  }
+
+  // Pick up a run that is going or finished (the state lives in the backend, like the analysis tasks)
+  useEffect(() => {
+    const isCurrent = epoch.begin();
+    api
+      .topTablesProgress()
+      .then((s) => {
+        if (!isCurrent() || s.status === "idle") return;
+        if (s.status === "running") follow(isCurrent);
+        else if (s.status === "done") setResult(s.result);
+        else setError(s.message ?? "Generating the table list failed");
+      })
+      .catch(() => {});
+    return () => {
+      epoch.leave();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
@@ -18,13 +54,13 @@ export default function GenerateTableListPanel() {
     setError("");
     setResult(null);
     try {
-      const res = await api.db02TopTables({ limit });
-      setResult(res);
+      await api.topTablesStart({ limit });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Generating the table list failed");
-    } finally {
       setLoading(false);
+      return;
     }
+    follow(epoch.current());
   }
 
   const rows = result?.rows ?? [];

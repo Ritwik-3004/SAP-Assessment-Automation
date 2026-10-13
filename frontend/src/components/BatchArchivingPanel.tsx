@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "../api/client";
+import { useScreenEpoch } from "../useScreenEpoch";
 import ResultsTable from "./ResultsTable";
 import ProgressBar from "./ProgressBar";
 import SavedNotice from "./SavedNotice";
@@ -30,6 +31,8 @@ export default function BatchArchivingPanel() {
   const [view, setView] = useState<"all" | "recommended">("all");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Bumped when the screen is left, so polls started by this screen stop (the run itself goes on in the backend)
+  const epoch = useScreenEpoch();
 
   // Let the always-visible assistant see (and change) the scored results. A change is saved again
   // automatically, so the file in the results folder always matches what is shown.
@@ -74,6 +77,18 @@ export default function BatchArchivingPanel() {
 
   useEffect(() => {
     fetchInputFiles();
+    // Pick up a run that is going or finished: the lookup and the scoring after it live in the backend, so
+    // coming back shows the progress or the results, like the analysis tasks.
+    const isCurrent = epoch.begin();
+    api
+      .db15BatchProgress()
+      .then((s) => {
+        if (isCurrent() && s.status !== "idle") follow(isCurrent);
+      })
+      .catch(() => {});
+    return () => {
+      epoch.leave();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -94,29 +109,65 @@ export default function BatchArchivingPanel() {
 
   const canSubmit = mode === "upload" ? !!localFile : !!serverFile;
 
-  /** Score the looked-up objects and pick the recommended one per table (also finds housekeeping
-   *  programs for tables with no archiving object). Returns true if scoring succeeded. */
-  async function runScoring(rows: Record<string, string>[]): Promise<boolean> {
-    setScoring(true);
-    setError("");
-    setScoreProgress(null);
+  /** Follow the scoring that the backend runs after the lookup (or after "Retry scoring"). */
+  async function followScoring(isCurrent: () => boolean) {
     try {
-      const started = await api.db15Score(rows);
-      setScoreProgress({ status: "running", completed: 0, total: started.total, message: null, result: null });
-      const final = await api.pollDb15Score(setScoreProgress);
+      const first = await api.db15ScoreProgress();
+      if (!isCurrent() || first.status === "idle") return;
+      setScoring(true);
+      setScoreProgress(first);
+      const final = await api.pollDb15Score(setScoreProgress, () => !isCurrent());
+      if (!isCurrent()) return;
       if (final.status === "error") {
         setError(final.message ?? "Scoring failed");
-        return false;
+        return;
       }
       setScored(final.result);
       setView("all");
-      return true;
+    } catch (err: unknown) {
+      if (isCurrent()) setError(err instanceof Error ? err.message : "Scoring failed");
+    } finally {
+      if (isCurrent()) setScoring(false);
+    }
+  }
+
+  /** Follow the run in the backend: the lookup, then the scoring that starts by itself when it is done. Used
+   *  after the Start click and when the screen is opened while a run is going or finished. */
+  async function follow(isCurrent: () => boolean) {
+    setLoading(true);
+    setError("");
+    let rows: Record<string, string>[] = [];
+    try {
+      const lookup = await api.pollDb15Batch(setLookupProgress, () => !isCurrent());
+      if (!isCurrent()) return;
+      if (lookup.status === "error") {
+        setError(lookup.message ?? "Lookup failed");
+        return;
+      }
+      setResult(lookup.result);
+      rows = lookup.result?.rows ?? [];
+    } catch (err: unknown) {
+      if (isCurrent()) setError(err instanceof Error ? err.message : "Lookup failed");
+      return;
+    } finally {
+      if (isCurrent()) setLoading(false);
+    }
+
+    if (rows.length === 0) return; // nothing found to score; the "no objects" note below explains
+    await followScoring(isCurrent);
+  }
+
+  /** "Retry scoring" after a failed scoring step: run it again without repeating the SAP lookup. */
+  async function runScoring(rows: Record<string, string>[]) {
+    setError("");
+    setScoreProgress(null);
+    try {
+      await api.db15Score(rows);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Scoring failed");
-      return false;
-    } finally {
-      setScoring(false);
+      return;
     }
+    await followScoring(epoch.current());
   }
 
   /** One click: look up the archiving objects in SAP, then score and recommend them. */
@@ -131,7 +182,6 @@ export default function BatchArchivingPanel() {
     setLookupProgress(null);
     setScoreProgress(null);
 
-    let rows: Record<string, string>[] = [];
     try {
       let started: import("../types").JobStarted;
       if (mode === "upload" && localFile) {
@@ -139,25 +189,16 @@ export default function BatchArchivingPanel() {
       } else if (mode === "folder" && serverFile) {
         started = await api.db15BatchFromInput(serverFile);
       } else {
+        setLoading(false);
         return;
       }
       setLookupProgress({ status: "running", completed: 0, total: started.total, message: null, result: null });
-      const final = await api.pollDb15Batch(setLookupProgress);
-      if (final.status === "error") {
-        setError(final.message ?? "Lookup failed");
-        return;
-      }
-      setResult(final.result);
-      rows = final.result?.rows ?? [];
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Lookup failed");
-      return;
-    } finally {
       setLoading(false);
+      return;
     }
-
-    if (rows.length === 0) return; // nothing found to score; the "no objects" note below explains
-    await runScoring(rows);
+    follow(epoch.current());
   }
 
   return (

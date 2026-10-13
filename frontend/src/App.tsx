@@ -14,6 +14,7 @@ import { ChevronLeft, ChevronRight, TaskIcon } from "./components/icons";
 import { AssistantProvider } from "./assistantContext";
 import ObjectAnalysisBadge from "./components/ObjectAnalysisBadge";
 import OpenItemAnalysisBadge from "./components/OpenItemAnalysisBadge";
+import RunningJobsBadge from "./components/RunningJobsBadge";
 import { api } from "./api/client";
 import type { ConnectionState } from "./types";
 import "./App.css";
@@ -119,6 +120,7 @@ export default function App() {
           )}
           <ObjectAnalysisBadge />
           <OpenItemAnalysisBadge />
+          <RunningJobsBadge />
           {connection.connected ? (
             <span className="status-badge connected">Connected — {connection.system}</span>
           ) : (

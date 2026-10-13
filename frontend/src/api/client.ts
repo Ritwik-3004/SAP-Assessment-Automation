@@ -25,19 +25,36 @@ async function get<T>(path: string): Promise<T> {
 /** Poll a /progress endpoint until it reaches "done" or "error", calling
  * onTick with every snapshot along the way. Used for long-running batch
  * operations (DB15 lookup, scoring) that run in a background thread. */
-async function pollUntilDone<T>(
+export async function pollUntilDone<T>(
   getProgress: () => Promise<import("../types").ProgressSnapshot<T>>,
   onTick: (snapshot: import("../types").ProgressSnapshot<T>) => void,
-  intervalMs = 700
+  intervalMs = 700,
+  /** Called before every poll: return true to stop (the screen was left). The last snapshot is returned. */
+  stop?: () => boolean
 ): Promise<import("../types").ProgressSnapshot<T>> {
   for (;;) {
     const snapshot = await getProgress();
+    if (stop?.()) return snapshot;
     onTick(snapshot);
     if (snapshot.status === "done" || snapshot.status === "error") {
       return snapshot;
     }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    if (stop?.()) return snapshot;
   }
+}
+
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? res.statusText);
+  }
+  return res.json();
 }
 
 export const api = {
@@ -109,11 +126,19 @@ export const api = {
       "/api/transactions/db15/batch/progress"
     ),
 
-  pollDb15Batch: (onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").Db15BatchResult>) => void) =>
-    pollUntilDone(() => api.db15BatchProgress(), onTick),
+  pollDb15Batch: (
+    onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").Db15BatchResult>) => void,
+    stop?: () => boolean
+  ) => pollUntilDone(() => api.db15BatchProgress(), onTick, 700, stop),
 
-  db02TopTables: (body: { limit: number }) =>
-    post<import("../types").Db02TopTablesResult>("/api/transactions/db02/top-tables", body),
+  /** Starts the "top tables" query in the backend; follow it with topTablesProgress / pollTopTables. */
+  topTablesStart: (body: { limit: number }) => post<import("../types").JobStarted>("/api/transactions/db02/top-tables", body),
+  topTablesProgress: () =>
+    get<import("../types").ProgressSnapshot<import("../types").Db02TopTablesResult>>("/api/transactions/db02/top-tables/progress"),
+  pollTopTables: (
+    onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").Db02TopTablesResult>) => void,
+    stop?: () => boolean
+  ) => pollUntilDone(() => api.topTablesProgress(), onTick, 700, stop),
 
   db15Score: (rows: Record<string, string>[]) =>
     post<import("../types").JobStarted>("/api/transactions/db15/score", { rows }),
@@ -123,8 +148,10 @@ export const api = {
       "/api/transactions/db15/score/progress"
     ),
 
-  pollDb15Score: (onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").ScoredResult>) => void) =>
-    pollUntilDone(() => api.db15ScoreProgress(), onTick),
+  pollDb15Score: (
+    onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").ScoredResult>) => void,
+    stop?: () => boolean
+  ) => pollUntilDone(() => api.db15ScoreProgress(), onTick, 700, stop),
 
   chat: (
     message: string,
@@ -143,7 +170,8 @@ export const api = {
       history,
     }),
 
-  analyzeReferenceDoc: async (
+  /** Starts reading the documents in the backend (it keeps going if the screen is left); follow it with referenceDocProgress. */
+  startReferenceDoc: async (
     files: File[],
     recommended: Record<string, string>[],
     knownDescriptions: Record<string, string> = {},
@@ -160,13 +188,15 @@ export const api = {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail ?? res.statusText);
     }
-    return res.json() as Promise<import("../types").ReferenceDocResult>;
+    return res.json() as Promise<import("../types").JobStarted>;
   },
+  referenceDocProgress: () =>
+    get<import("../types").ProgressSnapshot<import("../types").ReferenceDocResult>>("/api/reference-doc/progress"),
 
   saveReferenceDoc: (rows: Record<string, string>[], recommended: Record<string, string>[]) =>
     post<{ saved: boolean; path: string }>("/api/reference-doc/save", { rows, recommended }),
 
-  analyzeHeaderReference: async (files: File[], rows: Record<string, string>[]) => {
+  startHeaderReference: async (files: File[], rows: Record<string, string>[]) => {
     const formData = new FormData();
     files.forEach((f) => formData.append("files", f));
     formData.append("rows", JSON.stringify(rows));
@@ -178,8 +208,14 @@ export const api = {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail ?? res.statusText);
     }
-    return res.json() as Promise<import("../types").HeaderReferenceResult>;
+    return res.json() as Promise<import("../types").JobStarted>;
   },
+  headerReferenceProgress: () =>
+    get<import("../types").ProgressSnapshot<import("../types").HeaderReferenceResult>>("/api/header-reference/progress"),
+
+  /** What the user had done on a review screen (which step, what was ticked), so it can be picked up again. */
+  getUiState: (key: string) => get<{ state: Record<string, unknown> | null }>(`/api/ui-state/${key}`),
+  putUiState: (key: string, state: Record<string, unknown>) => put<{ ok: boolean }>(`/api/ui-state/${key}`, { state }),
 
   saveHeaderReference: (rows: Record<string, string>[], final: Record<string, string>[]) =>
     post<{ saved: boolean; path: string }>("/api/header-reference/save", { rows, final }),
@@ -296,7 +332,8 @@ export const api = {
     ),
 
   pollHeaderTablesBatch: (
-    onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").HeaderTableBatchResult>) => void
-  ) => pollUntilDone(() => api.headerTablesBatchProgress(), onTick),
+    onTick: (snapshot: import("../types").ProgressSnapshot<import("../types").HeaderTableBatchResult>) => void,
+    stop?: () => boolean
+  ) => pollUntilDone(() => api.headerTablesBatchProgress(), onTick, 700, stop),
 
 };

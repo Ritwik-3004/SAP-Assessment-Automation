@@ -1,5 +1,5 @@
 import { api } from "../api/client";
-import type { ScoredResult } from "../types";
+import type { ReferenceDocResult, ReferenceReview, ScoredResult } from "../types";
 import ReferenceReviewPanel, { type ReferenceReviewConfig } from "./ReferenceReviewPanel";
 
 interface Props {
@@ -8,6 +8,19 @@ interface Props {
 
 /** Reference-document review for Find Archiving Objects (table → archiving object).
  *  The UI itself lives in ReferenceReviewPanel; this only supplies the table/object wiring. */
+/** The analysis result in the shape the review screen works with. */
+function toReview(res: ReferenceDocResult): ReferenceReview {
+  return {
+    filename: res.filename,
+    warnings: res.warnings,
+    annotated: res.annotated_recommended,
+    matches: res.matches,
+    mismatches: res.mismatches,
+    not_in_ref: res.not_in_ref,
+    objectDescriptions: res.object_descriptions,
+  };
+}
+
 export default function ReferenceDocPanel({ scored }: Props) {
   const recommended = scored.recommended ?? [];
   const allRows = scored.rows ?? [];
@@ -41,17 +54,13 @@ export default function ReferenceDocPanel({ scored }: Props) {
       "Upload one or more reference documents containing past archiving object recommendations. " +
       "The tool will compare it against your scored results and highlight any differences.",
     previewTitle: "Preview — Final Recommendations",
-    analyze: async (files) => {
-      const res = await api.analyzeReferenceDoc(files, recommended, knownDescriptions());
-      return {
-        filename: res.filename,
-        warnings: res.warnings,
-        annotated: res.annotated_recommended,
-        matches: res.matches,
-        mismatches: res.mismatches,
-        not_in_ref: res.not_in_ref,
-        objectDescriptions: res.object_descriptions,
-      };
+    stateKey: "ref-doc-tables",
+    start: async (files) => {
+      await api.startReferenceDoc(files, recommended, knownDescriptions());
+    },
+    progress: async () => {
+      const s = await api.referenceDocProgress();
+      return { ...s, result: s.result ? toReview(s.result) : null };
     },
     save: (final) => api.saveReferenceDoc(allRows, final),
     // Taking the document's object must not leave the old object's details behind. The score comes

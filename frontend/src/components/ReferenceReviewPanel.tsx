@@ -1,7 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { api, pollUntilDone } from "../api/client";
+import { useScreenEpoch } from "../useScreenEpoch";
 import SavedNotice from "./SavedNotice";
 import SendToModelDialog from "./SendToModelDialog";
-import type { ReferenceReview } from "../types";
+import type { ProgressSnapshot, ReferenceReview } from "../types";
 
 type Row = Record<string, string>;
 type Phase = "idle" | "analyzing" | "results" | "preview";
@@ -29,7 +31,12 @@ export interface ReferenceReviewConfig {
   extraLabel: string;
   uploadHint: string;
   previewTitle: string;
-  analyze: (files: File[]) => Promise<ReferenceReview>;
+  /** Which remembered screen state belongs to this review (see the backend's /api/ui-state). */
+  stateKey: "ref-doc-tables" | "ref-doc-headers";
+  /** Starts reading the documents in the backend; it keeps going if the screen is left. */
+  start: (files: File[]) => Promise<void>;
+  /** The backend's state of that analysis, with its result already in the shape of a review. */
+  progress: () => Promise<ProgressSnapshot<ReferenceReview>>;
   /** Saves the final list into the task's results folder; resolves with the full path it was saved to. */
   save: (final: Row[]) => Promise<{ path: string }>;
   /** The row after the user accepts the reference document's value (*review* is the analysis result). */
@@ -52,6 +59,72 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
   const [previewRows, setPreviewRows] = useState<Row[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedPath, setSavedPath] = useState<string | null>(null);
+  // Bumped when the screen is left, so a poll started by this screen stops (the analysis goes on in the backend)
+  const epoch = useScreenEpoch();
+
+  // ── Following the analysis in the backend ────────────────────────────────
+
+  /** Follow the analysis until it ends, then restore what the user had done with it (which step, what was
+   *  ticked). Used after the documents are sent and when the screen is opened again. */
+  async function follow(isCurrent: () => boolean) {
+    setPhase("analyzing");
+    setError("");
+    try {
+      const final = await pollUntilDone(c.progress, () => {}, 700, () => !isCurrent());
+      if (!isCurrent()) return;
+      if (final.status === "error" || !final.result) {
+        setError(final.message ?? "Analysis failed");
+        setPhase("idle");
+        return;
+      }
+      setResult(final.result);
+      const saved = (await api.getUiState(c.stateKey).catch(() => ({ state: null }))).state;
+      if (!isCurrent()) return;
+      const savedSelected = Array.isArray(saved?.selected) ? (saved.selected as string[]) : [];
+      setSelected(new Set(savedSelected));
+      if (saved?.phase === "preview" && Array.isArray(saved.previewRows)) {
+        setPreviewRows(saved.previewRows as Row[]);
+        setSavedPath(typeof saved.savedPath === "string" ? saved.savedPath : null);
+        setPhase("preview");
+      } else {
+        setPhase("results");
+      }
+    } catch (err: unknown) {
+      if (isCurrent()) {
+        setError(err instanceof Error ? err.message : "Analysis failed");
+        setPhase("idle");
+      }
+    }
+  }
+
+  // Pick up an analysis that is going or finished (the state lives in the backend, like the analysis tasks)
+  useEffect(() => {
+    const isCurrent = epoch.begin();
+    c.progress()
+      .then((s) => {
+        if (isCurrent() && s.status !== "idle") follow(isCurrent);
+      })
+      .catch(() => {});
+    return () => {
+      epoch.leave();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Remember where the user is in the review (step, ticked mismatches, the preview) so it can be picked up again
+  useEffect(() => {
+    if (phase !== "results" && phase !== "preview") return;
+    if (!result) return;
+    api
+      .putUiState(c.stateKey, {
+        phase,
+        selected: Array.from(selected),
+        previewRows: phase === "preview" ? previewRows : null,
+        savedPath,
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, selected, previewRows, savedPath]);
 
   // ── File pick ────────────────────────────────────────────────────────────
 
@@ -64,13 +137,13 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
     setSavedPath(null);
 
     try {
-      const res = await c.analyze(files);
-      setResult(res);
-      setPhase("results");
+      await c.start(files);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Analysis failed");
       setPhase("idle");
+      return;
     }
+    follow(epoch.current());
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {

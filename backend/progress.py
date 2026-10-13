@@ -52,6 +52,18 @@ class ProgressTracker:
             self._state["status"] = "error"
             self._state["message"] = message
 
+    def reset(self):
+        """Back to idle: forget the last run (a new run elsewhere makes its result stale)."""
+        with self._lock:
+            self._state = {"status": "idle", "completed": 0, "total": 0, "message": None, "result": None}
+
+    def set_result(self, result: dict):
+        """Replace the result of a finished run (the user changed it afterwards, e.g. through the chat), so a
+        screen that comes back later sees the changed version. Ignored unless the run is done."""
+        with self._lock:
+            if self._state["status"] == "done":
+                self._state["result"] = result
+
     def is_running(self) -> bool:
         with self._lock:
             return self._state["status"] == "running"

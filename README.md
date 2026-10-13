@@ -44,6 +44,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | SAP Assistant (chat column that can collapse to a floating button: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
 | Several saved SAP / SAP for Me logins with a dropdown | Working; storage and endpoints tested offline with temporary files — see [Saved connection details](#saved-connection-details) |
 | AI model switch (Claude, Groq free tier, or Ollama on this computer) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared**. Ollama: tested live with a tiny 270M model and offline with a fake server; **not yet tried with a real 7–8B model** — see [AI model selection](#ai-model-selection-claude-groq-or-ollama) |
+| Leaving a task and coming back (every task keeps its state in the backend; runs and reviews continue while another task is open) | Tested in a browser with a faked SAP, AI model and results folder: leaving mid-run and returning, finished results, reference-review step and ticks, page refresh. **Not yet checked** against live SAP or a real AI model, or with very long runs |
 | Reference document analysis (Excel / PDF / PowerPoint, one or several files) | Implemented; the multi-document merge was tested offline with canned model answers, not yet run end to end against real documents — see [Reference document analysis](#reference-document-analysis) |
 
 ## Prerequisites
@@ -645,16 +646,16 @@ and `aobj.py` clears popups right after opening AOBJ and again after executing.
 
 ## Progress polling for long-running batches
 
-DB15 lookup, Scoring, and the Header Table batch lookup can all take minutes on a large
-batch (e.g. 300 tables from the DB02 tool, or 20 archiving objects each needing a
-separate SE16N round trip), so all three moved from "block the HTTP request until the
-whole batch finishes" to a start-then-poll pattern:
+Generate Table List, the DB15 lookup, Scoring, the Header Table batch lookup and the reference-document reviews can all take
+minutes on a large batch (e.g. 300 tables from the DB02 tool, or 20 archiving objects each needing a
+separate SE16N round trip), so all of them use a start-then-poll pattern instead of blocking the HTTP request until
+the work finishes:
 
-1. `POST /api/transactions/db15/batch` (or `/db15/score`, or `/header-tables/batch`)
+1. `POST /api/transactions/db15/batch` (or `/db02/top-tables`, `/header-tables/batch`, `/reference-doc/analyze`, …)
    validates the input, kicks off the real work on a background `threading.Thread`, and
    returns immediately with `{"status": "started", "total": N}`.
-2. The frontend polls `GET .../batch/progress` (or `.../score/progress`, or
-   `/header-tables/batch/progress`) every ~700ms (`pollUntilDone()` in
+2. The frontend polls `GET .../batch/progress` (or `/db02/top-tables/progress`, `.../score/progress`,
+   `/header-tables/batch/progress`, `/reference-doc/progress`) every ~700ms (`pollUntilDone()` in
    `frontend/src/api/client.ts`) until `status` is `"done"` or `"error"` — each snapshot
    carries `completed`/`total`/`message` (the table/object just finished), rendered by
    `frontend/src/components/ProgressBar.tsx`. Once `"done"`, the snapshot's `result`
@@ -679,23 +680,46 @@ Table Analysis, Archiving Object Analysis and Open Item Analysis use the same st
 job state (`/api/table-analysis/progress`, `/api/object-analysis/progress`, `/api/open-item-analysis/progress`), polled by
 their panels every second or two; Final report generation is a single quick request.
 
-`POST /api/transactions/db02/top-tables` is unchanged (still a single blocking
-request) — a single SQL query execution has no sub-step to poll, so its panel shows
-an indeterminate animated bar (`<ProgressBar mode="indeterminate" />`) instead of a
-real percentage.
+Generate Table List and the reference-document reviews have no sub-steps to count (one SQL query, one reading of the documents), so their panels
+show an indeterminate animated bar (`<ProgressBar mode="indeterminate" />`) instead of a real percentage.
+
+### Leaving a task and coming back
+
+Every task keeps its state in the backend, not in the screen, so switching to another task (or refreshing the page) never loses what you were doing. This
+is how the analysis tasks always worked; Generate Table List, Find Archiving Objects for Tables, Find Header Tables for Archiving Objects and their
+reference-document reviews now work the same way:
+
+- **Runs go on without the screen.** A started run keeps going in its backend thread. The old screen only stops *waiting*
+  (`useScreenEpoch()` in `frontend/src/useScreenEpoch.ts` ends its poll loops), and the screen asks the backend for the state when it is opened
+  (`GET .../progress`): a run still going shows its live progress bar, a finished one shows its results and saved path, a failed one shows why.
+- **Find Archiving Objects is one run in the backend.** The lookup thread continues into the scoring by itself (`_run_db15_batch_job()` in `main.py`),
+  and marks the scoring as started *before* it marks the lookup done, so a screen that sees the lookup finished never sees the previous run's scoring.
+  Leaving during the lookup therefore no longer stops the scoring from starting. **Retry scoring** (`POST /api/transactions/db15/score`) is only for a
+  failed scoring step.
+- **Chat edits are remembered.** When the assistant changes the scored results they are saved to `archiving_objects_scored.xlsx` and also replace the
+  remembered result, so a screen opened later shows the changed version.
+- **Reference-document reviews are jobs too** (`/api/reference-doc/analyze`, `/api/header-reference/analyze`: start, then `/progress`). What the user
+  did with the result (the step they are on, the ticked mismatches, the preview after *Apply*) is kept through `GET/PUT/DELETE /api/ui-state/{key}`
+  (keys `ref-doc-tables` and `ref-doc-headers`) and restored with it.
+- **A new run replaces the old state.** Starting a new lookup clears the scoring and the review of the earlier run; a new header-table lookup clears the
+  header review; starting a new review clears its remembered step.
+- **Header badges.** While a table list, an archiving-object lookup or scoring, a header-table lookup or a reference check is running, a badge such as
+  "⏳ Scoring 3/40" shows in the header on every task (`RunningJobsBadge.tsx`), next to the analysis tasks' badges.
+- **What is not remembered:** form inputs (the "Top N" number, the selected input file) reset when a screen opens, as in the analysis tasks. The state is
+  held in the backend process's memory, so restarting the backend clears it; the saved Excel files are untouched either way.
 
 ## Generate Table List
 
 Don't have a starting list of tables yet? The **Generate Table List** tab (`frontend/src/components/GenerateTableListPanel.tsx`) automates DB02/DBACOCKPIT's SQL Editor to build one:
 
-1. Pick "Top N tables" (default 300) and click **Generate List**. An animated progress bar shows the query is running (no percentage — see [Progress polling](#progress-polling-for-long-running-batches) for why).
+1. Pick "Top N tables" (default 300) and click **Generate List**. The query runs in the background (an animated progress bar, no percentage — see [Progress polling](#progress-polling-for-long-running-batches) for why), so you can switch to another task and come back to the progress or the finished table (see [Leaving a task and coming back](#leaving-a-task-and-coming-back)).
 2. The backend navigates to DB02, opens the **Diagnostics → SQL Editor** tree node, pastes in a canned HANA SQL query that lists the system's largest tables by total memory size, presses F8 (Execute), switches to the **Result** tab, and reads the grid.
 3. Results include **Table Name**, **Description**, **Volume (GB)**, and **Volume (MB)** (both rounded to 2 decimal places; MB is included because many small tables round to `0.00` GB). The first 20 rows are shown as a preview with ← → pagination; the full list is in the saved file.
 4. The list is saved automatically to `results/Generate Table List/list_of_tables.xlsx` (immediately available in the Find Archiving Objects file picker) and the panel shows the full path.
 
 The saved file's columns (Table Name in column A, Description in column B) match what the **Find Archiving Objects for Tables** tool expects, so the saved file can be fed straight in without any edits. The Volume (GB)/Volume (MB) columns are included in the saved file but are not required by DB15 — see [Table size (Volume GB / MB)](#table-size-volume-gb--mb) for how they carry through.
 
-Backend implementation: `db02.run_get_top_tables()` in `backend/transactions/db02.py`, plus `/api/transactions/db02/top-tables` in `backend/main.py`, which also saves the file.
+Backend implementation: `db02.run_get_top_tables()` in `backend/transactions/db02.py`, plus `/api/transactions/db02/top-tables` (start) and `/api/transactions/db02/top-tables/progress` in `backend/main.py`; the job also saves the file.
 
 ### DB02 navigation robustness
 
@@ -1185,7 +1209,8 @@ Key endpoints:
 | POST | `/api/table-analysis/skip` | Skip the table being worked on |
 | POST | `/api/table-analysis/stop-waiting` | Stop waiting for one table whose SAP job is running: body `{table}` (the job keeps running in SAP; HTTP 409 if that table is not waiting) |
 | POST | `/api/table-analysis/cancel` | Stop after the current step; finished tables stay in the workbook |
-| POST | `/api/reference-doc/analyze` | Multipart upload: `files` (one or more Excel/PDF/PowerPoint) + `recommended` (JSON string of the recommended rows); returns matches, mismatches, not-in-reference rows and the annotated recommended list |
+| POST | `/api/reference-doc/analyze` | Multipart upload: `files` (one or more Excel/PDF/PowerPoint) + `recommended` (JSON string of the recommended rows); starts the comparison in the background and returns `{status: "started"}` (HTTP 409 if one is running) |
+| GET | `/api/reference-doc/progress` | The comparison's state; `result` (matches, mismatches, not-in-reference rows, the annotated recommended list) is set once `status` is `"done"` |
 | POST | `/api/reference-doc/save` | Save the reference-annotated results (body: `{rows, recommended}`) to `results/Find Archiving Objects for Tables/archiving_objects_with_reference.xlsx`; returns the full path |
 | POST | `/api/transactions/taana` | Run TAANA |
 | POST | `/api/transactions/db15` | Run DB15 for a single table |
@@ -1198,9 +1223,10 @@ Key endpoints:
 | GET | `/api/transactions/db15/batch/progress` | Poll for batch lookup progress; `result` is populated once `status` is `"done"` |
 | GET | `/api/transactions/db15/debug-screen` | Diagnostic: dump DB15 selection-screen elements |
 | GET | `/api/transactions/db15/debug-grid` | Diagnostic: filter DB15 by a table and report grid-read details |
-| POST | `/api/transactions/db15/score` | Starts scoring every table/object row for archiving relevance via the Claude API in the background (including the housekeeping-program lookup for zero-candidate tables); returns `{status: "started", total}` immediately. When done, the scored workbook is saved automatically and `result.saved_path` holds its full path (`result.save_error` if saving failed) |
+| POST | `/api/transactions/db15/score` | (Re)starts scoring every table/object row for archiving relevance in the background (including the housekeeping-program lookup for zero-candidate tables); returns `{status: "started", total}` immediately. A normal run needs no call to this: the lookup continues into the scoring by itself, and this is for **Retry scoring**. When done, the scored workbook is saved automatically and `result.saved_path` holds its full path (`result.save_error` if saving failed) |
 | GET | `/api/transactions/db15/score/progress` | Poll for scoring progress; `result` (rows + recommended) is populated once `status` is `"done"` |
-| POST | `/api/transactions/db02/top-tables` | Run the "top tables by size" SQL query via DB02's SQL Editor; returns Table Name, Description, Volume (GB), Volume (MB), and saves them to `results/Generate Table List/list_of_tables.xlsx` (`saved_path` / `save_error` in the response) |
+| POST | `/api/transactions/db02/top-tables` | Start the "top tables by size" SQL query via DB02's SQL Editor in the background; returns `{status: "started"}` (HTTP 409 if one is running) |
+| GET | `/api/transactions/db02/top-tables/progress` | The query's state; `result` has Table Name, Description, Volume (GB), Volume (MB) and `saved_path` / `save_error` for `results/Generate Table List/list_of_tables.xlsx` once `status` is `"done"` |
 | GET | `/api/transactions/db02/debug-screen` | Diagnostic: dump DB02 screen elements under a given container |
 | GET | `/api/transactions/db02/debug-tree` | Diagnostic: dump a tree control's node keys + display text |
 | POST | `/api/transactions/db02/debug-click` | Diagnostic: perform an action on a tree node and dump the result |
@@ -1208,7 +1234,9 @@ Key endpoints:
 | POST | `/api/transactions/header-tables/batch` | Upload an Excel file; starts the SE16N/ARCH_DEF header-table lookup for the top N archiving objects on its last sheet in the background |
 | POST | `/api/transactions/header-tables/batch-from-output` | Start the header-table lookup using a file already in `results/Find Archiving Objects for Tables/` (body: `{filename, max_objects}`); the result is saved automatically to `results/Find Header Tables for Archiving Objects/header_tables.xlsx` (`result.saved_path`) |
 | GET | `/api/transactions/header-tables/batch/progress` | Poll for header-table lookup progress; `result` is populated once `status` is `"done"` |
-| POST | `/api/header-reference/analyze` | Multipart upload: `files` (one or more Excel/PDF/PowerPoint) + `rows` (JSON string of the header-table rows); returns matches, mismatches, not-in-reference rows and the annotated rows |
+| POST | `/api/header-reference/analyze` | Multipart upload: `files` (one or more Excel/PDF/PowerPoint) + `rows` (JSON string of the header-table rows); starts the comparison in the background and returns `{status: "started"}` |
+| GET | `/api/header-reference/progress` | The comparison's state; `result` (matches, mismatches, not-in-reference rows, the annotated rows) is set once `status` is `"done"` |
+| GET, PUT, DELETE | `/api/ui-state/{key}` | The remembered step of a reference review (`key` is `ref-doc-tables` or `ref-doc-headers`; PUT body `{state: {...}}`), so a screen that is opened again carries on where it was |
 | POST | `/api/header-reference/save` | Save the reference-reviewed header tables (body: `{rows, final}`) to `results/Find Header Tables for Archiving Objects/header_tables_with_reference.xlsx`; returns the full path |
 | GET | `/api/transactions/se16n/debug-arch-def-screen` | Diagnostic: dump `ARCH_DEF`'s Selection Criteria screen elements |
 | GET | `/api/transactions/se16n/debug-arch-def-query` | Diagnostic: query `ARCH_DEF` (or the table given by `table`) for an archiving object and report every step independently |

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { api } from "../api/client";
+import { useScreenEpoch } from "../useScreenEpoch";
 import ResultsTable from "./ResultsTable";
 import ProgressBar from "./ProgressBar";
 import SavedNotice from "./SavedNotice";
@@ -25,6 +26,8 @@ export default function HeaderTablePanel() {
   const [error, setError] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Bumped when the screen is left, so polls started by this screen stop (the run itself goes on in the backend)
+  const epoch = useScreenEpoch();
 
   async function fetchOutputFiles() {
     setLoadingFiles(true);
@@ -43,8 +46,39 @@ export default function HeaderTablePanel() {
     }
   }
 
+  /** Follow the lookup in the backend until it ends. Used after Submit and when the screen is opened again. */
+  async function follow(isCurrent: () => boolean) {
+    setLoading(true);
+    setError("");
+    try {
+      const final = await api.pollHeaderTablesBatch(setProgress, () => !isCurrent());
+      if (!isCurrent()) return;
+      if (final.status === "error") {
+        setError(final.message ?? "Header-table lookup failed");
+      } else {
+        setResult(final.result);
+        setRunId((n) => n + 1);
+      }
+    } catch (err: unknown) {
+      if (isCurrent()) setError(err instanceof Error ? err.message : "Header-table lookup failed");
+    } finally {
+      if (isCurrent()) setLoading(false);
+    }
+  }
+
+  // Pick up a run that is going or finished (the state lives in the backend, like the analysis tasks)
   useEffect(() => {
     fetchOutputFiles();
+    const isCurrent = epoch.begin();
+    api
+      .headerTablesBatchProgress()
+      .then((s) => {
+        if (isCurrent() && s.status !== "idle") follow(isCurrent);
+      })
+      .catch(() => {});
+    return () => {
+      epoch.leave();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -80,21 +114,16 @@ export default function HeaderTablePanel() {
       } else if (mode === "folder" && serverFile) {
         started = await api.headerTablesBatchFromOutput(serverFile, maxObjects);
       } else {
+        setLoading(false);
         return;
       }
       setProgress({ status: "running", completed: 0, total: started.total, message: null, result: null });
-      const final = await api.pollHeaderTablesBatch(setProgress);
-      if (final.status === "error") {
-        setError(final.message ?? "Header-table lookup failed");
-      } else {
-        setResult(final.result);
-        setRunId((n) => n + 1);
-      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Header-table lookup failed");
-    } finally {
       setLoading(false);
+      return;
     }
+    follow(epoch.current());
   }
 
   return (
