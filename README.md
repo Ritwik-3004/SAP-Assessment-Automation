@@ -16,8 +16,8 @@ Main backend modules (`backend/`): `main.py` (all endpoints), `sap_connector.py`
 connection), `transactions/` (one module per SAP transaction), `header_tables.py` (settles ambiguous header
 tables), `llm.py` (the AI model switch: Claude or
 Groq), `scoring.py` (AI scoring), `dvm_guide.py` (DVM Guide lookup), `housekeeping.py` + `sap_for_me.py`
-(housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (the always-visible
-assistant), `credentials_store.py` (several saved logins per credentials file), `reference_doc.py`
+(housekeeping-program lookup), `grouping.py` (Grouped by Object), `object_descriptions.py` (object descriptions), `chat.py` (the SAP
+Assistant), `credentials_store.py` (several saved logins per credentials file), `reference_doc.py`
 (reference document analysis), `table_analysis.py` (the Table Analysis task) with `transactions/taana_analysis.py`
 (its TAANA screens), `open_item_analysis.py` (the Open Item Analysis task), `final_report.py` (the Final report generation task), `object_analysis.py` (the Archiving Object Analysis task) with `object_reference.py` (its reference-document check) and `transactions/sara_info.py`,
 `help_browser.py` and `helpportal.py` (its SARA / SAP Help Portal steps), `progress.py` (progress
@@ -41,7 +41,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | Open Item Analysis (the sheet's open-item query per archiving object, run in DB02's SQL Editor, results to Excel — objects read from the Grouped by Object sheet, one workbook sheet per object) | **Run live on the OTE sandbox (client 100)** with the real DB02 SQL Editor: the query runner (SQL errors caught, zero rows, 2,500-row results, recovery after errors), and the whole job on IDOC, BC_SBAL, WORKITEM and an object without a query (workbook and Summary checked). Editing a query while another runs, cancel and the endpoints were tested offline with a fake DB02. **Not yet run:** the long queries (FI_DOCUMNT, SD_VBAK, MM_EKKO … on big tables). The sheet's WORKITEM query still fails until its client column is corrected (BC_SBAL's already was, and ran in the app) — see [Open Item Analysis](#open-item-analysis) |
 | Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on tiny tables (SWWWIHEAD and BKPF, including two tables in parallel and a month field): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the saving were tested offline with a fake SAP, as were the Fields for Table Analysis sheet (listed table skips the questions, unlisted or unusable table is asked, sheet missing) and the re-run with additional fields (replaces the result; cancelled or failed re-run keeps the old one). The sheet-driven run and the re-run have **not yet been run against a live system**. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis) |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
-| SAP Assistant (always-visible chat column: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
+| SAP Assistant (chat column that can collapse to a floating button: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps |
 | Several saved SAP / SAP for Me logins with a dropdown | Working; storage and endpoints tested offline with temporary files — see [Saved connection details](#saved-connection-details) |
 | AI model switch (Claude, Groq free tier, or Ollama on this computer) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared**. Ollama: tested live with a tiny 270M model and offline with a fake server; **not yet tried with a real 7–8B model** — see [AI model selection](#ai-model-selection-claude-groq-or-ollama) |
 | Reference document analysis (Excel / PDF / PowerPoint, one or several files) | Implemented; the multi-document merge was tested offline with canned model answers, not yet run end to end against real documents — see [Reference document analysis](#reference-document-analysis) |
@@ -135,6 +135,20 @@ is black (`--primary-text`) because white fails contrast, and green used *as tex
 background must be `--accent-text` (`#4C7A09`). The font is self-hosted through the
 `@fontsource/open-sans` npm package (Latin only, weights 300/400/600/700), so it also works on
 machines with no internet access.
+
+## Collapsible side panels
+
+Both side panels can be tucked away to give the middle of the page more room (`frontend/src/App.tsx`,
+`frontend/src/components/AssistantPanel.tsx`, icons in `components/icons.tsx`, styles in `App.css`).
+
+- **Sidebar (left).** The chevron next to *Workspace* collapses it to a 60 px rail: an expand button, a dot showing whether SAP is
+  connected, and one icon per task (hover for its name; the active task is marked). A rail icon switches task just like the list does.
+- **SAP Assistant (right).** The chevron in its header collapses it to a floating **Ask the assistant** button in the bottom-right
+  corner, which shows a red dot when a reply arrived while it was closed. The button opens the assistant as a pop-up over the page
+  (Esc or the cross closes it, the dock button puts it back beside the page). The chat is never reset by any of this: the
+  assistant stays mounted, so the conversation and the text being typed survive collapsing, popping up and docking.
+- **Remembered.** The state is kept in the browser (`localStorage` keys `sap.sidebarCollapsed` and `sap.assistantDocked`); the pop-up itself is
+  not remembered, only docked or not. A window narrower than 1,200 px starts with both panels collapsed the first time.
 
 ## Backend transaction modules
 
@@ -529,8 +543,9 @@ free tier's admission rules under a long batch — watch the first big run.
 
 ## Chat assistant
 
-The **SAP Assistant** is a chat column on the right of the app (`frontend/src/components/AssistantPanel.tsx`)
-that is always visible, on every task and whether or not SAP is connected. It answers from, in order of
+The **SAP Assistant** is a chat column on the right of the app (`frontend/src/components/AssistantPanel.tsx`),
+available on every task and whether or not SAP is connected; it can be collapsed to a floating button and
+opened as a pop-up (see [Collapsible side panels](#collapsible-side-panels)). It answers from, in order of
 authority: (1) the **DVM Guide**, (2) **SAP for Me**, (3) the **live SAP system**, (4) the user's current
 scored results, and last (5) the model's own SAP knowledge, which it must label as general knowledge. It uses
 whichever AI model is selected in the sidebar (see [AI model selection](#ai-model-selection-claude-groq-or-ollama)).

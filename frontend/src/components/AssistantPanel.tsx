@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { useResultsBinding } from "../assistantContext";
+import { ChatIcon, ChevronRight, CloseIcon, DockIcon } from "./icons";
+
+/** docked: beside the page; collapsed: only a floating button; popup: floating over the page. */
+export type AssistantMode = "docked" | "collapsed" | "popup";
 
 interface Message {
   role: "user" | "assistant";
@@ -15,9 +19,15 @@ const SUGGESTIONS = [
   "How many rows does BSEG have?",
 ];
 
-/** The always-visible assistant: answers from the DVM Guide, SAP for Me and the live SAP system, and
+/** The SAP assistant (a docked column, or a floating button and pop-up): answers from the DVM Guide, SAP for Me and the live SAP system, and
  *  (when Find Archiving Objects has results) can discuss and change them. */
-export default function AssistantPanel() {
+export default function AssistantPanel({
+  mode,
+  onModeChange,
+}: {
+  mode: AssistantMode;
+  onModeChange: (mode: AssistantMode) => void;
+}) {
   const results = useResultsBinding();
   const [history, setHistory] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -25,6 +35,33 @@ export default function AssistantPanel() {
   const [error, setError] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // A reply that arrives while only the floating button is showing is flagged on the button
+  const [unread, setUnread] = useState(false);
+  const modeRef = useRef(mode);
+  const previousMode = useRef(mode);
+
+  function changeMode(next: AssistantMode) {
+    if (next !== "collapsed") setUnread(false);
+    onModeChange(next);
+  }
+
+  useEffect(() => {
+    modeRef.current = mode;
+    // Opening the assistant puts the cursor in the question box (not on the first render)
+    if (previousMode.current === "collapsed" && mode !== "collapsed") {
+      setTimeout(() => textareaRef.current?.focus(), 60);
+    }
+    previousMode.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "popup") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onModeChange("collapsed");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mode, onModeChange]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -43,6 +80,7 @@ export default function AssistantPanel() {
     try {
       const res = await api.chat(msg, results?.rows ?? [], results?.recommended ?? [], history);
       setHistory([...nextHistory, { role: "assistant", content: res.reply }]);
+      if (modeRef.current === "collapsed") setUnread(true);
       if (results && res.updated_rows && res.updated_recommended) {
         results.apply(res.updated_rows, res.updated_recommended);
       }
@@ -66,24 +104,52 @@ export default function AssistantPanel() {
   const tableCount = results ? new Set(results.rows.map((r) => r["Table Name"])).size : 0;
 
   return (
-    <aside className="assistant" aria-label="SAP assistant">
+    <>
+    <aside className={`assistant mode-${mode}`} aria-label="SAP assistant" inert={mode === "collapsed"}>
       <div className="assistant-header">
         <div>
-          <span className="assistant-title">💬 SAP Assistant</span>
+          <span className="assistant-title">
+            <span className="assistant-title-icon">
+              <ChatIcon />
+            </span>
+            SAP Assistant
+          </span>
           <span className="assistant-sub">DVM Guide · SAP for Me · live SAP system</span>
         </div>
-        {history.length > 0 && (
+        <div className="assistant-actions">
+          {history.length > 0 && (
+            <button
+              className="btn-link"
+              onClick={() => {
+                setHistory([]);
+                setError("");
+              }}
+              disabled={loading}
+            >
+              Clear
+            </button>
+          )}
+          {mode === "popup" && (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => changeMode("docked")}
+              aria-label="Dock the assistant beside the page"
+              title="Dock beside the page"
+            >
+              <DockIcon />
+            </button>
+          )}
           <button
-            className="btn-link"
-            onClick={() => {
-              setHistory([]);
-              setError("");
-            }}
-            disabled={loading}
+            type="button"
+            className="icon-btn"
+            onClick={() => changeMode("collapsed")}
+            aria-label={mode === "popup" ? "Close the assistant" : "Collapse the assistant"}
+            title={mode === "popup" ? "Close" : "Collapse"}
           >
-            Clear
+            {mode === "popup" ? <CloseIcon /> : <ChevronRight />}
           </button>
-        )}
+        </div>
       </div>
 
       <div className="assistant-context">
@@ -151,5 +217,14 @@ export default function AssistantPanel() {
         </button>
       </form>
     </aside>
+
+    {mode === "collapsed" && (
+      <button type="button" className="assistant-fab" onClick={() => changeMode("popup")}>
+        <ChatIcon />
+        Ask the assistant
+        {unread && <span className="assistant-fab-dot" aria-label="New reply" />}
+      </button>
+    )}
+    </>
   );
 }

@@ -70,18 +70,117 @@ body {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  position: relative;   /* the assistant's floating button and pop-up are placed inside it */
 }
 
 /* ── Sidebar ──────────────────────────────────────────────── */
 .sidebar {
   width: 280px;
   flex-shrink: 0;
+  position: relative;
   background: var(--surface);
   border-right: 1px solid var(--border);
+  z-index: 5;
+  transition: width .3s cubic-bezier(.3, .7, .2, 1);
+}
+.sidebar.collapsed { width: 60px; }
+/* The full panel keeps its own width while the sidebar animates, so nothing reflows */
+.sidebar-clip { position: absolute; inset: 0; overflow: hidden; }
+.sidebar-full {
+  width: 279px;
+  height: 100%;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 0;
+  transition: opacity .2s .1s, visibility 0s;
+}
+.sidebar.collapsed .sidebar-full { opacity: 0; visibility: hidden; transition: opacity .15s, visibility 0s linear .3s; }
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 0 16px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Small square button used to collapse/expand the panels */
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.icon-btn:hover { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
+.icon-btn svg { width: 16px; height: 16px; }
+.icon-btn:focus-visible, .rail-btn:focus-visible, .assistant-fab:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* The strip the sidebar shrinks to: an expand button, the connection dot and one icon per task */
+.sidebar-rail {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 0;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity .15s, visibility 0s linear .3s;
+}
+.sidebar.collapsed .sidebar-rail { opacity: 1; visibility: visible; transition: opacity .2s .12s, visibility 0s; }
+.rail-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); margin: 6px 0 8px; position: relative; }
+.rail-dot.on { background: var(--primary); }
+.rail-btn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 10px;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+}
+.rail-btn svg { width: 19px; height: 19px; }
+.rail-btn:hover { background: var(--tab-bg); color: var(--text); }
+.rail-btn.active { background: var(--primary-tint); color: var(--accent-text); }
+.rail-btn.active::before {
+  content: "";
+  position: absolute;
+  left: -10px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--primary);
+}
+.rail-btn[data-tip]:hover::after, .rail-dot[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  background: var(--header-bg);
+  color: #fff;
+  font-size: 12px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  z-index: 40;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .25);
+  pointer-events: none;
 }
 
 /* ── Login panel ──────────────────────────────────────────── */
@@ -172,6 +271,9 @@ body {
 }
 
 .nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   background: none;
   border: none;
   text-align: left;
@@ -183,6 +285,9 @@ body {
   transition: background .12s, border-color .12s;
 }
 
+.nav-icon { display: grid; place-items: center; width: 18px; height: 18px; flex: none; color: var(--text-muted); }
+.nav-icon svg { width: 18px; height: 18px; }
+.nav-item.active .nav-icon { color: var(--accent-text); }
 .nav-item:hover  { background: var(--tab-bg); }
 .nav-item.active {
   background: var(--primary-tint);
@@ -965,6 +1070,71 @@ body {
 .assistant .chat-bubble { max-width: 92%; }
 @media (max-width: 1100px) {
   .assistant { width: 300px; }
+}
+.assistant-title { display: flex; align-items: center; gap: 8px; }
+.assistant-title-icon { display: grid; place-items: center; width: 18px; height: 18px; color: var(--accent-text); }
+.assistant-title-icon svg { width: 18px; height: 18px; }
+.assistant-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* Not docked: the assistant floats over the page (open) or is out of the way (collapsed) */
+.assistant.mode-popup, .assistant.mode-collapsed {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  bottom: 18px;
+  width: 380px;
+  max-width: calc(100% - 36px);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, .28);
+  overflow: hidden;
+  z-index: 30;
+  transform-origin: bottom right;
+}
+.assistant.mode-popup { transition: opacity .22s, transform .3s cubic-bezier(.3, .7, .2, 1); }
+.assistant.mode-collapsed {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(14px) scale(.98);
+  transition: opacity .18s, transform .25s, visibility 0s linear .25s;
+}
+.assistant-fab {
+  position: absolute;
+  right: 22px;
+  bottom: 22px;
+  height: 52px;
+  padding: 0 20px 0 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  border: none;
+  border-radius: 26px;
+  background: var(--primary);
+  color: var(--primary-text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+  z-index: 29;
+  transition: transform .15s, background .15s;
+}
+.assistant-fab:hover { background: #93cb2e; transform: translateY(-2px); }
+.assistant-fab svg { width: 22px; height: 22px; }
+.assistant-fab-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--danger);
+  border: 2px solid var(--surface);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .sidebar-full, .sidebar-rail, .assistant, .assistant-fab { transition: none !important; }
 }
 
 /* Result sheet tabs (All objects / Recommended) */
