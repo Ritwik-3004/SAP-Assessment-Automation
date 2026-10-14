@@ -29,7 +29,7 @@ from completeness import Tally
 logger = logging.getLogger(__name__)
 
 FATAL = (llm.LLMAuthError, llm.LLMNotConfiguredError, llm.LLMRateLimitError)
-MIN_PART_CHARS = 400        # a text part smaller than this is not split any further
+MIN_PART_CHARS = 150        # a single line (or a run of text) this short is not split any further
 
 
 def _reason(exc: BaseException) -> str:
@@ -63,10 +63,11 @@ def items_per_request(
     return max(1, fits)
 
 
-def chunk_text(text: str, size: int) -> list[str]:
-    """Split *text* into pieces of at most *size* characters, on line breaks where possible. A line longer than
-    *size* (text with no line breaks, e.g. from a PDF) is cut at a space, or in the middle of a word as a last resort,
-    so no piece is ever larger than *size*."""
+def chunk_text(text: str, size: int, max_lines: Optional[int] = None) -> list[str]:
+    """Split *text* into pieces of at most *size* characters (and, if given, at most *max_lines* lines -- a sheet of
+    short rows needs a line limit because the answer grows with the number of rows), on line breaks where possible.
+    A line longer than *size* (text with no line breaks, e.g. from a PDF) is cut at a space, or in the middle of a
+    word as a last resort, so no piece is ever larger than *size*."""
     size = max(50, size)
     out: list[str] = []
     current: list[str] = []
@@ -85,7 +86,7 @@ def chunk_text(text: str, size: int) -> list[str]:
             flush()
             out.append(line[:cut].rstrip())
             line = line[cut:].lstrip()
-        if length + len(line) + 1 > size and current:
+        if current and (length + len(line) + 1 > size or (max_lines and len(current) >= max_lines)):
             flush()
         current.append(line)
         length += len(line) + 1
@@ -105,16 +106,37 @@ class BatchResult:
     calls: int = 0                                      # model calls made (for progress and tests)
 
 
+def _pack(items: list, size: int, weight: Optional[Callable[[Any], int]], max_weight: Optional[int]) -> list[list]:
+    """The first requests: consecutive items, at most *size* each and, with a weight, at most *max_weight* in total
+    (an item heavier than that goes alone)."""
+    batches: list[list] = []
+    current: list = []
+    used = 0
+    for item in items:
+        w = weight(item) if weight else 0
+        if current and (len(current) >= size or (max_weight and used + w > max_weight)):
+            batches.append(current)
+            current, used = [], 0
+        current.append(item)
+        used += w
+    if current:
+        batches.append(current)
+    return batches
+
+
 def run_batched(
     items: list,
     ask: Callable[[list], dict],
     *,
     key: Callable[[Any], Any] = lambda item: item,
     size: int,
+    weight: Optional[Callable[[Any], int]] = None,
+    max_weight: Optional[int] = None,
     retry_missing: bool = True,
     on_batch: Optional[Callable[[int, int], None]] = None,
 ) -> BatchResult:
-    """Ask the model about *items*, *size* at a time. ``ask(batch)`` makes ONE model call and returns
+    """Ask the model about *items*, *size* at a time (and, if *weight* and *max_weight* are given, no more per
+    request than *max_weight* in total, e.g. characters of text). ``ask(batch)`` makes ONE model call and returns
     {key(item): answer} for the items it answered (it may raise, e.g. llm.LLMCutOffError). A batch whose call
     fails is split in two and asked again, down to single items; items the model left out of an answer are asked
     for once more. ``on_batch(done, total_items)`` is called after each call with the items handled so far."""
@@ -177,14 +199,28 @@ def run_batched(
         elif absent:
             give_up(absent, "the model left it out of its answer")
 
-    for start in range(0, total, size):
-        process(items[start:start + size], True)
+    for batch in _pack(items, size, weight, max_weight):
+        process(batch, True)
     return out
 
 
 # ---------------------------------------------------------------------------
 # A long text
 # ---------------------------------------------------------------------------
+
+def _halves(part: str) -> list[str]:
+    """*part* in two, on a line boundary near the middle (so a row of a sheet is never cut); a single long line
+    is cut at a space."""
+    lines = part.splitlines()
+    if len(lines) > 1:
+        target, total = len(part) // 2, 0
+        for i, line in enumerate(lines[:-1], start=1):
+            total += len(line) + 1
+            if total >= target:
+                return ["\n".join(lines[:i]), "\n".join(lines[i:])]
+        return ["\n".join(lines[:-1]), lines[-1]]
+    return chunk_text(part, len(part) // 2 + 1)
+
 
 @dataclass
 class TextResult:
@@ -202,20 +238,20 @@ def run_text_parts(
     *,
     size: int,
     max_parts: int,
+    max_lines: Optional[int] = None,
     what: str = "document",
     tally: Optional[Tally] = None,
     on_part: Optional[Callable[[int, int], None]] = None,
 ) -> TextResult:
-    """Read *text* in parts of at most *size* characters (at most *max_parts* of them; the rest is recorded in
-    *tally* as not read). ``ask(part)`` makes ONE model call about one part and returns what it found; a part
+    """Read *text* in parts of at most *size* characters and *max_lines* lines (at most *max_parts* of them; the
+    rest is recorded in *tally* as not read). ``ask(part)`` makes ONE model call about one part and returns what it found; a part
     whose call fails is split in two and read again. ``on_part(done, total)`` reports progress."""
-    parts = chunk_text(text, size)
+    parts = chunk_text(text, size, max_lines)
     out = TextResult(parts_total=len(parts))
     if len(parts) > max_parts:
         kept_chars = sum(len(p) for p in parts[:max_parts])
         if tally is not None:
             tally.trim(what, kept_chars, len(text))
-            tally.note(f"{what}: only the first {max_parts} of {len(parts)} parts were read.")
         parts = parts[:max_parts]
 
     def read(part: str, label: str) -> None:
@@ -230,13 +266,12 @@ def run_text_parts(
             out.missing.append((label, f"not processed: {_reason(exc)}"))
             return
         except Exception as exc:
-            if len(part) <= MIN_PART_CHARS:
+            if len(part) <= MIN_PART_CHARS and "\n" not in part:
                 logger.warning("Could not read %s: %s", label, exc)
                 out.missing.append((label, _reason(exc)))
                 return
             logger.info("Splitting %s (%d characters) after: %s", label, len(part), exc)
-            halves = chunk_text(part, max(MIN_PART_CHARS, len(part) // 2 + 1))
-            for n, piece in enumerate(halves, start=1):
+            for n, piece in enumerate(_halves(part), start=1):
                 read(piece, f"{label}, half {n}")
             return
         out.results.append(found)

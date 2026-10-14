@@ -174,6 +174,8 @@ export interface ObjectReferenceReview {
       covered: { document: string; tool: string; file: string }[];
       new: { id: string; text: string; file: string; applied?: boolean }[];
       conflicts: { id: string; document: string; tool: string; note: string; file: string; applied?: boolean }[];
+      /** Document conditions the model could not be asked about or whose verdict is missing: never shown as gaps. */
+      not_compared?: { text: string; file: string; reason: string }[];
     };
   }[];
 }

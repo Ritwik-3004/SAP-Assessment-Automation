@@ -132,8 +132,9 @@ class HelpPortalReader:
     def read(self, url: str, max_chars: int = 12000) -> dict:
         """The page at *url* and its condition-type child pages.
 
-        Returns {"pages": [{"title", "url", "text"}], "problem": str}; "pages" is empty and "problem"
-        says why if the page could not be read. Total text is capped at *max_chars*."""
+        Returns {"pages": [{"title", "url", "text"}], "problem": str, "cut": [{"title", "kept", "total"}]}; "pages"
+        is empty and "problem" says why if the page could not be read. Each page is kept in full unless it is longer
+        than *max_chars*; such a page is cut and listed in "cut"."""
         pages: list[dict] = []
         try:
             first = self._page(url)
@@ -183,9 +184,11 @@ class HelpPortalReader:
             except Exception as exc:
                 logger.warning("Could not read Help Portal sub-page '%s': %s", title, exc)
 
-        # share the text budget across pages, the main page first
-        budget = max_chars
+        # Every page is kept in full: the caller reads long text in parts. Only a page longer than *max_chars* is cut,
+        # and that is reported in "cut" so it can be shown to the user.
+        cut = []
         for p in pages:
-            share = max(1500, budget // max(1, len(pages)))
-            p["text"] = p["text"][:share]
-        return {"pages": pages, "problem": ""}
+            if len(p["text"]) > max_chars:
+                cut.append({"title": p["title"], "kept": max_chars, "total": len(p["text"])})
+                p["text"] = p["text"][:max_chars]
+        return {"pages": pages, "problem": "", "cut": cut}

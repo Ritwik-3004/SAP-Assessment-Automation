@@ -422,24 +422,42 @@ def _exec_check_archiving_object(object_filter: str) -> str:
         return f"Error checking archiving object '{object_filter}': {exc}"
 
 
+TOOL_GROUP = 30         # tables per SAP query of the counts / sizes tools
+TOOL_MAX_NAMES = 120    # tables per tool call; more are reported to the model as not queried
+
+
+def _table_names(table_names: list[str]) -> tuple[list[str], int]:
+    """(the table names to query, how many more were given than the limit allows)."""
+    names = list(dict.fromkeys(str(n).strip().upper() for n in (table_names or []) if str(n).strip()))
+    return names[:TOOL_MAX_NAMES], max(0, len(names) - TOOL_MAX_NAMES)
+
+
+def _not_queried(extra: int) -> str:
+    if not extra:
+        return ""
+    return f"\n({extra} more table(s) were not queried: at most {TOOL_MAX_NAMES} per request. Ask again for the rest.)"
+
+
 def _exec_table_counts(table_names: list[str]) -> str:
     if not sap.is_connected:
         return "SAP is not connected - connect via the login panel first."
-    names = [str(n).strip().upper() for n in (table_names or []) if str(n).strip()][:30]
+    names, extra = _table_names(table_names)
     if not names:
         return "No table names given."
     try:
-        result = db02.run_get_table_counts(names)
-        if result.get("status") == "error":
-            return f"DB02 error: {result.get('message', 'unknown error')}"
-        counts = result.get("counts", {})
+        counts: dict = {}
+        for start in range(0, len(names), TOOL_GROUP):
+            result = db02.run_get_table_counts(names[start:start + TOOL_GROUP])
+            if result.get("status") == "error":
+                return f"DB02 error: {result.get('message', 'unknown error')}"
+            counts.update(result.get("counts", {}))
         lines = []
         for n in names:
             if n in counts:
                 lines.append(f"  {n}: {counts[n]:,} entries")
             else:
                 lines.append(f"  {n}: no count found (the table does not exist in this system, or HANA has no statistics for it)")
-        return "Number of entries (HANA table statistics; counts only, no table content is read):\n" + "\n".join(lines)
+        return "Number of entries (HANA table statistics; counts only, no table content is read):\n" + "\n".join(lines) + _not_queried(extra)
     except Exception as exc:
         logger.exception("Chat tool: DB02 table counts failed")
         return f"Error running DB02: {exc}"
@@ -541,21 +559,23 @@ def _exec_largest_tables(limit: int) -> str:
 def _exec_table_sizes(table_names: list[str]) -> str:
     if not sap.is_connected:
         return "SAP is not connected - connect via the login panel first."
-    names = [str(n).strip().upper() for n in (table_names or []) if str(n).strip()][:30]
+    names, extra = _table_names(table_names)
     if not names:
         return "No table names given."
     try:
-        result = db02.run_get_table_sizes(names)
-        if result.get("status") == "error":
-            return f"DB02 error: {result.get('message', 'unknown error')}"
-        sizes = result.get("sizes", {})
+        sizes: dict = {}
+        for start in range(0, len(names), TOOL_GROUP):
+            result = db02.run_get_table_sizes(names[start:start + TOOL_GROUP])
+            if result.get("status") == "error":
+                return f"DB02 error: {result.get('message', 'unknown error')}"
+            sizes.update(result.get("sizes", {}))
         lines = []
         for n in names:
             if n in sizes:
                 lines.append(f"  {n}: {sizes[n].get('volume_gb', '')} GB ({sizes[n].get('volume_mb', '')} MB)")
             else:
                 lines.append(f"  {n}: no size found (not a column-store table in this system, or it does not exist)")
-        return "Table sizes (DB02 / HANA M_CS_TABLES):\n" + "\n".join(lines)
+        return "Table sizes (DB02 / HANA M_CS_TABLES):\n" + "\n".join(lines) + _not_queried(extra)
     except Exception as exc:
         logger.exception("Chat tool: DB02 table sizes failed")
         return f"Error running DB02: {exc}"
@@ -808,7 +828,13 @@ def run_chat(
     system = _SYSTEM.format(results_section=results_section)
 
     messages: list[dict[str, Any]] = []
-    for h in history[-limits["chat_history_messages"]:]:
+    recent = history[-limits["chat_history_messages"]:]
+    if len(history) > len(recent):
+        system += (
+            "\n\nNote: this conversation is longer than what you can see. Only the most recent messages are shown to you. "
+            "If the user refers to something said earlier that you cannot see, say so and ask them to repeat it; never guess."
+        )
+    for h in recent:
         if h.get("role") in ("user", "assistant") and h.get("content"):
             messages.append({"role": h["role"], "content": str(h["content"])})
     messages.append({"role": "user", "content": message})

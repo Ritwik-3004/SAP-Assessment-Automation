@@ -23,12 +23,15 @@ from typing import Callable, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+import batching
 import llm
 import reference_doc
+from completeness import Tally
 
 logger = logging.getLogger(__name__)
 
-MAX_CHUNKS = 8
+MAX_CHUNKS = 8                  # parts of one document that are read; what is beyond them is reported, not dropped
+MATCH_TOKENS_PER_CONDITION = 45  # one {"doc_index": 3, "status": "conflict", "tool_index": 2, "note": "..."} verdict
 _OBJECT_NAME = re.compile(r"^[A-Z0-9_/]{2,30}$")
 
 
@@ -72,18 +75,10 @@ _READ_SYSTEM = (
 )
 
 
-def _chunks(text: str, size: int) -> list[str]:
-    """Split *text* into pieces of about *size* characters on line breaks."""
-    out, current, length = [], [], 0
-    for line in text.splitlines():
-        if length + len(line) + 1 > size and current:
-            out.append("\n".join(current))
-            current, length = [], 0
-        current.append(line)
-        length += len(line) + 1
-    if current:
-        out.append("\n".join(current))
-    return out
+def _part_size(settings: llm.Settings) -> int:
+    """Characters of a document one request reads: what the model takes in, and no more than its answer can plausibly
+    carry (a part holding more than that is cut off and has to be split, which costs an extra request)."""
+    return min(llm.budget(settings)["reference_chars"], max(2000, llm.max_output_tokens(settings) * 4))
 
 
 def extract_reference(
@@ -95,13 +90,17 @@ def extract_reference(
     """What the documents say about archiving objects.
 
     Returns {"objects": {OBJECT: {"conditions": [{"text", "file"}], "archive_before": [{"object", "file"}]}},
-             "used": [filenames], "warnings": [str]}. A file that cannot be read is skipped with a warning.
-    Raises llm.LLMError if the AI model cannot be used."""
-    size = llm.budget(settings)["reference_chars"]
+             "used": [filenames], "warnings": [str], "completeness": {...}}. A file that cannot be read is skipped
+    with a warning. Each document is read part by part (a part whose answer was cut off is split in two); at most
+    MAX_CHUNKS parts of a document are read, and what was not read is in "warnings" and "completeness".
+    Raises llm.LLMError if the AI model cannot be used (a rejected key, a rate limit)."""
+    size = _part_size(settings)
+    max_tokens = min(llm.max_output_tokens(settings), 4000)
     hint = ", ".join(object_names[:60])
     objects: dict[str, dict] = {}
     used: list[str] = []
     warnings: list[str] = []
+    tally = Tally()
 
     for contents, filename in files:
         if on_progress:
@@ -117,19 +116,25 @@ def extract_reference(
         if not text.strip():
             warnings.append(f"{filename}: no text could be extracted (a scanned or image-only file?)")
             continue
-        used.append(filename)
 
-        pieces = _chunks(text, size)
-        if len(pieces) > MAX_CHUNKS:
-            warnings.append(
-                f"{filename}: only the first {MAX_CHUNKS * size:,} characters were read (the document is longer)."
-            )
-            pieces = pieces[:MAX_CHUNKS]
-        for n, piece in enumerate(pieces, start=1):
-            if on_progress:
-                on_progress(f"Analysing {filename} ({n} of {len(pieces)})…")
+        def ask(piece: str) -> "_RefObjects":
             user = f"Archiving objects of particular interest (include others you find too): {hint}\n\nDOCUMENT TEXT:\n{piece}"
-            result = llm.structured(_READ_SYSTEM, user, _RefObjects, max_tokens=2500, settings=settings)
+            return llm.structured(_READ_SYSTEM, user, _RefObjects, max_tokens=max_tokens, settings=settings)
+
+        def progress(done: int, total: int, name: str = filename) -> None:
+            if on_progress:
+                on_progress(f"Analysing {name} ({done} of {total})…")
+
+        read = batching.run_text_parts(
+            text, ask, size=size, max_parts=MAX_CHUNKS, what=filename, tally=tally, on_part=progress
+        )
+        if not read.results and read.missing:
+            if read.fatal is not None:
+                raise read.fatal
+            warnings.append(f"{filename}: the model could not read it ({read.missing[0][1]}).")
+            continue
+        used.append(filename)
+        for result in read.results:
             for item in result.objects:
                 name = norm_object(item.object)
                 if not _OBJECT_NAME.match(name):
@@ -147,7 +152,8 @@ def extract_reference(
                     if _OBJECT_NAME.match(dep_name) and dep_name != name and dep_name not in have_b:
                         have_b.add(dep_name)
                         slot["archive_before"].append({"object": dep_name, "file": filename})
-    return {"objects": objects, "used": used, "warnings": warnings}
+    warnings.extend(tally.sentences())
+    return {"objects": objects, "used": used, "warnings": warnings, "completeness": tally.summary()}
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +197,18 @@ def compare(
                         "only_document": [{"id", "object", "file"}]},
        "conditions": {"covered": [{"document", "tool", "file"}],
                       "new": [{"id", "text", "file"}],
-                      "conflicts": [{"id", "document", "tool", "note", "file"}]}}
-    Items a user can select (gaps and mismatches) carry an "id"."""
+                      "conflicts": [{"id", "document", "tool", "note", "file"}],
+                      "not_compared": [{"text", "file", "reason"}]}}
+    Items a user can select (gaps and mismatches) carry an "id". Document conditions that could not be compared
+    (the model's answer was cut off, a limit was reached, ...) are listed under "not_compared" with the reason, never
+    as gaps; the review's "completeness" says what, if anything, could not be done."""
     reviews: list[dict] = []
-    totals = {"confirmed": 0, "gaps": 0, "mismatches": 0}
+    totals = {"confirmed": 0, "gaps": 0, "mismatches": 0, "not_compared": 0}
     not_in_document: list[str] = []
+    tally = Tally.from_summary(ref.get("completeness"))
+    stopped: Optional[BaseException] = None        # a limit stop: nothing more is asked of the model after it
+    max_tokens = min(llm.max_output_tokens(settings), 4000)
+    batch_size = batching.items_per_request(settings, MATCH_TOKENS_PER_CONDITION, overhead_out_tokens=100, cap=40)
 
     for number, res in enumerate(results, start=1):
         obj = res["object"]
@@ -204,7 +217,7 @@ def compare(
             "object": obj,
             "in_document": entry is not None,
             "dependencies": {"stated": False, "confirmed": [], "only_tool": [], "only_document": []},
-            "conditions": {"covered": [], "new": [], "conflicts": []},
+            "conditions": {"covered": [], "new": [], "conflicts": [], "not_compared": []},
         }
         reviews.append(review)
         if entry is None:
@@ -235,24 +248,39 @@ def compare(
         if not doc_conds:
             continue
         verdicts: dict[int, _Match] = {}
+        not_compared: dict[int, str] = {}       # document condition number -> why it was not compared
         if tool_conds:
-            lines = ["TOOL conditions:"] + [f"{i}. {c['condition']}" for i, c in enumerate(tool_conds, start=1)]
-            lines += ["", "DOCUMENT conditions:"] + [f"{i}. {c['text']}" for i, c in enumerate(doc_conds, start=1)]
-            try:
-                answer = llm.structured(
-                    _MATCH_SYSTEM, f"Archiving object: {obj}\n\n" + "\n".join(lines), _Matches,
-                    max_tokens=1800, settings=settings,
+            if stopped is not None:
+                not_compared = {i: f"not processed: {batching._reason(stopped)}" for i in range(1, len(doc_conds) + 1)}
+            else:
+                tool_lines = ["TOOL conditions:"] + [f"{i}. {c['condition']}" for i, c in enumerate(tool_conds, start=1)]
+
+                def ask(batch: list, obj: str = obj, tool_lines: list = tool_lines) -> dict:
+                    lines = tool_lines + ["", "DOCUMENT conditions:"] + [f"{i}. {c['text']}" for i, c in batch]
+                    answer = llm.structured(
+                        _MATCH_SYSTEM, f"Archiving object: {obj}\n\n" + "\n".join(lines), _Matches,
+                        max_tokens=max_tokens, settings=settings,
+                    )
+                    return {m.doc_index: m for m in answer.items}
+
+                compared = batching.run_batched(
+                    list(enumerate(doc_conds, start=1)), ask, key=lambda numbered: numbered[0], size=batch_size
                 )
-                for m in answer.items:
-                    if 1 <= m.doc_index <= len(doc_conds):
-                        verdicts[m.doc_index] = m
-            except llm.LLMError:
-                raise
-            except Exception as exc:
-                logger.warning("Could not compare conditions of %s: %s", obj, exc)
+                verdicts = compared.results
+                stopped = compared.fatal
+                for (i, _cond), reason in compared.missing:
+                    not_compared[i] = reason
         for i, cond in enumerate(doc_conds, start=1):
             verdict = verdicts.get(i)
             tool_ok = verdict is not None and 1 <= verdict.tool_index <= len(tool_conds)
+            if verdict is not None and verdict.status != "new" and not tool_ok:
+                not_compared[i] = "the model's verdict did not say which tool condition it refers to"
+            if i in not_compared:
+                review["conditions"]["not_compared"].append(
+                    {"text": cond["text"], "file": cond["file"], "reason": not_compared[i]}
+                )
+                totals["not_compared"] += 1
+                continue
             if verdict is not None and verdict.status == "covered" and tool_ok:
                 review["conditions"]["covered"].append(
                     {"document": cond["text"], "tool": tool_conds[verdict.tool_index - 1]["condition"], "file": cond["file"]}
@@ -265,13 +293,20 @@ def compare(
                     "note": verdict.note.strip(), "file": cond["file"],
                 })
                 totals["mismatches"] += 1
-            else:   # "new", or no usable verdict: treated as a gap the user can add
+            else:   # "new", or nothing to compare with (the tool found no conditions): a gap the user can add
                 review["conditions"]["new"].append(
                     {"id": f"{obj}|new|{len(review['conditions']['new'])}", "text": cond["text"], "file": cond["file"]}
                 )
                 totals["gaps"] += 1
+        if review["conditions"]["not_compared"]:
+            skipped = review["conditions"]["not_compared"]
+            tally.miss(
+                f"{obj}: conditions",
+                f"{len(skipped)} of {len(doc_conds)} document conditions could not be compared ({skipped[0]['reason']})",
+            )
 
     return {
         "objects": reviews,
         "summary": {**totals, "not_in_document": not_in_document, "files": ref["used"]},
+        "completeness": tally.summary(),
     }

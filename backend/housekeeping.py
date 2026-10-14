@@ -118,7 +118,11 @@ def find_housekeeping_programs(
                     # DVM Guide didn't name one -- fall through to the SAP
                     # for Me batch below rather than reporting "not found"
                     # purely off the guide.
-                    needs_fallback[name] = found["rationale"]
+                    rationale = found["rationale"]
+                    if len(references[name]) > ref_chars:
+                        # the excerpt was cut to fit the model, so "not named" only holds for the part that was read
+                        rationale += f" (Only the first {ref_chars:,} characters of the DVM Guide section were read.)"
+                    needs_fallback[name] = rationale
 
     if needs_fallback:
         results.update(_search_sap_for_me_batch(needs_fallback, on_progress, settings))

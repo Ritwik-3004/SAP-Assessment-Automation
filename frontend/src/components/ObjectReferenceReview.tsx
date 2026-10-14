@@ -187,9 +187,24 @@ export default function ObjectReferenceReview({ enabled, onApplied }: Props) {
                       </div>
                     )}
 
-                    {(c.new.length > 0 || c.conflicts.length > 0 || c.covered.length > 0) && (
+                    {(c.new.length > 0 || c.conflicts.length > 0 || c.covered.length > 0 || (c.not_compared?.length ?? 0) > 0) && (
                       <div className="oa-conds">
                         <h4>Archiving conditions</h4>
+                        {(c.not_compared?.length ?? 0) > 0 && (
+                          <details open>
+                            <summary className="tx-hint">
+                              ⚠ {c.not_compared!.length} condition(s) could not be compared with the tool's list, so they are not shown as gaps
+                            </summary>
+                            {c.not_compared!.map((g, i) => (
+                              <div key={i} className="oa-ref-check">
+                                <span>
+                                  {g.text}
+                                  <small>From the document: {g.file}. Not compared: {g.reason}</small>
+                                </span>
+                              </div>
+                            ))}
+                          </details>
+                        )}
                         {c.conflicts.map((g) => (
                           <label key={g.id} className="oa-ref-check">
                             <input type="checkbox" checked={g.applied || selected.has(g.id)} disabled={g.applied} onChange={() => toggle(g.id)} />

@@ -50,6 +50,7 @@ from pydantic import BaseModel, Field
 import dvm_guide
 import housekeeping
 import llm
+from completeness import Tally
 
 logger = logging.getLogger(__name__)
 
@@ -289,12 +290,20 @@ def _score(rows: list[dict], on_progress, note, settings: "llm.Settings") -> dic
                 "Rationale": unscored.get(table_name) or "None of the candidates could be scored.",
             })
 
+    tally = Tally()
+    for table_name, reason in unscored.items():
+        tally.miss(table_name, reason)
+    cut = [t for t, e in tables.items() if e.get("excerpt_cut")]
+    if cut:
+        shown = ", ".join(cut[:5]) + (", ..." if len(cut) > 5 else "")
+        tally.note(f"The DVM Guide excerpt was shortened to fit the model's input limit for {len(cut)} table(s): {shown}.")
     result = {
         "status": "ok",
         "rows": scored_rows,
         "recommended": recommended_rows,
         "unscored": [{"table": t, "reason": r} for t, r in unscored.items()],
         "message": "",
+        "completeness": tally.summary(),
     }
     if unscored:
         first_reason = next(iter(unscored.values()))
@@ -322,6 +331,11 @@ def merge_results(previous: dict, new: dict) -> dict:
             out.extend(r for r in source.get(key, []) if r.get("Table Name") == table)
         return out
 
+    tally = Tally()
+    for n in [*(previous.get("completeness") or {}).get("notes", []), *(new.get("completeness") or {}).get("notes", [])]:
+        tally.note(n)
+    for u in new.get("unscored", []):
+        tally.miss(u["table"], u["reason"])
     return {
         **previous,
         "status": "ok",
@@ -329,6 +343,7 @@ def merge_results(previous: dict, new: dict) -> dict:
         "recommended": combine("recommended"),
         "unscored": new.get("unscored", []),
         "message": new.get("message", ""),
+        "completeness": tally.summary(),
     }
 
 
@@ -433,7 +448,10 @@ def _score_one_table(settings: "llm.Settings", table_name: str, entry: dict, ste
     reference = dvm_guide.get_reference(table_name)
     reference_block = ""
     if reference:
-        reference = reference[: llm.budget(settings)["dvm_excerpt_chars"]]
+        limit = llm.budget(settings)["dvm_excerpt_chars"]
+        if len(reference) > limit:
+            entry["excerpt_cut"] = (limit, len(reference))     # reported with the result (see _score)
+            reference = reference[:limit]
         reference_block = (
             "Reference excerpt from SAP's official Data Management Guide for "
             "SAP Business Suite, covering this specific table:\n"

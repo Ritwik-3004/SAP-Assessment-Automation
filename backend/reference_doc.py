@@ -13,10 +13,13 @@ import logging
 from typing import Optional
 
 import openpyxl
+from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
+import batching
 import llm
 import object_descriptions
+from completeness import Tally
 
 logger = logging.getLogger(__name__)
 
@@ -164,54 +167,75 @@ def _extract_text(contents: bytes, filename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Claude-based mapping extraction
+# AI-based mapping extraction (the whole document, part by part)
 # ---------------------------------------------------------------------------
 
-def _extract_mappings_via_llm(text: str, table_names: list[str]) -> dict[str, str]:
-    """
-    Ask the active AI model (Claude or Groq, see llm.py) to extract SAP table →
-    archiving object pairs from *text*. Returns {TABLE_NAME: ARCHIVING_OBJECT}
-    (both uppercased). Raises llm.LLMError if the model can't be reached.
-    """
+class _Pair(BaseModel):
+    key: str = Field(description="The first name of one mapping (the table, or the archiving object).")
+    value: str = Field(description="The name it maps to (the archiving object, or the header table).")
+
+
+class _Pairs(BaseModel):
+    pairs: list[_Pair] = Field(default_factory=list)
+
+
+MAX_PARTS = 16          # parts of one document that are read (a part is small, see _part_limits); the rest is reported
+TOKENS_PER_PAIR = 30    # one {"key": "BKPF", "value": "FI_DOCUMNT"} entry of the answer, with room to spare
+PAIRS_PER_LINE = 1.5    # a row of a sheet holds about one mapping, some hold two
+
+
+def _part_limits(settings: "llm.Settings") -> tuple[int, int]:
+    """(characters, lines) of one part of a document: what the model takes in, and as many lines as its answer can carry."""
+    chars = llm.budget(settings)["reference_chars"]
+    pairs = max(10, (llm.max_output_tokens(settings) - 200) // TOKENS_PER_PAIR)
+    return chars, max(10, int(pairs / PAIRS_PER_LINE))
+
+
+def _extract_pairs(text: str, filename: str, tally: Tally, system: str, hint: str) -> dict[str, str]:
+    """Read *text* part by part (batching.run_text_parts) and merge the {KEY: VALUE} pairs the model found; a later
+    part overrides an earlier one ("the most recently mentioned"). What could not be read, or was beyond the part
+    limit, is recorded in *tally*. Raises llm.LLMError if the model cannot be used, or if nothing could be read."""
     settings = llm.load_settings()
-    char_limit = llm.budget(settings)["reference_chars"]
+    chars, lines = _part_limits(settings)
+    max_tokens = min(llm.max_output_tokens(settings), 4000)
 
-    tables_hint = ", ".join(table_names[:60])  # keep the prompt reasonable
+    def ask(part: str) -> dict[str, str]:
+        result = llm.structured(system, f"{hint}\n\nDocument:\n{part}", _Pairs, max_tokens=max_tokens, settings=settings)
+        return {_norm(p.key): _norm(p.value) for p in result.pairs if _norm(p.key) and _norm(p.value)}
 
-    prompt = f"""You are analysing a reference document from an SAP archiving assessment project.
+    read = batching.run_text_parts(text, ask, size=chars, max_lines=lines, max_parts=MAX_PARTS, what=filename, tally=tally)
+    if not read.results and read.missing:
+        if read.fatal is not None:
+            raise read.fatal
+        raise llm.LLMError(f"{filename}: the model could not read it ({read.missing[0][1]}).")
+    merged: dict[str, str] = {}
+    for found in read.results:
+        merged.update(found)
+    return merged
+
+
+_TABLE_MAPPING_SYSTEM = """You are analysing a reference document from an SAP archiving assessment project.
 The document contains past experience or recommendations mapping SAP TABLE NAMES to ARCHIVING OBJECTS.
 
-Extract every explicit mapping of a table name to an archiving object you can find.
-Return ONLY a JSON object like:
-{{"BKPF": "FI_DOCUMNT", "VBAK": "SD_VBAK", "MKPF": "MM_MATBEL"}}
-
-We are particularly interested in these tables (but extract any you find):
-{tables_hint}
+Extract every explicit mapping of a table name to an archiving object you can find: one pair per mapping, with
+the table name as the key and the archiving object as the value (for example BKPF -> FI_DOCUMNT, VBAK -> SD_VBAK).
 
 Rules:
 - Use exact SAP uppercase naming (e.g. FI_DOCUMNT, not fi_documnt).
-- Only include mappings explicitly stated in the document — never guess.
+- Only include mappings explicitly stated in the document - never guess.
 - If a table appears with multiple objects, use the most recently mentioned one.
-- Return ONLY the JSON object, no extra text.
+- The text may be only one part of a longer document: extract what this part states."""
 
-Document:
-{text[:char_limit]}
-"""
 
-    raw = llm.text("", prompt, max_tokens=2000, settings=settings)
-
-    # Strip optional markdown fences
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) > 1 else raw
-
-    try:
-        mappings: dict = json.loads(raw)
-        return {_norm(k): _norm(v) for k, v in mappings.items() if _norm(v)}
-    except Exception:
-        logger.warning("Could not parse Claude mapping response: %.200s", raw)
-        return {}
-
+def _extract_mappings_via_llm(text: str, table_names: list[str], filename: str = "document", tally: Optional[Tally] = None) -> dict[str, str]:
+    """
+    Ask the active AI model (Claude, Groq or Ollama, see llm.py) to extract SAP table ->
+    archiving object pairs from *text*, reading the WHOLE document part by part. Returns
+    {TABLE_NAME: ARCHIVING_OBJECT} (both uppercased); anything not read is recorded in *tally*.
+    Raises llm.LLMError if the model can't be reached or nothing could be read.
+    """
+    hint = "We are particularly interested in these tables (but extract any you find): " + ", ".join(table_names[:60])
+    return _extract_pairs(text, filename, tally or Tally(), _TABLE_MAPPING_SYSTEM, hint)
 
 
 # ---------------------------------------------------------------------------
@@ -226,13 +250,17 @@ def _read_documents(files: list[tuple[bytes, str]], extract) -> dict:
     A document that can't be read is skipped with a warning. Raises llm.LLMError if the AI
     model can't be used.
 
+    *extract(text, filename, tally)* returns {KEY: VALUE} and records in the tally anything it could not read.
+
     Returns {"mappings": {KEY: VALUE}, "sources": {KEY: filename}, "conflicts": {KEY: [(VALUE,
-    filename)]}, "used": [filename], "warnings": [str]}, or {"error": str} if no document was usable."""
+    filename)]}, "used": [filename], "warnings": [str], "completeness": {...}}, or {"error": str} if no document
+    was usable. Whatever was not read completely is also listed in "warnings"."""
     mappings: dict[str, str] = {}
     sources: dict[str, str] = {}
     conflicts: dict[str, list[tuple[str, str]]] = {}
     used: list[str] = []
     warnings: list[str] = []
+    tally = Tally()
 
     for contents, filename in files:
         try:
@@ -247,7 +275,7 @@ def _read_documents(files: list[tuple[bytes, str]], extract) -> dict:
             warnings.append(f"{filename}: no text could be extracted")
             continue
 
-        found = extract(text)
+        found = extract(text, filename, tally)
         used.append(filename)
         for key, value in found.items():
             if key not in mappings:
@@ -257,7 +285,11 @@ def _read_documents(files: list[tuple[bytes, str]], extract) -> dict:
 
     if not used:
         return {"error": "; ".join(warnings) or "No documents were uploaded."}
-    return {"mappings": mappings, "sources": sources, "conflicts": conflicts, "used": used, "warnings": warnings}
+    warnings.extend(tally.sentences())
+    return {
+        "mappings": mappings, "sources": sources, "conflicts": conflicts, "used": used,
+        "warnings": warnings, "completeness": tally.summary(),
+    }
 
 
 def _suggestion_note(key: str, value: str, docs: dict) -> str:
@@ -311,7 +343,7 @@ def analyze_reference_doc(
         if row.get("Table Name")
     ]
     try:
-        docs = _read_documents(files, lambda text: _extract_mappings_via_llm(text, table_names))
+        docs = _read_documents(files, lambda text, name, tally: _extract_mappings_via_llm(text, table_names, name, tally))
     except llm.LLMError as exc:
         return {"status": "error", "message": str(exc)}
     if "error" in docs:
@@ -361,6 +393,7 @@ def analyze_reference_doc(
         "status": "ok",
         "filename": ", ".join(docs["used"]),
         "warnings": docs["warnings"],
+        "completeness": docs["completeness"],
         "ref_mappings": ref_mappings,
         "annotated_recommended": annotated,
         "matches": matches,
@@ -374,50 +407,27 @@ def analyze_reference_doc(
 # Header tables: reference document maps ARCHIVING OBJECT -> HEADER TABLE
 # ---------------------------------------------------------------------------
 
-def _parse_mapping_json(raw: str) -> dict[str, str]:
-    """Parse the model's {"KEY": "VALUE"} answer (tolerating ``` fences); {} if unusable."""
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        raw = raw[4:].strip() if raw.lower().startswith("json") else raw.strip()
-    try:
-        data = json.loads(raw)
-        return {_norm(k): _norm(v) for k, v in data.items() if _norm(v)}
-    except Exception:
-        logger.warning("Could not parse header-table mapping response: %.200s", raw)
-        return {}
-
-
-def _extract_header_mappings_via_llm(text: str, object_names: list[str]) -> dict[str, str]:
-    """Ask the active AI model for archiving object → header table pairs in *text*.
-    Returns {ARCHIVING_OBJECT: HEADER_TABLE} (both uppercased). Raises llm.LLMError."""
-    settings = llm.load_settings()
-    char_limit = llm.budget(settings)["reference_chars"]
-    objects_hint = ", ".join(object_names[:60])
-
-    prompt = f"""You are analysing a reference document from an SAP archiving assessment project.
+_HEADER_MAPPING_SYSTEM = """You are analysing a reference document from an SAP archiving assessment project.
 The document contains past experience mapping SAP ARCHIVING OBJECTS to their HEADER TABLE
 (the main/root table of the archiving object, e.g. EKKO for MM_EKKO, BKPF for FI_DOCUMNT).
 
-Extract every explicit mapping of an archiving object to its header table you can find.
-Return ONLY a JSON object like:
-{{"MM_EKKO": "EKKO", "FI_DOCUMNT": "BKPF", "SD_VBAK": "VBAK"}}
-
-We are particularly interested in these archiving objects (but extract any you find):
-{objects_hint}
+Extract every explicit mapping of an archiving object to its header table you can find: one pair per mapping,
+with the archiving object as the key and the header table as the value (for example MM_EKKO -> EKKO).
 
 Rules:
 - Use exact SAP uppercase naming.
 - Only include mappings explicitly stated in the document - never guess.
 - Give ONE header table per archiving object; if several are mentioned, use the one the
   document calls the header (or the most recently mentioned).
-- Return ONLY the JSON object, no extra text.
+- The text may be only one part of a longer document: extract what this part states."""
 
-Document:
-{text[:char_limit]}
-"""
-    raw = llm.text("", prompt, max_tokens=2000, settings=settings)
-    return _parse_mapping_json(raw)
+
+def _extract_header_mappings_via_llm(text: str, object_names: list[str], filename: str = "document", tally: Optional[Tally] = None) -> dict[str, str]:
+    """Ask the active AI model for archiving object -> header table pairs, reading the WHOLE document part by part.
+    Returns {ARCHIVING_OBJECT: HEADER_TABLE} (both uppercased); anything not read is recorded in *tally*.
+    Raises llm.LLMError."""
+    hint = "We are particularly interested in these archiving objects (but extract any you find): " + ", ".join(object_names[:60])
+    return _extract_pairs(text, filename, tally or Tally(), _HEADER_MAPPING_SYSTEM, hint)
 
 
 def analyze_header_reference(files: list[tuple[bytes, str]], rows: list[dict]) -> dict:
@@ -436,7 +446,7 @@ def analyze_header_reference(files: list[tuple[bytes, str]], rows: list[dict]) -
     """
     object_names = [_norm(r.get("Archiving Object", "")) for r in rows if r.get("Archiving Object")]
     try:
-        docs = _read_documents(files, lambda text: _extract_header_mappings_via_llm(text, object_names))
+        docs = _read_documents(files, lambda text, name, tally: _extract_header_mappings_via_llm(text, object_names, name, tally))
     except llm.LLMError as exc:
         return {"status": "error", "message": str(exc)}
     if "error" in docs:
@@ -472,6 +482,7 @@ def analyze_header_reference(files: list[tuple[bytes, str]], rows: list[dict]) -
         "status": "ok",
         "filename": ", ".join(docs["used"]),
         "warnings": docs["warnings"],
+        "completeness": docs["completeness"],
         "ref_mappings": ref_mappings,
         "annotated_rows": annotated,
         "matches": matches,

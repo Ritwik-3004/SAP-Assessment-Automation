@@ -171,7 +171,7 @@ def test_text_beyond_the_part_limit_is_reported_as_not_read():
     s = tally.summary()
     assert r.parts_total > 3 and r.parts_read == 3 and len(r.results) == 3
     assert s["trimmed"][0]["what"] == "document" and s["trimmed"][0]["kept"] < s["trimmed"][0]["total"]
-    assert not s["complete"] and "only the first 3 of" in s["notes"][0]
+    assert not s["complete"] and tally.sentences()[0].startswith("document: only")
 
 
 def test_a_text_part_that_cannot_be_read_is_reported_and_the_rest_continues():

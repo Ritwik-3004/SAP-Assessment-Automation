@@ -13,7 +13,7 @@ batching.py); whatever still could not be done, or had to be shortened, is recor
 """
 
 import threading
-from typing import Any
+from typing import Any, Optional
 
 
 class Tally:
@@ -53,6 +53,18 @@ class Tally:
         with self._lock:
             if text not in self._notes:
                 self._notes.append(text)
+
+    @classmethod
+    def from_summary(cls, summary: Optional[dict]) -> "Tally":
+        """A Tally holding what an earlier summary() recorded (None gives an empty one)."""
+        tally = cls()
+        for t in (summary or {}).get("trimmed", []):
+            tally.trim(t["what"], t["kept"], t["total"], t.get("unit", "characters"))
+        for u in (summary or {}).get("unprocessed", []):
+            tally.miss(u["item"], u["reason"])
+        for n in (summary or {}).get("notes", []):
+            tally.note(n)
+        return tally
 
     def merge(self, other: "Tally") -> None:
         for t in other.summary()["trimmed"]:

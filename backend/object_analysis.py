@@ -36,6 +36,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
 
+import batching
 import dvm_guide
 import help_browser
 import helpportal
@@ -45,6 +46,7 @@ import object_reference
 import sap_for_me
 import transactions.db02 as db02
 import transactions.sara_info as sara_info
+from completeness import Tally
 from config import results_folder
 
 logger = logging.getLogger(__name__)
@@ -196,26 +198,99 @@ _EXTRACT_SYSTEM = (
 )
 
 
-def extract_conditions(settings: llm.Settings, obj: str, description: str, blocks: list[dict]) -> list[dict]:
+MAX_SOURCE_PARTS = 8        # parts of one object's source text that are read (a part is up to the model's input budget)
+MAX_PAGE_CHARS = 60000      # a Help Portal page longer than this is cut (and reported)
+TOKENS_PER_CONDITION = 60   # one {"condition": "...", "detail": "...", "block": 2} entry of the answer, with room to spare
+
+
+def extract_conditions(
+    settings: llm.Settings, obj: str, description: str, blocks: list[dict], tally: Optional[Tally] = None
+) -> list[dict]:
     """[{"condition", "detail", "source"}] from *blocks* ({"label", "text"}); each condition's source is the
-    label of the block the model says it came from. Raises llm.LLMError."""
+    label of the block the model says it came from.
+
+    Text that does not fit one request is read in parts (at most MAX_SOURCE_PARTS; the rest is recorded in *tally*);
+    a request whose answer was cut off is split in two and asked again, and a single part whose answer is cut off
+    (more conditions than one answer can carry) is read in smaller pieces (batching), so one long page can no longer
+    cost every condition of its source. What still could not be read is recorded in *tally*.
+    Raises llm.LLMError if the model cannot be used and nothing could be read."""
     if not blocks:
         return []
-    parts = [f"Archiving object: {obj}" + (f" ({description})" if description else ""), "", "TEXT BLOCKS:"]
-    for n, b in enumerate(blocks, start=1):
-        parts.append(f"[{n}] {b['label']}\n---\n{b['text']}\n---")
-    result = llm.structured(_EXTRACT_SYSTEM, "\n".join(parts), _Conditions, max_tokens=1500, settings=settings)
+    tally = tally if tally is not None else Tally()
+    in_chars = llm.budget(settings)["reference_chars"]
+    max_tokens = min(llm.max_output_tokens(settings), 4000)
 
-    all_labels = "; ".join(dict.fromkeys(b["label"] for b in blocks))
+    # blocks longer than one request holds are cut into parts (same label)
+    parts: list[dict] = []
+    for b in blocks:
+        pieces = batching.chunk_text(b["text"], in_chars)
+        for n, piece in enumerate(pieces, start=1):
+            parts.append({"label": b["label"] if len(pieces) == 1 else f"{b['label']} (part {n})", "text": piece})
+    if len(parts) > MAX_SOURCE_PARTS:
+        total_chars = sum(len(p["text"]) for p in parts)
+        parts = parts[:MAX_SOURCE_PARTS]
+        tally.trim(f"{obj}: source text", sum(len(p["text"]) for p in parts), total_chars)
+
+    def call(labelled: list[tuple[str, str]]) -> list[list[dict]]:
+        """One request about some labelled texts: the conditions found in each, in the same order."""
+        lines = [f"Archiving object: {obj}" + (f" ({description})" if description else ""), "", "TEXT BLOCKS:"]
+        for n, (label, text) in enumerate(labelled, start=1):
+            lines.append(f"[{n}] {label}\n---\n{text}\n---")
+        result = llm.structured(_EXTRACT_SYSTEM, "\n".join(lines), _Conditions, max_tokens=max_tokens, settings=settings)
+        found: list[list[dict]] = [[] for _ in labelled]
+        all_labels = "; ".join(dict.fromkeys(label for label, _ in labelled))
+        for c in result.conditions:
+            if not _norm(c.condition):
+                continue
+            n = c.block if 1 <= c.block <= len(labelled) else 0
+            found[max(0, n - 1)].append(
+                {"condition": c.condition.strip(), "detail": c.detail.strip(), "source": labelled[n - 1][0] if n else all_labels}
+            )
+        return found
+
+    def ask(batch: list[int]) -> dict[int, list[dict]]:
+        found = call([(parts[i]["label"], parts[i]["text"]) for i in batch])
+        return {i: found[n] for n, i in enumerate(batch)}
+
+    size = batching.items_per_request(settings, TOKENS_PER_CONDITION * 4, overhead_out_tokens=100, cap=len(parts))
+    read = batching.run_batched(
+        list(range(len(parts))), ask, size=max(1, size),
+        weight=lambda i: len(parts[i]["text"]), max_weight=in_chars,
+    )
+    results: dict[int, list[dict]] = dict(read.results)
+    fatal = read.fatal
+    # a part with more conditions than one answer can carry: read it in smaller pieces
+    for i, reason in list(read.missing):
+        if fatal is not None:
+            break
+        if "cut off" not in reason:
+            continue
+        retry = Tally()
+        pieces = batching.run_text_parts(
+            parts[i]["text"], lambda piece, i=i: call([(parts[i]["label"], piece)])[0],
+            size=max(300, len(parts[i]["text"]) // 2), max_parts=MAX_SOURCE_PARTS,
+            what=f"{obj}: {parts[i]['label']}", tally=retry,
+        )
+        fatal = pieces.fatal
+        if pieces.results:      # (if nothing could be read the part stays in read.missing and is reported below)
+            results[i] = [c for found in pieces.results for c in found]
+            read.missing.remove((i, reason))
+            tally.merge(retry)
+    if not results and read.missing:
+        if fatal is not None:
+            raise fatal
+        raise llm.LLMError(read.missing[0][1])
+    for i, reason in read.missing:
+        tally.miss(f"{obj}: {parts[i]['label']}", f"not processed: {batching._reason(fatal)}" if fatal is not None else reason)
+
     out: list[dict] = []
     seen: set[str] = set()
-    for c in result.conditions:
-        key = _norm(c.condition)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        label = blocks[c.block - 1]["label"] if 1 <= c.block <= len(blocks) else all_labels
-        out.append({"condition": c.condition.strip(), "detail": c.detail.strip(), "source": label})
+    for i in sorted(results):
+        for c in results[i]:
+            key = _norm(c["condition"])
+            if key and key not in seen:
+                seen.add(key)
+                out.append(c)
     return out
 
 
@@ -559,10 +634,15 @@ class ObjectAnalysisJob:
                 self._close_help_tab()               # close it straight away; the page is read headlessly
                 sara_url = url
                 self._step(obj, "Reading the Help Portal page")
-                page = reader.read(url, max_chars=budget["article_chars"] * 2)
+                page = reader.read(url, max_chars=MAX_PAGE_CHARS)
                 if page["problem"]:
                     sara_note = page["problem"]
                 else:
+                    for cut in page.get("cut", []):
+                        t = Tally()
+                        t.trim(f"{obj}: Help Portal page '{cut['title']}'", cut["kept"], cut["total"])
+                        for sentence in t.sentences():
+                            self._warn(sentence)
                     blocks = [{"label": f"{SRC_SARA} - {p['title']}", "text": p["text"]} for p in page["pages"]]
                     sources[SRC_SARA] = f"read {len(page['pages'])} page(s): " + " | ".join(p["title"] for p in page["pages"])
         if sara_note:
@@ -596,12 +676,19 @@ class ObjectAnalysisJob:
         return self._extract_into(settings, obj, description, blocks, sources, label)
 
     def _extract_into(self, settings, obj, description, blocks, sources, label) -> list[dict]:
+        tally = Tally()
         try:
-            found = extract_conditions(settings, obj, description, blocks)
+            found = extract_conditions(settings, obj, description, blocks, tally)
         except llm.LLMError as exc:
             sources[label] = f"{sources.get(label, '')} - could not extract conditions: {exc}".strip(" -")
             return []
-        sources[label] = f"{sources.get(label, '')} - {len(found)} condition(s)".strip(" -")
+        note = f"{sources.get(label, '')} - {len(found)} condition(s)".strip(" -")
+        if not tally.complete:
+            # something was too long to read in full, or a part could not be read: say so in the sources and warn
+            note += " - INCOMPLETE: " + "; ".join(tally.sentences(limit=3))
+            for sentence in tally.sentences():
+                self._warn(f"{obj} ({label}): {sentence}")
+        sources[label] = note
         return found
 
     def _sap_for_me_blocks(self, obj, settings, sfm, sources) -> list[dict]:
@@ -678,12 +765,14 @@ class ObjectAnalysisJob:
             if not ref["used"]:
                 raise RuntimeError("; ".join(ref["warnings"]) or "No reference document could be read.")
             review = object_reference.compare(settings, snapshot, ref, on_progress=progress)
-            review["warnings"] = ref["warnings"]
+            # what could not be read or compared is shown with the document warnings, never left out
+            extra = [s for s in Tally.from_summary(review["completeness"]).sentences() if s not in ref["warnings"]]
+            review["warnings"] = ref["warnings"] + extra
             with self._lock:
                 self._review = review
                 self._annotate_results(review)
                 self._ref_state.update(
-                    status="done", message="Reference check finished.", warnings=list(ref["warnings"]),
+                    status="done", message="Reference check finished.", warnings=list(review["warnings"]),
                 )
             self._save_workbook()
         except Exception as exc:

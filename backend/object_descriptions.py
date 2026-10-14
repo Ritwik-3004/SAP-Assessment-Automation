@@ -24,6 +24,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+import batching
 import llm
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,8 @@ logger = logging.getLogger(__name__)
 CACHE_PATH = Path(__file__).parent / "resources" / "archiving_object_descriptions.json"
 AI_PREFIX = "(AI-suggested) "
 NOT_FOUND = "(description not found)"
-MAX_AI_OBJECTS = 40
+MAX_AI_OBJECTS = 40          # objects per request; more are asked in further requests (batching), none are skipped
+TOKENS_PER_DESCRIPTION = 32  # one {"archiving_object": "FI_DOCUMNT", "description": "Financial Accounting Documents"} item
 
 _lock = threading.Lock()
 
@@ -191,18 +193,24 @@ def _from_ai(objects: list[str], settings: Optional[llm.Settings]) -> dict[str, 
     settings = settings or llm.load_settings()
     if llm.not_configured_message(settings):
         return {}
-    try:
-        names = objects[:MAX_AI_OBJECTS]
+    names = list(dict.fromkeys(objects))
+    max_tokens = min(llm.max_output_tokens(settings), 4000)
+
+    def ask(batch: list[str]) -> dict[str, str]:
         result: _ObjectDescriptions = llm.structured(
-            _AI_SYSTEM, "Archiving objects:\n" + "\n".join(f"- {n}" for n in names),
-            _ObjectDescriptions, max_tokens=1200, settings=settings,
+            _AI_SYSTEM, "Archiving objects:\n" + "\n".join(f"- {n}" for n in batch),
+            _ObjectDescriptions, max_tokens=max_tokens, settings=settings,
         )
-        asked = set(names)
-        return {
-            item.archiving_object.strip().upper(): item.description.strip()
-            for item in result.items
-            if item.archiving_object.strip().upper() in asked and item.description.strip()
-        }
+        # an empty description is an answer too ("I do not recognise it"): it is not asked for again
+        return {item.archiving_object.strip().upper(): item.description.strip() for item in result.items}
+
+    try:
+        size = batching.items_per_request(settings, TOKENS_PER_DESCRIPTION, overhead_out_tokens=100, cap=MAX_AI_OBJECTS)
+        read = batching.run_batched(names, ask, size=size)
     except Exception as exc:
         logger.warning("AI description lookup failed: %s", exc, exc_info=True)
         return {}
+    for name, reason in read.missing:
+        if "left it out" not in reason:     # (an object the model does not mention is simply not recognised)
+            logger.warning("No AI description for %s: %s", name, reason)
+    return {k: v for k, v in read.results.items() if v}
