@@ -103,3 +103,23 @@ export function TaskIcon({ id }: { id: string }) {
       );
   }
 }
+
+/** Icons of the three folded settings rows in the sidebar. */
+export const PlugIcon = () => (
+  <Svg>
+    <path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0V8zM12 17v4" />
+  </Svg>
+);
+
+export const SparkIcon = () => (
+  <Svg>
+    <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3zM19 16l.7 1.8L21.5 18.5l-1.8.7L19 21l-.7-1.8-1.8-.7 1.8-.7L19 16z" />
+  </Svg>
+);
+
+export const MailIcon = () => (
+  <Svg>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="M3 7l9 6 9-6" />
+  </Svg>
+);

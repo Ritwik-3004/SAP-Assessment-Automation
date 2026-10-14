@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 
-export default function SapForMeCredentialsPanel() {
+export default function SapForMeCredentialsPanel({ onSummary }: { onSummary?: (text: string) => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
@@ -19,6 +19,10 @@ export default function SapForMeCredentialsPanel() {
       setSelectedEmail(creds.email ?? "");
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    onSummary?.(selectedEmail || email.trim() || "No account saved");
+  }, [selectedEmail, email, onSummary]);
 
   function handleProfileChange(value: string) {
     setSelectedEmail(value);

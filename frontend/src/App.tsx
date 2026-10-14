@@ -10,7 +10,8 @@ import ObjectAnalysisPanel from "./components/ObjectAnalysisPanel";
 import OpenItemAnalysisPanel from "./components/OpenItemAnalysisPanel";
 import FinalReportPanel from "./components/FinalReportPanel";
 import AssistantPanel, { type AssistantMode } from "./components/AssistantPanel";
-import { ChevronLeft, ChevronRight, TaskIcon } from "./components/icons";
+import SettingsRow from "./components/SettingsRow";
+import { ChevronLeft, ChevronRight, MailIcon, PlugIcon, SparkIcon, TaskIcon } from "./components/icons";
 import { AssistantProvider } from "./assistantContext";
 import ObjectAnalysisBadge from "./components/ObjectAnalysisBadge";
 import OpenItemAnalysisBadge from "./components/OpenItemAnalysisBadge";
@@ -30,6 +31,7 @@ const TASKS = [
 ] as const;
 
 type Tab = (typeof TASKS)[number]["id"];
+type SettingsRowId = "connection" | "ai" | "sfm";
 
 // The side panels remember how the user left them. A narrow window starts with both collapsed.
 const NARROW_PX = 1200;
@@ -57,6 +59,10 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>({ connected: false });
   const [activeTab, setActiveTab] = useState<Tab>("TOP_TABLES");
   const [modelLabel, setModelLabel] = useState("");
+  // The Settings rows under the tasks: one open at a time. Connection opens by itself while not connected.
+  const [openRow, setOpenRow] = useState<SettingsRowId | null>("connection");
+  const [aiSummary, setAiSummary] = useState("");
+  const [sfmSummary, setSfmSummary] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadFlag(SIDEBAR_KEY, window.innerWidth < NARROW_PX));
   // docked: beside the page; collapsed: a floating button; popup: floating over the page
   const [assistantMode, setAssistantMode] = useState<AssistantMode>(() =>
@@ -82,16 +88,23 @@ export default function App() {
     api.sapInfo().then((info) => {
       if (info.connected && info.system) {
         setConnection({ connected: true, system: info.system, user: info.user ?? "" });
+        setOpenRow((row) => (row === "connection" ? null : row));      // already connected: nothing to fill in
       }
     }).catch(() => {});
   }, []);
 
+  function toggleRow(id: SettingsRowId) {
+    setOpenRow((row) => (row === id ? null : id));
+  }
+
   function handleConnected(state: ConnectionState) {
     setConnection(state);
+    setOpenRow((row) => (row === "connection" ? null : row));          // connected: the tasks are what is needed now
   }
 
   function handleDisconnected() {
     setConnection({ connected: false });
+    setOpenRow("connection");                                            // not connected: the form is what is needed
   }
 
   const panelMap: Record<Tab, React.ReactNode> = {
@@ -146,17 +159,7 @@ export default function App() {
                 </button>
               </div>
 
-              <LoginPanel
-                connection={connection}
-                onConnected={handleConnected}
-                onDisconnected={handleDisconnected}
-              />
-
-              <ModelSettingsPanel onChanged={setModelLabel} />
-
-              <SapForMeCredentialsPanel />
-
-              {connection.connected && (
+              {connection.connected ? (
                 <nav className="tx-nav">
                   <p className="nav-label">Tasks</p>
                   {TASKS.map((task) => (
@@ -172,7 +175,45 @@ export default function App() {
                     </button>
                   ))}
                 </nav>
+              ) : (
+                <p className="nav-hint">Connect to SAP to unlock the tasks.</p>
               )}
+
+              <p className="nav-label settings-label">Settings</p>
+              <div className="settings-group">
+                <SettingsRow
+                  icon={<PlugIcon />}
+                  title="Connection"
+                  summary={connection.connected ? `Connected — ${connection.system}` : "Not connected"}
+                  tone={connection.connected ? "ok" : "bad"}
+                  open={openRow === "connection"}
+                  onToggle={() => toggleRow("connection")}
+                >
+                  <LoginPanel
+                    connection={connection}
+                    onConnected={handleConnected}
+                    onDisconnected={handleDisconnected}
+                  />
+                </SettingsRow>
+                <SettingsRow
+                  icon={<SparkIcon />}
+                  title="AI model"
+                  summary={aiSummary || "Loading…"}
+                  open={openRow === "ai"}
+                  onToggle={() => toggleRow("ai")}
+                >
+                  <ModelSettingsPanel onChanged={setModelLabel} onSummary={setAiSummary} />
+                </SettingsRow>
+                <SettingsRow
+                  icon={<MailIcon />}
+                  title="SAP for Me"
+                  summary={sfmSummary || "No account saved"}
+                  open={openRow === "sfm"}
+                  onToggle={() => toggleRow("sfm")}
+                >
+                  <SapForMeCredentialsPanel onSummary={setSfmSummary} />
+                </SettingsRow>
+              </div>
             </div>
           </div>
 

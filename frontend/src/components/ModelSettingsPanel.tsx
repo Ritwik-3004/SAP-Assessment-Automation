@@ -4,6 +4,8 @@ import type { LlmSettings, LlmTestResult, LlmUsage } from "../types";
 
 interface Props {
   onChanged: (label: string) => void;
+  /** a one-line summary for the folded sidebar row, e.g. "Groq · Qwen 3.8 27B · 26% used" (of today's tokens) */
+  onSummary?: (text: string) => void;
 }
 
 function UsageBar({ used, limit }: { used: number; limit: number }) {
@@ -15,7 +17,7 @@ function UsageBar({ used, limit }: { used: number; limit: number }) {
   );
 }
 
-export default function ModelSettingsPanel({ onChanged }: Props) {
+export default function ModelSettingsPanel({ onChanged, onSummary }: Props) {
   const [settings, setSettings] = useState<LlmSettings | null>(null);
   const [provider, setProvider] = useState<"anthropic" | "groq" | "ollama">("anthropic");
   const [model, setModel] = useState("");
@@ -49,6 +51,13 @@ export default function ModelSettingsPanel({ onChanged }: Props) {
     const timer = setInterval(refreshUsage, 20000);
     return () => clearInterval(timer);
   }, [applySettings, refreshUsage]);
+
+  useEffect(() => {
+    if (!settings || !onSummary) return;
+    const limit = usage?.limits?.tpd;
+    const pct = limit ? Math.round((usage!.tokens / limit) * 100) : null;
+    onSummary(pct === null ? settings.label : `${settings.label} · ${pct}% used`);
+  }, [settings, usage, onSummary]);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();

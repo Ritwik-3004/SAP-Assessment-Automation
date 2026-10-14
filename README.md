@@ -43,6 +43,7 @@ result could not cover because of a model's limits), `tests/` (tests with a simu
 | Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on tiny tables (SWWWIHEAD and BKPF, including two tables in parallel and a month field): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the saving were tested offline with a fake SAP, as were the Fields for Table Analysis sheet (listed table skips the questions, unlisted or unusable table is asked, sheet missing) and the re-run with additional fields (replaces the result; cancelled or failed re-run keeps the old one). The sheet-driven run and the re-run have **not yet been run against a live system**. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis) |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
 | SAP Assistant (chat column that can collapse to a floating button: DVM Guide, SAP for Me, live SAP, scored results) | Implemented. **Checked live:** the DB02 largest-table / table-size tools against a real system (REPOSRC 2.63 GB), and the model choosing the DVM Guide, DB02 and general-knowledge routes. **Not yet run live:** the SAP for Me search tool and the other SAP tools through the chat window — see [Chat assistant](#chat-assistant) for known gaps. **Streaming** (word by word, status line, stops when the page is left): checked live on Groq (GPT-OSS 20B, with a DVM Guide tool call) and in a browser against a scripted model; Claude and Ollama streaming are tested with simulated streams only (no Claude key or Ollama model was available) |
+| Sidebar layout: tasks first, Connection / AI model / SAP for Me as folded rows with a status line | Checked in a real browser (headless Chrome, 23 checks) against the real backend with a switchable fake SAP connection: all seven tasks are in view with no scrolling, rows open one at a time, Disconnect opens the Connection row and replaces the tasks with a hint, a restored session leaves the rows closed, the icon rail still works. Not tried with a live SAP session; see [Collapsible side panels](#collapsible-side-panels) |
 | Several saved SAP / SAP for Me logins with a dropdown | Working; storage and endpoints tested offline with temporary files — see [Saved connection details](#saved-connection-details) |
 | AI model switch (Claude, Groq free tier, or Ollama on this computer) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared**. Ollama: tested live with a tiny 270M model and offline with a fake server; **not yet tried with a real 7–8B model** — see [AI model selection](#ai-model-selection-claude-groq-or-ollama) |
 | Leaving a task and coming back (every task keeps its state in the backend; runs and reviews continue while another task is open) | Tested in a browser with a faked SAP, AI model and results folder: leaving mid-run and returning, finished results, reference-review step and ticks, page refresh. **Not yet checked** against live SAP or a real AI model, or with very long runs |
@@ -145,7 +146,13 @@ machines with no internet access.
 Both side panels can be tucked away to give the middle of the page more room (`frontend/src/App.tsx`,
 `frontend/src/components/AssistantPanel.tsx`, icons in `components/icons.tsx`, styles in `App.css`).
 
-- **Sidebar (left).** The chevron next to *Workspace* collapses it to a 60 px rail: an expand button, a dot showing whether SAP is
+- **Sidebar layout (left).** The **tasks come first**, so a signed-in user never scrolls to reach them. Below them is a **Settings** group of three folded rows
+  (`components/SettingsRow.tsx`): **Connection**, **AI model** and **SAP for Me**. Each shows its status on one line, so nothing has to be opened to see it
+  (a green or red dot with "Connected — <system>" or "Not connected"; the model and how much of today's tokens are used, e.g. "Groq · Qwen 3.8 27B · 26% used";
+  the saved SAP for Me account), and opens on click, one row at a time, with the same panel as before inside. While SAP is not connected the Connection row opens
+  by itself, its sign-in form is in view and the task list is replaced by "Connect to SAP to unlock the tasks."; once connected, or when a session is restored after a
+  reload, the rows are closed and the tasks are what you see. The panels stay mounted while a row is closed, so a half-typed form and the usage refresh are not lost.
+- **Sidebar rail.** The chevron next to *Workspace* collapses it to a 60 px rail: an expand button, a dot showing whether SAP is
   connected, and one icon per task (hover for its name; the active task is marked). A rail icon switches task just like the list does.
 - **SAP Assistant (right).** The chevron in its header collapses it to a floating **Ask the assistant** button in the bottom-right
   corner, which shows a red dot when a reply arrived while it was closed. The button opens the assistant as a pop-up over the page
@@ -333,8 +340,8 @@ looks for one instead of just leaving the table with nothing:
    the model, which is told they are less authoritative and must clearly name a program for the
    table before one is used; a rationale that came from a forum post says so. Notes and
    Knowledge Base Articles always win: Community is only searched when there are none. This requires SAP for
-   Me sign-in credentials — enter and save them once in the sidebar's "SAP for Me
-   Credentials" panel (stored in `sap_for_me_credentials.json` at the project root,
+   Me sign-in credentials — enter and save them once in the sidebar's **SAP for Me** row
+   under Settings (stored in `sap_for_me_credentials.json` at the project root,
    git-ignored, same plaintext-JSON pattern as `sap_credentials.json`); every scoring
    run that needs this fallback logs in once and reuses that single browser session
    across every table needing it, since logging in per table would be far too slow.
@@ -490,7 +497,7 @@ how much was read, see [Model limits](#model-limits-complete-or-says-what-is-mis
 
 ## AI model selection (Claude, Groq or Ollama)
 
-The sidebar's **AI Model** panel chooses which model every AI step uses — scoring, the
+The sidebar's **AI model** row (under Settings) chooses which model every AI step uses — scoring, the
 housekeeping lookup (DVM Guide and SAP for Me stages), reference-document analysis and the
 chat assistant. There is nothing to change per step: pick a model once and all of them
 follow it. The header shows the active model (e.g. "AI: Groq · GPT-OSS 120B").
