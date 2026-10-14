@@ -116,6 +116,15 @@ class LLMTooLargeError(LLMError):
     pass
 
 
+class LLMCutOffError(LLMError):
+    """The model stopped because it reached its output limit (or its answer could not be read because it was cut
+    off). *partial* is whatever text had been written. Callers that work in parts split the work and ask again."""
+
+    def __init__(self, message: str, partial: str = ""):
+        super().__init__(message)
+        self.partial = partial
+
+
 class LLMRateLimitError(LLMError):
     def __init__(self, message: str, daily: bool = False, retry_after: Optional[float] = None):
         super().__init__(message)
@@ -638,6 +647,49 @@ def _join_rounds(earlier: list[str], last: str) -> str:
     return "\n\n".join(p for p in [*earlier, last] if p)
 
 
+CUT_OFF_MESSAGE = (
+    "The model's answer was cut off before it finished (its output limit was reached). "
+    "Try fewer items at a time or switch to Claude."
+)
+CUT_OFF_NOTE = "[The answer was cut off by the model's length limit.]"
+CONTINUE_PROMPT = "Continue exactly where you stopped. Do not repeat anything you already wrote."
+MAX_CONTINUATIONS = 2       # how many times a chat answer that hit the length limit is asked to go on
+
+
+class _Answer:
+    """The text of one chat answer for the three tool loops: what the model wrote before each tool call, then the
+    final text -- which takes several requests when the model hits its length limit (it is asked to go on, up to
+    MAX_CONTINUATIONS times, and the answer says so if it is still cut off)."""
+
+    def __init__(self, on_token: Optional[Callable[[str], None]]):
+        self.on_token = on_token
+        self.earlier: list[str] = []    # text before tool calls (only kept when streaming, as before)
+        self.parts: list[str] = []      # the final text so far, one piece per request
+        self.continuations = 0
+
+    def tool_round(self, written: str) -> None:
+        """A request ended in tool calls: any text before them stays in the answer."""
+        text = ("".join(self.parts) + written).strip()
+        self.parts = []
+        if self.on_token and text:
+            self.earlier.append(text)
+            self.on_token("\n\n")
+
+    def text_round(self, written: str, cut: bool) -> Optional[str]:
+        """A request ended in text. Returns the finished answer, or None when the model has to be asked to go on."""
+        self.parts.append(written)
+        if cut and self.continuations < MAX_CONTINUATIONS:
+            self.continuations += 1
+            return None
+        final = "".join(self.parts).strip()
+        if cut:
+            logger.warning("A chat answer was still cut off after %d continuation(s)", self.continuations)
+            final = f"{final}\n\n{CUT_OFF_NOTE}"
+            if self.on_token:
+                self.on_token(f"\n\n{CUT_OFF_NOTE}")
+        return _join_rounds(self.earlier, final)
+
+
 _DROP_KEYS = {
     "title", "default", "examples", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
     "minLength", "maxLength", "pattern", "minItems", "maxItems", "format",
@@ -718,10 +770,7 @@ def _groq_structured(
         choice = response.choices[0]
         content = choice.message.content or ""
         if getattr(choice, "finish_reason", None) == "length":
-            raise LLMError(
-                "The model's answer was cut off before it finished (output limit reached). "
-                "Try fewer items at a time or switch to Claude."
-            )
+            raise LLMCutOffError(CUT_OFF_MESSAGE, partial=content)
         try:
             return schema.model_validate(_parse_json(content))
         except (json.JSONDecodeError, ValidationError) as exc:
@@ -746,7 +795,11 @@ def _groq_text(settings: Settings, system: str, user: str, max_tokens: int) -> s
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
     response = _groq_chat(settings, messages, max_tokens=max_tokens)
-    return (response.choices[0].message.content or "").strip()
+    choice = response.choices[0]
+    content = (choice.message.content or "").strip()
+    if getattr(choice, "finish_reason", None) == "length":
+        raise LLMCutOffError(CUT_OFF_MESSAGE, partial=content)
+    return content
 
 
 def _groq_tool_loop(
@@ -770,18 +823,31 @@ def _groq_tool_loop(
         for t in tools
     ]
     messages: list[dict] = [{"role": "system", "content": system}] + list(history)
-    earlier: list[str] = []     # text written before a tool call (only kept when streaming)
+    answer = _Answer(on_token)
+    rounds, continuing = 0, False
 
-    for _ in range(max_rounds):
+    while True:
+        if not continuing:
+            if rounds >= max_rounds:
+                return None
+            rounds += 1
+        continuing = False
         response = _groq_chat(settings, messages, max_tokens=1500, tools=oa_tools, on_token=on_token)
-        message = response.choices[0].message
+        choice = response.choices[0]
+        message = choice.message
         tool_calls = getattr(message, "tool_calls", None) or []
-        written = (message.content or "").strip()
+        written = message.content or ""
+        cut = getattr(choice, "finish_reason", None) == "length"
         if not tool_calls:
-            return _join_rounds(earlier, written)
-        if on_token and written:
-            earlier.append(written)
-            on_token("\n\n")
+            final = answer.text_round(written, cut)
+            if final is not None:
+                return final
+            messages += [{"role": "assistant", "content": written}, {"role": "user", "content": CONTINUE_PROMPT}]
+            continuing = True       # asking the model to go on is not a tool round
+            continue
+        if cut:
+            raise LLMCutOffError("The model's request to look something up was cut off by its length limit.", partial=written)
+        answer.tool_round(written)
 
         messages.append({
             "role": "assistant",
@@ -808,7 +874,6 @@ def _groq_tool_loop(
                 "tool_call_id": tc.id,
                 "content": execute_tool(tc.function.name, args),
             })
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1187,9 +1252,10 @@ def _ollama_structured(settings: Settings, system: str, user: str, schema: type[
         data = _ollama_chat(settings, messages, max_tokens=max_tokens, schema=json_schema)
         content = _ollama_content(data)
         if data.get("done_reason") == "length":
-            raise LLMError(
+            raise LLMCutOffError(
                 "The local model's answer was cut off before it finished (output limit reached). "
-                "Try fewer items at a time, pick a larger model, or switch to Claude."
+                "Try fewer items at a time, pick a larger model, or switch to Claude.",
+                partial=content,
             )
         try:
             return schema.model_validate(_parse_json(content))
@@ -1212,7 +1278,11 @@ def _ollama_text(settings: Settings, system: str, user: str, max_tokens: int) ->
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
-    return _ollama_content(_ollama_chat(settings, messages, max_tokens=max_tokens))
+    data = _ollama_chat(settings, messages, max_tokens=max_tokens)
+    content = _ollama_content(data)
+    if data.get("done_reason") == "length":
+        raise LLMCutOffError(CUT_OFF_MESSAGE, partial=content)
+    return content
 
 
 def _ollama_tool_loop(
@@ -1236,21 +1306,33 @@ def _ollama_tool_loop(
     ]
     messages: list[dict] = [{"role": "system", "content": system}] + list(history)
 
-    earlier: list[str] = []     # text written before a tool call (only kept when streaming)
+    answer = _Answer(on_token)
+    rounds, continuing = 0, False
 
-    for _ in range(max_rounds):
+    while True:
+        if not continuing:
+            if rounds >= max_rounds:
+                return None
+            rounds += 1
+        continuing = False
         feed, flush = _hide_think(on_token) if on_token else (None, None)
         data = _ollama_chat(settings, messages, max_tokens=1500, tools=oa_tools, on_piece=feed)
         if flush:
             flush()
         message = data.get("message") or {}
         calls = message.get("tool_calls") or []
-        written = _ollama_content(data)
+        written = _THINK_TAGS.sub("", message.get("content") or "")
+        cut = data.get("done_reason") == "length"
         if not calls:
-            return _join_rounds(earlier, written)
-        if on_token and written:
-            earlier.append(written)
-            on_token("\n\n")
+            final = answer.text_round(written, cut)
+            if final is not None:
+                return final
+            messages += [{"role": "assistant", "content": written}, {"role": "user", "content": CONTINUE_PROMPT}]
+            continuing = True       # asking the model to go on is not a tool round
+            continue
+        if cut:
+            raise LLMCutOffError("The model's request to look something up was cut off by its length limit.", partial=written)
+        answer.tool_round(written)
 
         messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
         for call in calls:
@@ -1266,7 +1348,6 @@ def _ollama_tool_loop(
                 args = {}
             logger.info("Chat tool call: %s(%s)", name, args)
             messages.append({"role": "tool", "tool_name": name, "content": execute_tool(name, args)})
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1307,13 +1388,20 @@ def _usage_of(response) -> int:
 
 @_anthropic_errors
 def _anthropic_structured(settings: Settings, system: str, user: str, schema, max_tokens: int):
-    response = _anthropic_client().messages.parse(
-        model=settings.model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        output_format=schema,
-    )
+    try:
+        response = _anthropic_client().messages.parse(
+            model=settings.model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_format=schema,
+        )
+    except ValidationError as exc:
+        # The SDK reads the answer text itself and raises before the stop reason can be looked at; JSON that ends
+        # abruptly is what an answer cut off by the output limit looks like.
+        if any(e.get("type") == "json_invalid" for e in exc.errors()):
+            raise LLMCutOffError(CUT_OFF_MESSAGE) from exc
+        raise LLMError(f"The model returned an answer in the wrong format: {str(exc).splitlines()[0][:200]}") from exc
     _record_usage(settings.model, _usage_of(response))
     return response.parsed_output
 
@@ -1327,7 +1415,10 @@ def _anthropic_text(settings: Settings, system: str, user: str, max_tokens: int)
         kwargs["system"] = system
     response = _anthropic_client().messages.create(**kwargs)
     _record_usage(settings.model, _usage_of(response))
-    return response.content[0].text.strip()
+    content = response.content[0].text.strip()
+    if response.stop_reason == "max_tokens":
+        raise LLMCutOffError(CUT_OFF_MESSAGE, partial=content)
+    return content
 
 
 @_anthropic_errors
@@ -1342,9 +1433,15 @@ def _anthropic_tool_loop(
 ) -> Optional[str]:
     client = _anthropic_client()
     messages: list[dict[str, Any]] = list(history)
-    earlier: list[str] = []     # text written before a tool call (only kept when streaming)
+    answer = _Answer(on_token)
+    rounds, continuing = 0, False
 
-    for _ in range(max_rounds):
+    while True:
+        if not continuing:
+            if rounds >= max_rounds:
+                return None
+            rounds += 1
+        continuing = False
         if on_token:
             with client.messages.stream(
                 model=settings.model, max_tokens=1500, system=system, messages=messages, tools=tools
@@ -1358,12 +1455,18 @@ def _anthropic_tool_loop(
             )
         _record_usage(settings.model, _usage_of(response))
 
-        written = "".join(b.text for b in response.content if hasattr(b, "text")).strip()
+        written = "".join(b.text for b in response.content if hasattr(b, "text"))
         if response.stop_reason != "tool_use":
-            return _join_rounds(earlier, written)
-        if on_token and written:
-            earlier.append(written)
-            on_token("\n\n")
+            cut = response.stop_reason == "max_tokens"
+            if cut and not written.strip():
+                raise LLMCutOffError(CUT_OFF_MESSAGE)
+            final = answer.text_round(written, cut)
+            if final is not None:
+                return final
+            messages += [{"role": "assistant", "content": written}, {"role": "user", "content": CONTINUE_PROMPT}]
+            continuing = True       # asking the model to go on is not a tool round
+            continue
+        answer.tool_round(written)
 
         assistant_content = list(response.content)
         tool_results = []
@@ -1378,7 +1481,6 @@ def _anthropic_tool_loop(
             })
         messages.append({"role": "assistant", "content": assistant_content})
         messages.append({"role": "user", "content": tool_results})
-    return None
 
 
 # ---------------------------------------------------------------------------
