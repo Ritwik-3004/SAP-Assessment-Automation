@@ -277,6 +277,21 @@ export const api = {
   saveHeaderReference: (rows: Record<string, string>[], final: Record<string, string>[]) =>
     post<{ saved: boolean; path: string }>("/api/header-reference/save", { rows, final }),
 
+  retentionStart: async (source: { filename?: string; file?: File }, documents: File[]) => {
+    const formData = new FormData();
+    documents.forEach((d) => formData.append("files", d));
+    if (source.file) formData.append("file", source.file);
+    if (source.filename) formData.append("filename", source.filename);
+    const res = await fetch(`${BASE}/api/retention/start`, { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail ?? res.statusText);
+    }
+    return res.json() as Promise<{ status: "started"; total: number; objects: string[] }>;
+  },
+  retentionProgress: () => get<import("../types").RetentionSnapshot>("/api/retention/progress"),
+  retentionEntries: () => get<{ entries: import("../types").RetentionEntry[] }>("/api/retention/entries"),
+  retentionCancel: () => post<{ ok: boolean }>("/api/retention/cancel", {}),
   openItemStart: async (source: { filename?: string; file?: File }) => {
     const formData = new FormData();
     if (source.file) formData.append("file", source.file);

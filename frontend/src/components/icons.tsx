@@ -94,6 +94,13 @@ export function TaskIcon({ id }: { id: string }) {
           <path d="M12 7v5l3 2" />
         </Svg>
       );
+    case "RETENTION":
+      return (
+        <Svg width={1.9}>
+          <rect x="4" y="5" width="16" height="15" rx="2" />
+          <path d="M4 10h16M9 3v4M15 3v4M8 14h3" />
+        </Svg>
+      );
     default:
       return (
         <Svg width={1.9}>

@@ -37,6 +37,7 @@ import credentials_store
 import table_analysis
 import object_analysis
 import open_item_analysis
+import retention
 import final_report
 import transactions.taana as taana
 import transactions.db15 as db15
@@ -1250,6 +1251,64 @@ def open_item_analysis_query(req: OpenItemQuery):
 def open_item_analysis_cancel():
     """Stop after the query now running; finished objects stay in the workbook."""
     open_item_analysis.job.cancel()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Retention requirements (the retention period of each archiving object, found in a retention document)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/retention/start")
+def start_retention(
+    files: list[UploadFile] = File(...),
+    file: UploadFile | None = File(None),
+    filename: str = Form(""),
+):
+    """Find the retention period of each archiving object in one or more retention reference documents
+    (Excel, Word, PDF, PowerPoint, CSV or text), saying where in the document each period was found.
+    *files* are the retention documents; the archiving objects are read from the "Grouped by Object" sheet of
+    *file* (an upload) or *filename* (a file in the Find Archiving Objects for Tables results folder).
+    Runs in the background; poll /progress."""
+    if retention.job.is_active():
+        raise HTTPException(status_code=409, detail="A retention analysis is already running.")
+
+    if file is not None and file.filename:
+        contents = file.file.read()
+    elif filename:
+        contents = _result_file("BATCH", filename).read_bytes()
+    else:
+        raise HTTPException(status_code=400, detail="Choose the file with the archiving objects, or upload one.")
+    try:
+        objects = object_analysis.parse_objects(contents, prefer="grouped")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read the file: {exc}")
+
+    documents = [(f.file.read(), f.filename or "document") for f in files if f.filename]
+    if not documents:
+        raise HTTPException(status_code=400, detail="Upload the retention document.")
+    try:
+        retention.job.start(objects, documents)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "started", "total": len(objects), "objects": [o["object"] for o in objects]}
+
+
+@app.get("/api/retention/progress")
+def retention_progress():
+    return retention.job.snapshot()
+
+
+@app.get("/api/retention/entries")
+def retention_entries():
+    """What was read from the retention document(s), for checking the extraction."""
+    return {"entries": retention.job.entries()}
+
+
+@app.post("/api/retention/cancel")
+def retention_cancel():
+    retention.job.cancel()
     return {"ok": True}
 
 

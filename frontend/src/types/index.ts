@@ -108,6 +108,61 @@ export interface OpenItemResult {
   total_rows: number;
 }
 
+export interface RetentionAlternative {
+  series: string;
+  retention: string;
+  trigger: string;
+  reference: string;
+}
+
+export interface RetentionRecord {
+  object: string;
+  description: string;
+  state: "queued" | "running" | "done" | "no_match" | "failed" | "skipped";
+  /** the period exactly as the document words it */
+  retention: string;
+  /** the period in years when it is a single number, else null */
+  years: number | null;
+  period_type: "" | "Fixed" | "After an event" | "Permanent" | "See document";
+  trigger: string;
+  series: string;
+  code: string;
+  function: string;
+  confidence: "" | "high" | "medium" | "low";
+  /** where in which document the period was found */
+  reference: string;
+  basis: string;
+  reason: string;
+  alternatives: RetentionAlternative[];
+  note: string;
+}
+
+export interface RetentionSnapshot {
+  status: "idle" | "running" | "done" | "error";
+  total: number;
+  completed: number;
+  message: string | null;
+  documents: { name: string; entries: number; method: "table" | "AI" }[];
+  entry_count: number;
+  records: RetentionRecord[];
+  output_path: string | null;
+  warnings: string[];
+}
+
+export interface RetentionEntry {
+  id: number;
+  file: string;
+  location: string;
+  function: string;
+  name: string;
+  code: string;
+  description: string;
+  trigger: string;
+  retention: string;
+  basis: string;
+  method: "table" | "AI";
+}
+
 export interface ObjectAnalysisRecord {
   object: string;
   description: string;
@@ -202,6 +257,7 @@ export type TaskId =
   | "TABLE_ANALYSIS"
   | "OBJECT_ANALYSIS"
   | "OPEN_ITEM_ANALYSIS"
+  | "RETENTION"
   | "FINAL_REPORT";
 
 export interface FinalReportSource {

@@ -8,6 +8,7 @@ import HeaderTablePanel from "./components/HeaderTablePanel";
 import TableAnalysisPanel from "./components/TableAnalysisPanel";
 import ObjectAnalysisPanel from "./components/ObjectAnalysisPanel";
 import OpenItemAnalysisPanel from "./components/OpenItemAnalysisPanel";
+import RetentionPanel from "./components/RetentionPanel";
 import FinalReportPanel from "./components/FinalReportPanel";
 import AssistantPanel, { type AssistantMode } from "./components/AssistantPanel";
 import SettingsRow from "./components/SettingsRow";
@@ -27,6 +28,7 @@ const TASKS = [
   { id: "TABLE_ANALYSIS", label: "Table Analysis" },
   { id: "OBJECT_ANALYSIS", label: "Archiving Object Analysis" },
   { id: "OPEN_ITEM_ANALYSIS", label: "Open Item Analysis" },
+  { id: "RETENTION", label: "Retention Requirements" },
   { id: "FINAL_REPORT", label: "Final report generation" },
 ] as const;
 
@@ -114,6 +116,7 @@ export default function App() {
     TABLE_ANALYSIS: <TableAnalysisPanel />,
     OBJECT_ANALYSIS: <ObjectAnalysisPanel />,
     OPEN_ITEM_ANALYSIS: <OpenItemAnalysisPanel />,
+    RETENTION: <RetentionPanel />,
     FINAL_REPORT: <FinalReportPanel />,
   };
 

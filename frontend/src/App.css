@@ -1375,3 +1375,4 @@ body {
 
 .completeness-notice { gap: 4px; }
 .completeness-notice ul { margin: 4px 0 0; padding-left: 18px; }
+.ta-status.no_match { background: #f3f4f6; color: #6b7280; }

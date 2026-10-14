@@ -17,6 +17,7 @@ RESULT_FOLDERS = {
     "TABLE_ANALYSIS": "Table Analysis",
     "OBJECT_ANALYSIS": "Archiving Object Analysis",
     "OPEN_ITEM_ANALYSIS": "Open Item Analysis",
+    "RETENTION": "Retention Requirements",
     "FINAL_REPORT": "Final report generation",
 }
 # Screenshots/text dumped when a SAP for Me sign-in fails (diagnostics, not results)

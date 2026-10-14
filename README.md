@@ -39,6 +39,7 @@ result could not cover because of a model's limits), `tests/` (tests with a simu
 | Object descriptions always filled (run → remembered list → SAP → AI-suggested) | Working; verified live (override from a reference document, SAP lookup of the description) and offline with fake SAP/AI. The SAP stage reads table `ARCH_TXT`, whose layout was confirmed live with `debug-arch-def-query?archiving_object=FI_DOCUMNT&table=ARCH_TXT`; the other stages guarantee a value even if that lookup fails — see [Object descriptions](#object-descriptions) |
 | Find Header Tables (SE16N/`ARCH_DEF`) | Working for objects with one top-level segment |
 | Archiving Object Analysis (conditions from SARA's information page, DVM Guide and SAP for Me; objects to archive first from SARA's network) | **Run end to end against a live system** on FI_DOCUMNT and SD_VBAK (all three sources, dependencies, workbook); the two-step split (step 1, then SAP for Me in the background) was tested offline with fakes and live on SD_VBAK. The reference-document check was tested offline with real PowerPoint/Excel/Word files and canned model answers, and live with a generated deck. The tab handling, failure cases and ordering were also tested offline with fakes. Not yet run on the full list of recommended objects (about 5 minutes per object with all sources) or on a machine whose default browser is not Edge/Chrome — see [Archiving Object Analysis](#archiving-object-analysis) |
+| Retention Requirements (the retention period of each archiving object, found in an uploaded retention document, with a note of where it was found) | **Run live** on Groq (GPT-OSS 120B) against the sample schedule in `backend/resources` (62 entries) and six of the current recommended objects, matching only on the model's choice of entry: FI_DOCUMNT → General Accounting, 10 Years (correct); generic technical objects such as SOBL and WORKITEM → no match after the prompt was tightened. Reading Word tables, the prompt pre-filter for small models, the AI path for non-table documents (tested with canned answers), failure handling, the workbook and the endpoints were tested offline. **Not yet run** with Claude or Ollama, with a PDF/PowerPoint/Excel schedule, with several documents, or on a schedule that is not this sample — see [Retention Requirements](#retention-requirements) |
 | Open Item Analysis (the sheet's open-item query per archiving object, run in DB02's SQL Editor, results to Excel — objects read from the Grouped by Object sheet, one workbook sheet per object) | **Run live on the OTE sandbox (client 100)** with the real DB02 SQL Editor: the query runner (SQL errors caught, zero rows, 2,500-row results, recovery after errors), and the whole job on IDOC, BC_SBAL, WORKITEM and an object without a query (workbook and Summary checked). Editing a query while another runs, cancel and the endpoints were tested offline with a fake DB02. **Not yet run:** the long queries (FI_DOCUMNT, SD_VBAK, MM_EKKO … on big tables). The sheet's WORKITEM query still fails until its client column is corrected (BC_SBAL's already was, and ran in the app) — see [Open Item Analysis](#open-item-analysis) |
 | Table Analysis (TAANA ad hoc variant per header table, results to Excel) | **Run end to end against a live system** on tiny tables (SWWWIHEAD and BKPF, including two tables in parallel and a month field): field list (date, year and month fields offered), ad hoc variant with a year-grouped date plus another field, immediate background job, wait for "Completed", result copied to Excel. The question flow, several tables, skipping, a failed job and the saving were tested offline with a fake SAP, as were the Fields for Table Analysis sheet (listed table skips the questions, unlisted or unusable table is asked, sheet missing) and the re-run with additional fields (replaces the result; cancelled or failed re-run keeps the old one). The sheet-driven run and the re-run have **not yet been run against a live system**. **Not yet run** on large tables (long waits) or with many tables — see [Table Analysis](#table-analysis) |
 | Header tables: DVM Guide + SAP for Me resolution of ambiguous objects, and reference-document review | Ran live once on ~20 objects; most resolved from ARCH_DEF, the rest via DVM Guide / SAP for Me. That run exposed objects left blank (no ARCH_DEF entries) and a search failing on `/` in namespaced names — both fixed since (every object now gets a header table; see below), checked offline with fake SAP/AI/browser sessions and then **re-tested live on the same ~20 objects**. Low-confidence rows are best guesses to be confirmed by the reference document |
@@ -167,8 +168,8 @@ Each of the following has its own `backend/transactions/*.py` module and single-
 FastAPI endpoint (see [API Reference](#api-reference)), usable directly (e.g. via
 `/docs` or curl) for development/debugging. The UI only offers the task-oriented tools
 (Generate Table List, Find Archiving Objects for Tables, Find Header Tables for Archiving
-Objects, Table Analysis, Archiving Object Analysis, Open Item Analysis and Final report
-generation), each of which (except the last, which only reads the others' results) drives one or
+Objects, Table Analysis, Archiving Object Analysis, Open Item Analysis, Retention Requirements and Final report
+generation), each of which (except Retention Requirements, which reads a document, and the last, which only reads the others' results) drives one or
 more of the transactions below with its own automation — for example SE16N looks up a header table via `ARCH_DEF` (see
 [Find Header Tables for Archiving Objects](#find-header-tables-for-archiving-objects)). The generic
 single-item `run()` functions (browse a table, show a definition, list objects, …) have no
@@ -197,6 +198,7 @@ sub-folder per task, named exactly like the task in the sidebar:
 | `results/Table Analysis/` | `Table analysis.xlsx` |
 | `results/Archiving Object Analysis/` | `Archiving object analysis.xlsx` |
 | `results/Open Item Analysis/` | `Open item analysis.xlsx` |
+| `results/Retention Requirements/` | `Retention requirements.xlsx` |
 | `results/Final report generation/` | `Final report - Overview.xlsx` and `Final report - Object details.xlsx` |
 
 There is no Save or Download button anywhere: a task writes its workbook the moment its
@@ -628,11 +630,12 @@ The rule is that **no table data and no client data goes to the AI model.** What
 - **Reference documents are the one place document content reaches the model**, because the model has to read them. Before the text of a document
   is sent, a dialog (`frontend/src/components/SendToModelDialog.tsx`) says it will go to the AI model (naming it, and whether it is an online service or runs on this
   computer), tells the user to make sure it holds no client data or other sensitive information, and only enables **Send to the AI model** once the user
-  ticks that they checked. Cancel or Esc sends nothing. It covers the table and header-table reviews and the Archiving Object Analysis check. The app cannot
+  ticks that they checked. Cancel or Esc sends nothing. It covers the table and header-table reviews, the Archiving Object Analysis check and the Retention Requirements task. The app cannot
   inspect a document for sensitive content, and the check is in the user interface only: the upload endpoints themselves do not ask.
 - **Metadata that does reach the model:** table names and descriptions (including custom `Z*` tables), archiving object names and descriptions, the archiving
   definition structure (segment names) when settling a header table, public SAP text (DVM Guide, SAP Notes and Knowledge Base Articles, SAP Community, Help Portal),
   the chat's table names, sizes and entry counts, archiving-session facts (dates, record counts, file sizes), and whatever the user types in the chat.
+- **Retention Requirements** sends the text of the uploaded retention document and the archiving object names and descriptions (no table or client data), after the same dialog.
 - **Never sent:** table sizes during scoring, results workbooks, SAP and SAP for Me credentials, and anything from Table Analysis, Open Item Analysis or Final
   report generation (those tasks do not use the model).
 - **Where it goes:** Claude and Groq are online services; Ollama runs on this computer and refuses any other address. Choose Ollama if even the metadata must
@@ -1060,6 +1063,43 @@ The same works after the run has finished.
 - **Row limit.** The SQL Editor cuts a result off at its *Max. No. of Rows* field (1,000 by default). The runner raises it to 10,000 and notes when a result reaches that.
 - **Sheet queries that fail.** WORKITEM's query filters SWWWIHEAD on `MANDT`, but that table's client column is `CLIENT`, so it fails on this system until the sheet says `W.CLIENT = '300'` (checked live — 35 result rows with client 100). BC_SBAL's query used to have the same problem with BALHDR (`MANDANT`); the sheet now has `L.MANDANT = '300'` and it runs. The client substitution handles those column names too. An edit in the query box also fixes a single run.
 
+## Retention Requirements
+
+The **Retention Requirements** task (`frontend/src/components/RetentionPanel.tsx`, `backend/retention.py`) finds the retention period of each recommended archiving object in a
+retention reference document (a records retention schedule) and says where in the document each period was found.
+
+**Input.** (1) The archiving objects: by default the **Grouped by Object** sheet of the workbook saved by **Find Archiving Objects for Tables** (the panel preselects
+`archiving_objects_with_reference.xlsx`, else `archiving_objects_scored.xlsx`; the same reading as Open Item Analysis); **Upload a different file** to use another.
+(2) One or more **retention documents** — Excel, Word, PDF, PowerPoint, CSV or text. Because the document's text goes to the AI model, the **Send to the AI model** dialog
+asks the user to confirm it holds no client data first. SAP is not used, so the task does not need a connection.
+
+**1. Reading the document** (`read_documents`). A retention schedule is normally a table, so **tables in Word, Excel and CSV files are read exactly, row by row**: the columns are
+recognised by their headings (*Retention Requirement* / *Period*, *Record Series Name*, *Series Code*, *Trigger Event*, *Description*, *Function*, and a regulation / citation / basis
+column if there is one), a group heading row such as "Administration" becomes the function of the rows below it, and rows with extra merged cells are aligned from the right. Every
+entry therefore knows its file, table and row. A document without such a table (a PDF, a slide deck, prose) is read by the AI model, which lists the record series with their periods
+exactly as written; each entry is then located in the text (nearest *Page n* / *Slide n* heading) and its reference says it was read by the model. **What was read** can be opened under
+the results (entries, locations, periods) to check the extraction; it is also the second sheet of the workbook.
+
+**2. Matching.** A schedule lists business records, not SAP objects, so the AI model is shown the object's name and description together with the schedule's entries (numbered) and picks
+**the one entry whose records the object holds, or none**. It can only pick a numbered entry, so it cannot invent one, and **the retention period, trigger and regulation are copied from
+the entry**, never written by the model. If all entries fit the model's prompt budget they are all shown (Claude); for the smaller budgets of Groq and Ollama the model first lists what the
+object holds and the entries are pre-selected by keyword. The prompt asks for a wrong match to be avoided: an object whose data no entry clearly covers — typically generic technical
+objects such as links or logs — gets **no match** and the reason, and confidence is *high* only when the entry names the same kind of record. Other entries that could also apply are listed
+as alternatives (usually none). The object's description comes from the file, the remembered list or the AI (the "(AI-suggested)" label is dropped before it is used).
+
+**3. Result.** For each object: the **retention period** exactly as the document words it (and in years when it is a single number, with *Fixed* / *After an event* / *Permanent*), the trigger
+event, the matched record series and code, the function, the confidence, the regulation if the document gives one, a short reason, and the **Reference** note, for example
+`'Records-Retention-Schedule.docx' — table 1, row 34 — FIN-002 General Ledger (function: Finance & Accounting)`. Rows can be opened for the reason and the alternatives. The workbook
+`results/Retention Requirements/Retention requirements.xlsx` is saved automatically (and rewritten as each object finishes; a numbered copy if it is open in Excel) with the sheets
+*Retention requirements* and *Entries read*.
+
+**Things to know.**
+- The match is the model's judgement, and a retention schedule is not organised by SAP object: **check the matches**, especially medium and low confidence. A "no match" means the schedule
+  has no entry that clearly covers the object, not that there is no requirement.
+- The bundled `backend/resources/Records-Retention-Schedule-Sample 1.docx` is a sample (62 record series in 14 functions) for trying the task.
+- A document whose table has no heading containing "retention", or a scanned / image-only PDF, cannot be read exactly; the first falls back to the AI path, the second gives "no text could be extracted".
+- With a rate-limited model (Groq's free tier) a run takes about 20 seconds per object (6 objects took about 2 minutes); a daily limit stops the run with the model's message and keeps what was matched.
+
 ## Table Analysis
 
 The **Table Analysis** task (`frontend/src/components/TableAnalysisPanel.tsx`) runs a TAANA analysis for each header table and
@@ -1312,6 +1352,10 @@ Key endpoints:
 | GET | `/api/open-item-analysis/result?object=` | One object's result (columns and the first 500 rows) for the preview |
 | POST | `/api/open-item-analysis/query` | Run the user's own or edited query for an object: body `{object, query}` (read-only SELECT only; HTTP 400 otherwise); it replaces that object's result |
 | POST | `/api/open-item-analysis/cancel` | Stop after the query now running |
+| POST | `/api/retention/start` | Start the Retention Requirements task: form fields `files` (the retention document(s)) and either `file` (an upload) or `filename` (a file in the Find Archiving Objects for Tables results folder) for the archiving objects on its Grouped by Object sheet; runs in the background |
+| GET | `/api/retention/progress` | Status, per-object results (retention period, trigger, matched record series, confidence, reference, reason, alternatives), what was read from each document, and the saved path |
+| GET | `/api/retention/entries` | The retention entries read from the document(s), for checking the extraction |
+| POST | `/api/retention/cancel` | Stop after the objects being matched |
 | GET | `/api/final-report/sources` | The result files the final report would be built from, with each one's status (found / fallback / missing) |
 | POST | `/api/final-report/generate` | Build `Final report - Overview.xlsx` and `Final report - Object details.xlsx` from the saved results and save them in `results/Final report generation/`; returns the two full paths, one summary row per archiving object and warnings |
 | POST | `/api/object-analysis/cancel` | Stop after the current object; finished objects stay in the workbook |
