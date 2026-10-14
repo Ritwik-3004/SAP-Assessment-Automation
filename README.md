@@ -606,6 +606,9 @@ Help Portal page needs several requests per object where it used to be cut to on
 
 **Not built:** a "retry the incomplete items" button for these tasks (only scoring has one); to redo a reference review upload the document again, or pick a model with
 larger limits. Per-model limits other than Groq's published ones and Qwen's output limit are learned only from refusals.
+Two further ideas were considered and deliberately left for later, because nothing needs them yet: a **preflight estimate** (before a long Groq run, the expected
+requests, tokens and time against today's remaining allowance) and **reading spreadsheet mappings with code** when a sheet has recognisable table and archiving
+object columns (the model would then only handle free text, which would also save tokens and time).
 
 ## Data sent to the AI model
 
