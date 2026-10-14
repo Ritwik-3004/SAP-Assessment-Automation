@@ -33,10 +33,11 @@ from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
 
 from config import results_folder
+import batching
 import llm
 import object_descriptions
-import object_reference
 import reference_doc
+from completeness import Tally
 
 logger = logging.getLogger(__name__)
 
@@ -236,16 +237,31 @@ def _locate(text: str, entry: dict) -> str:
     return ""
 
 
-def _entries_via_ai(text: str, filename: str, settings: llm.Settings, warnings: list[str]) -> list[dict]:
-    size = llm.budget(settings)["reference_chars"]
-    pieces = object_reference._chunks(text, size)
-    if len(pieces) > MAX_AI_CHUNKS:
-        warnings.append(f"{filename}: only the first {MAX_AI_CHUNKS * size:,} characters were read (the document is longer).")
-        pieces = pieces[:MAX_AI_CHUNKS]
+def _part_size(settings: llm.Settings) -> int:
+    """Characters of a document one request reads: what the model takes in, and no more than its answer can carry
+    (the same sizing the reference reviews use)."""
+    return min(llm.budget(settings)["reference_chars"], max(2000, llm.max_output_tokens(settings) * 4))
+
+
+def _entries_via_ai(text: str, filename: str, settings: llm.Settings, warnings: list[str], tally: Tally) -> list[dict]:
+    """The document is read part by part (a part whose answer is cut off is split and asked again); what could not be
+    read goes into *tally*. Raises the model's error if it is unusable (rejected key, rate limit)."""
+    max_tokens = min(llm.max_output_tokens(settings), 4000)
+
+    def ask(piece: str) -> "_Entries":
+        return llm.structured(_EXTRACT_SYSTEM, "DOCUMENT TEXT:\n" + piece, _Entries, max_tokens=max_tokens, settings=settings)
+
+    read = batching.run_text_parts(
+        text, ask, size=_part_size(settings), max_parts=MAX_AI_CHUNKS, what=filename, tally=tally
+    )
+    if read.fatal is not None:
+        raise read.fatal
+    if not read.results and read.missing:
+        warnings.append(f"{filename}: the model could not read it ({read.missing[0][1]}).")
+        return []
     out: list[dict] = []
     seen: set[tuple] = set()
-    for piece in pieces:
-        result = llm.structured(_EXTRACT_SYSTEM, "DOCUMENT TEXT:\n" + piece, _Entries, max_tokens=3000, settings=settings)
+    for result in read.results:
         for e in result.entries:
             key = (e.record_series.strip().lower(), e.code.strip().lower(), e.retention.strip().lower())
             if not e.retention.strip() or not (e.record_series.strip() or e.code.strip()) or key in seen:
@@ -261,10 +277,11 @@ def _entries_via_ai(text: str, filename: str, settings: llm.Settings, warnings: 
     return out
 
 
-def read_documents(files: list[tuple[bytes, str]], settings: llm.Settings, on_progress=None) -> dict:
+def read_documents(files: list[tuple[bytes, str]], settings: llm.Settings, tally: Optional[Tally] = None, on_progress=None) -> dict:
     """Every retention entry in the uploaded documents: {"entries": [...], "documents": [{"name", "entries",
-    "method"}], "warnings": [...]}. Unreadable documents are skipped with a warning; raises llm.LLMError if the AI
-    model is needed but cannot be used."""
+    "method"}], "warnings": [...]}. Unreadable documents are skipped with a warning; what the model's limits kept
+    from being read is recorded in *tally*; raises llm.LLMError if the AI model is needed but cannot be used."""
+    tally = tally if tally is not None else Tally()
     entries: list[dict] = []
     documents: list[dict] = []
     warnings: list[str] = []
@@ -284,7 +301,7 @@ def read_documents(files: list[tuple[bytes, str]], settings: llm.Settings, on_pr
                     continue
                 if on_progress:
                     on_progress(f"{filename} has no retention table; the AI model is reading it…")
-                found = _entries_via_ai(text, filename, settings, warnings)
+                found = _entries_via_ai(text, filename, settings, warnings, tally)
         except ValueError as exc:
             warnings.append(str(exc))
             continue
@@ -403,7 +420,8 @@ _MATCH_SYSTEM = (
 )
 
 
-def _candidates(obj: str, description: str, entries: list[dict], budget: int, settings: llm.Settings) -> list[dict]:
+def _candidates(obj: str, description: str, entries: list[dict], budget: int, settings: llm.Settings,
+                tally: Optional[Tally] = None) -> list[dict]:
     """The entries to show the model for one object: all of them if they fit the prompt budget, otherwise the best
     keyword matches (using the model's own list of what the object holds)."""
     total = sum(len(compact(e)) + 8 for e in entries)
@@ -427,12 +445,19 @@ def _candidates(obj: str, description: str, entries: list[dict], budget: int, se
             break
         chosen.append(e)
         used += size
+    if tally is not None:
+        tally.note(
+            f"The retention schedule has {len(entries)} entries, more than this model's prompt holds, so each archiving "
+            f"object was matched against the {len(chosen)} or so most relevant ones (pre-selected by keywords). An object "
+            "whose entry was not among them shows as no match; a model with a larger window sees them all."
+        )
     return sorted(chosen, key=lambda e: e["id"])
 
 
-def match_object(obj: str, description: str, entries: list[dict], settings: llm.Settings) -> dict:
+def match_object(obj: str, description: str, entries: list[dict], settings: llm.Settings,
+                 tally: Optional[Tally] = None) -> dict:
     """The schedule entry for one archiving object: {"entry": dict or None, "confidence", "reason", "also": [dicts]}."""
-    candidates = _candidates(obj, description, entries, llm.budget(settings)["reference_chars"], settings)
+    candidates = _candidates(obj, description, entries, llm.budget(settings)["reference_chars"], settings, tally)
     listing = "\n".join(f"{n}. {compact(e)}" for n, e in enumerate(candidates, start=1))
     user = (f"Archiving object: {obj}\nDescription: {description or '(none given)'}\n\n"
             f"RETENTION SCHEDULE ENTRIES:\n{listing}")
@@ -469,6 +494,7 @@ class RetentionJob:
         self._records: dict[str, dict] = {}
         self._order: list[str] = []
         self._entries: list[dict] = []
+        self._tally = Tally()
         self._cancel = False
 
     # -- public API -----------------------------------------------------------
@@ -480,6 +506,7 @@ class RetentionJob:
             state["warnings"] = list(self._state["warnings"])
             state["documents"] = [dict(d) for d in self._state["documents"]]
             state["entry_count"] = len(self._entries)
+        state["completeness"] = self._tally.summary()
         return state
 
     def entries(self) -> list[dict]:
@@ -536,7 +563,7 @@ class RetentionJob:
             if problem:
                 self._fail(problem)
                 return
-            read = read_documents(documents, settings, on_progress=lambda m: self._set(message=m))
+            read = read_documents(documents, settings, self._tally, on_progress=lambda m: self._set(message=m))
             with self._lock:
                 self._entries = read["entries"]
                 self._state["documents"] = read["documents"]
@@ -591,7 +618,7 @@ class RetentionJob:
             rec.update(state="running", note="Matching…")
             description = rec["description"]
         try:
-            result = match_object(obj, description, entries, settings)
+            result = match_object(obj, description, entries, settings, self._tally)
         except (llm.LLMNotConfiguredError, llm.LLMAuthError):
             raise
         except llm.LLMRateLimitError as exc:
@@ -677,6 +704,14 @@ class RetentionJob:
                 read.append([e["id"], e["file"], e["location"], e["function"], e["name"], e["code"], e["description"],
                              e["trigger"], e["retention"], e["basis"], e["method"]])
             self._style(read)
+            notes = self._tally.sentences(limit=30)
+            if notes:
+                sheet = wb.create_sheet("Notes")
+                sheet.append(["What the model's limits kept this result from covering"])
+                for line in notes:
+                    sheet.append([line])
+                self._style(sheet)
+                sheet.column_dimensions["A"].width = 120
             path = self._save_workbook(wb)
         self._set(output_path=str(path))
 

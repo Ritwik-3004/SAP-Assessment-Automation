@@ -40,6 +40,10 @@ def test_streaming_chat_suite():
     assert_all_passed("streaming_suite.py")
 
 
+def test_retention_suite():
+    assert_all_passed("retention_suite.py")
+
+
 def test_chat_data_policy_suite():
     code, output = run_suite("chat_policy_suite.py")
     assert code == 0 and "Traceback" not in output, output[-1500:]

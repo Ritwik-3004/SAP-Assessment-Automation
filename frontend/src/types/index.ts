@@ -144,6 +144,7 @@ export interface RetentionSnapshot {
   message: string | null;
   documents: { name: string; entries: number; method: "table" | "AI" }[];
   entry_count: number;
+  completeness?: Completeness;
   records: RetentionRecord[];
   output_path: string | null;
   warnings: string[];

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import ProgressBar from "./ProgressBar";
 import SavedNotice from "./SavedNotice";
+import CompletenessNotice from "./CompletenessNotice";
 import SendToModelDialog from "./SendToModelDialog";
 import type { RetentionEntry, RetentionSnapshot } from "../types";
 
@@ -285,6 +286,7 @@ export default function RetentionPanel() {
             </div>
           )}
           <SavedNotice path={snapshot.output_path} />
+          <CompletenessNotice completeness={snapshot.completeness} />
 
           {records.length > 0 && (
             <div className="table-wrapper" style={{ marginTop: 16 }}>
