@@ -21,7 +21,8 @@ Assistant), `credentials_store.py` (several saved logins per credentials file), 
 (reference document analysis), `table_analysis.py` (the Table Analysis task) with `transactions/taana_analysis.py`
 (its TAANA screens), `open_item_analysis.py` (the Open Item Analysis task), `final_report.py` (the Final report generation task), `object_analysis.py` (the Archiving Object Analysis task) with `object_reference.py` (its reference-document check) and `transactions/sara_info.py`,
 `help_browser.py` and `helpportal.py` (its SARA / SAP Help Portal steps), `progress.py` (progress
-polling), `debug_sap_for_me.py` (manual scraper diagnostics).
+polling), `batching.py` (split-and-merge for steps that ask a model about many items or a long text), `completeness.py` (what a
+result could not cover because of a model's limits), `tests/` (tests with a simulated model; see [Tests](#tests)), `debug_sap_for_me.py` (manual scraper diagnostics).
 
 ## Project status
 
@@ -46,6 +47,7 @@ polling), `debug_sap_for_me.py` (manual scraper diagnostics).
 | AI model switch (Claude, Groq free tier, or Ollama on this computer) | Working with a live Groq key; also checked offline with fake clients (all steps, rate limits, tool calls). Groq answer quality vs Claude **not yet compared**. Ollama: tested live with a tiny 270M model and offline with a fake server; **not yet tried with a real 7–8B model** — see [AI model selection](#ai-model-selection-claude-groq-or-ollama) |
 | Leaving a task and coming back (every task keeps its state in the backend; runs and reviews continue while another task is open) | Tested in a browser with a faked SAP, AI model and results folder: leaving mid-run and returning, finished results, reference-review step and ticks, page refresh. **Not yet checked** against live SAP or a real AI model, or with very long runs |
 | Scoring on free-tier models: parts and playoff for big candidate lists, output-limit pacing, unscored tables and retry | Written after live tests showed Qwen's 1,000 output tokens/min limit and 374-candidate tables (CDHDR, CDPOS) failing. Tested offline with fake models and a fake Groq client (chunk sizes, playoff, cut-off splitting, limit stops, retry merge, limiter) and in a browser with fakes. **Checked live on Qwen 3.8 27B (2026-10-13):** CDHDR (374 candidates) and BALDAT (34) scored completely with no refusal, and Groq accepted the "reasoning off" setting. **Not yet run live:** a full batch including CDPOS, a daily-limit stop, and Retry the unscored tables against Groq — see [Big tables and limits](#big-tables-and-limits) |
+| Results never silently incomplete because of a model's limits (cut-off answers noticed on every provider, long documents and lists read in parts, what could not be done reported) | **Verified:** 91 offline tests with a simulated model that has a tiny window and output limit (tiny and big model give the same results, or every difference is reported); **live on Groq (GPT-OSS 20B):** a 27,380-character reference sheet gave all 360 of 360 mappings (the old code read the first 105 rows), a chat request with three 3,500-character articles is accepted with a 1,500-token answer allowance (it was 200), and the new token estimate is 1.02x-1.32x Groq's real count. **Not run live:** Claude and Ollama (no key / no local model here), so their cut-off handling is tested with simulated responses only; no "retry the incomplete items" button except for scoring — see [Model limits](#model-limits-complete-or-says-what-is-missing) |
 | Reference document analysis (Excel / PDF / PowerPoint, one or several files) | Implemented; the multi-document merge was tested offline with canned model answers, not yet run end to end against real documents — see [Reference document analysis](#reference-document-analysis) |
 
 ## Prerequisites
@@ -483,8 +485,8 @@ Requires `ANTHROPIC_API_KEY`. PowerPoint support needs `python-pptx` (now in
 
 **Known gaps:** the comparison only checks the recommended list, not every candidate;
 overrides are applied in the panel's own preview and are **not** pushed back into the main
-scored results or the chat's view of them; very long documents are truncated before being
-sent to Claude; scanned (image-only) PDFs yield no text and are rejected.
+scored results or the chat's view of them; a document longer than 16 model-sized parts is read only as far as that (and the screen says
+how much was read, see [Model limits](#model-limits-complete-or-says-what-is-missing)); scanned (image-only) PDFs yield no text and are rejected.
 
 ## AI model selection (Claude, Groq or Ollama)
 
@@ -561,6 +563,49 @@ first run). The request shape, strict JSON-schema output, retries, daily-limit a
 tool calls were also checked offline with fake clients. Still open: how Groq's answers
 compare with Claude's on the same tables, and Qwen 3.8's exact reasoning behaviour and the
 free tier's admission rules under a long batch — watch the first big run.
+
+## Model limits: complete, or says what is missing
+
+Every model has an input window and an output limit, and free tiers add per-minute and per-day caps. The app is built so that a limit never *silently* costs a
+result. It promises two things: work is split to fit the active model, so a task completes on any model that can carry the smallest unit of it (one candidate,
+one part of a document); and whatever still cannot be completed, or had to be shortened, is reported, never guessed. (Literal completeness on an arbitrarily
+tiny model is not possible; a request that cannot fit even one unit is reported.)
+
+- **A cut-off answer is always noticed** (`llm.LLMCutOffError`): Groq `finish_reason` "length", Ollama `done_reason` "length", Claude `stop_reason` "max_tokens",
+  in structured, plain-text and chat calls. Claude's structured calls are parsed by the SDK itself, which fails on cut-off JSON before the stop reason can be read,
+  so that error is treated as a cut-off (other format errors stay ordinary format errors).
+- **Work is done in parts** (`backend/batching.py`): `run_batched` asks for as many items as fit, splits a batch in two when its answer is cut off or unreadable,
+  asks once more for items the model left out and returns what still failed with the reason; `run_text_parts` reads a long text part by part (a single very long
+  line is cut at a space, so no part exceeds its size). A rate-limit stop, rejected key or unconfigured model ends the work but keeps what was finished.
+  Scoring has its own, older version of this (parts, then a playoff of the best candidates; see [Big tables and limits](#big-tables-and-limits)).
+- **What could not be done is reported** (`backend/completeness.py`): a `Tally` records text that was shortened before it was sent and items that were not
+  processed; tasks return it as `completeness` and/or in their warnings. The UI shows it in one notice (`CompletenessNotice.tsx`, used on the scoring result) and
+  in each review's own warnings.
+- **Token estimates and budgets follow the model** (`llm.chars_per_token`, `llm.budget`, `llm.input_window_tokens`): the estimate uses a per-model characters-per-token
+  ratio (measured seeds for GPT-OSS and Qwen, refined from each reply's real prompt token count; the default 3.2 ran 1.2-1.5x too high on Groq and shrank
+  answers for no reason). Groq's models report a 131,072-token context, but the free tier allows 8,000 tokens per minute, which is the window used; a local Ollama
+  model gets proportionally smaller caps if its context is below 8,000 tokens. Claude's and Groq's caps are unchanged.
+
+| Step | How it copes with the model's limits | What you see when it cannot |
+|---|---|---|
+| Scoring (Find Archiving Objects) | parts + playoff, re-ask for missing candidates, retry of unscored tables | tables listed as not scored with the reason and a **Retry the unscored tables** button; a note when a DVM Guide excerpt was shortened |
+| Reference review (table to object, object to header table) | whole document read in up to 16 parts, asked as a list of pairs; a cut-off part is split | warnings: "only X of Y characters could be sent", "part N not processed (reason)"; nothing readable is an error, not an empty result |
+| Reference check of Archiving Object Analysis | up to 8 parts per document; conditions compared in batches | a "could not be compared" list per object (never shown as gaps) and warnings |
+| Condition extraction (Help Portal, DVM Guide, SAP for Me) | text beyond one request read in parts (up to 8 per source); a part with more conditions than one answer holds is read in pieces | the source's note says "INCOMPLETE" and the warnings list what was not read |
+| Object descriptions (AI fallback) | every object asked about, in requests of up to 40 | the usual "(description not found)" placeholder for what stays unknown |
+| Chat | cut-off answers continued; tools query up to 120 tables | a note ending the answer, or how many tables were not queried |
+| Housekeeping lookup | small answers; reports when a DVM section was cut | "(Only the first N characters of the DVM Guide section were read.)" |
+
+**Bounds that are deliberate and not reported:** passages chosen *by relevance* are selections, not truncations: the windows around a mention in the DVM Guide, the
+parts of a SAP for Me article around the table name (`sap_for_me._relevant_excerpt`, 3,500 characters per article in chat) and the evidence assembled for a
+header-table decision. The caps on parts (8 for a source or document check, 16 for a mapping sheet) and on a Help Portal page (60,000 characters) are stated in the
+warnings when they are reached.
+
+**Cost:** working in parts means more requests on a small model. On Groq's free tier a mapping sheet of 360 rows took about two minutes and 14,000 tokens; a long
+Help Portal page needs several requests per object where it used to be cut to one. Claude takes the same work in far fewer requests.
+
+**Not built:** a "retry the incomplete items" button for these tasks (only scoring has one); to redo a reference review upload the document again, or pick a model with
+larger limits. Per-model limits other than Groq's published ones and Qwen's output limit are learned only from refusals.
 
 ## Data sent to the AI model
 
@@ -643,6 +688,12 @@ How it works (`backend/chat.py`, endpoint `POST /api/chat`):
    and a "not configured" message arrive as the single `done` event, because no model is called. If the model fails part-way (for example a rate limit),
    the text already shown stays and the reason follows it. Leaving the page or closing the app stops the model at its next piece of text.
    `POST /api/chat` still exists and returns the whole reply at once.
+
+6. **Answers the model's limit cuts off are continued.** If the model stops because it reached its output limit, the loop asks it to "continue exactly where you
+   stopped" (up to twice, streamed like any other text); an answer that is still cut off ends with "[The answer was cut off by the model's length limit.]". A tool
+   request that was cut off is an error, never run with guessed arguments. The counts and sizes tools query up to 120 tables per request, in groups of 30, and say how
+   many were not queried; when the conversation is longer than the model is given (6 messages on Groq) the model is told so and asks instead of guessing; on Groq the
+   answer allowance follows the calibrated token estimate (it dropped to 200 tokens after a SAP for Me search with three articles; it is 1,500 now).
 
 The seven SAP tools (DB15, AOBJ, SE11, SARA and three for DB02) use the shared SAP GUI session, so SAP must be connected for them; without it the
 assistant says live checks are unavailable and still uses the DVM Guide, SAP for Me and its general knowledge.
@@ -905,8 +956,10 @@ wording is kept in the Detail column). Applying the same item again does nothing
 **Reference check** column on the conditions and archive-first tables (matches / differs / not mentioned / added from the document), a **REFERENCE DOCUMENT
 CHECK** block per object listing every gap and mismatch with "Applied to the results" or "Not applied", and a **Reference check** column on the Summary
 sheet. Objects the document doesn't mention are marked as such. A file that cannot be read is skipped with a warning (an old `.xls`/`.ppt`/`.doc` must be
-saved as `.xlsx`/`.pptx`/`.docx` first; a scanned PDF has no text). Documents longer than eight model-sized chunks (about 64,000 characters with Claude, less
-with Groq) are read only as far as that.
+saved as `.xlsx`/`.pptx`/`.docx` first; a scanned PDF has no text). A document is read part by part (a part whose answer is cut off is split in two); one longer
+than eight parts (about 112,000 characters with Claude, less with Groq) is read only as far as that, and the warnings say so. The comparison with the tool's
+conditions is done in batches; a document condition that could not be compared (the answer was cut off, a limit was reached, or the verdict was missing or
+unusable) is listed as **could not be compared** with the reason and is never shown as a gap.
 
 **Conditions — three sources, each named on every condition** (`backend/object_analysis.py`). The AI model in use reads each source's text separately
 and returns only conditions that are *in that text* (it is told never to add any from its own knowledge); a condition is a requirement that must
@@ -919,7 +972,9 @@ Customizing, other objects or documents to process first, blockers.
    **The default browser must be Google Chrome:** Microsoft Edge shows the app no address bar or tabs through UI Automation (checked on this machine; Edge
    showed only empty panes), so with Edge the page opens but its address cannot be read, the tab is not closed, and tabs pile up. Browsers hide `https://`
    in the address bar, so the address is completed with it before the page is read. The
-   page is then read **headlessly** with Chrome for Testing (`helpportal.py`; same setup as SAP for Me, no sign-in needed). Besides the page itself it
+   page is then read **headlessly** with Chrome for Testing (`helpportal.py`; same setup as SAP for Me, no sign-in needed). Every page is kept in full (a page over 60,000
+   characters is cut and reported) and its text is sent to the model in parts, up to eight per source (more calls on a small model, but nothing is cut to fit a
+   small budget any more). Besides the page itself it
    reads sub-pages that describe conditions — child pages in the contents tree and pages the article names — whose title contains check, condition,
    prerequisite, precondition, archivability, residence, criteria, restriction or requirement (up to four), e.g. "Checks and Variants (SD-SLS)" or
    "Deletion Criteria for MM_EKKO". The portal's "Out of Maintenance" notice is dismissed automatically.
@@ -1160,6 +1215,20 @@ SAP GUI element IDs (e.g. `wnd[0]/usr/ctxtP_TNAME`) can differ across SAP versio
 - `grid.GetColumnTitles(col_id)` is not a valid method on every system's ActiveX grid control — calling it can leave the grid object unable to serve subsequent `RowCount`/`GetCellValue` calls, even though the bad call itself is caught. Prefer hardcoding known column IDs (see `DB15_COLUMN_LABELS` in `db15.py`) over relying on that method.
 - The grid only renders rows currently scrolled into its visible window — `GetCellValue` on a table with more results than fit in that window (e.g. CDHDR's ~24 archiving objects) silently returns `""` for the rows outside it. Set `grid.FirstVisibleRow = row_idx` before reading each row to force it into view first.
 - A result grid isn't always nested under `wnd[0]/usr` — SE16N's `ARCH_DEF` result grid is a direct child of the window (`wnd[0]/shellcont/shell`), the same pattern DB02's tree control turned out to have. If a screen dump of `wnd[0]/usr` shows no grid/container at all, widen the dump to the whole `wnd[0]` window before assuming the feature is broken.
+
+## Tests
+
+`backend/tests/` holds tests that need no network, no SAP and no AI quota: a simulated model (`tests/fakes.py`, `TinyModel`) with a configurable window and output limit
+cuts answers off and refuses oversized requests like a real model would, and answers deterministically so completeness can be asserted exactly. They cover the
+cut-off detection per provider, `batching.py`, every task that sends text to a model (tiny model vs big model: same results, or every difference reported), the
+token estimate and budgets, and the earlier suites for scoring, the retry endpoints, the streaming chat and the chat data policy (`tests/suites/`).
+
+    cd backend
+    .venv\Scripts\python.exe tests\run_all.py            # everything (about 15 seconds)
+    .venv\Scripts\python.exe tests\run_all.py batching   # only files whose name contains "batching"
+
+The tests are plain `test_*` functions, so `pytest` runs them too once installed (`pip install -r requirements-dev.txt`). Claude and Ollama are covered with simulated
+responses only; the live checks listed in the project status were run by hand.
 
 ## Configuration
 
