@@ -1297,7 +1297,8 @@ body {
 .modal-actions .btn:disabled { opacity: .5; cursor: not-allowed; }
 
 /* Some tables of a scoring run could not be scored (a limit stopped it): the rest is kept */
-.scoring-notice {
+.scoring-notice,
+.completeness-notice {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1310,3 +1311,6 @@ body {
   line-height: 1.5;
   color: #5c3b00;
 }
+
+.completeness-notice { gap: 4px; }
+.completeness-notice ul { margin: 4px 0 0; padding-left: 18px; }

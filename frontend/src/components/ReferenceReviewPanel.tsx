@@ -277,7 +277,7 @@ export default function ReferenceReviewPanel({ config }: { config: ReferenceRevi
 
           {result.warnings && result.warnings.length > 0 && (
             <p className="tx-error" style={{ margin: "8px 18px" }}>
-              Skipped: {result.warnings.join("; ")}
+              Please note: {result.warnings.join(" ")}
             </p>
           )}
 

@@ -269,6 +269,16 @@ export interface HeaderTableBatchResult {
   save_error?: string;
 }
 
+/** What the model's limits kept a result from covering completely (backend completeness.Tally.summary()). */
+export interface Completeness {
+  complete: boolean;
+  /** text that was shortened before it was sent to the model */
+  trimmed: { what: string; kept: number; total: number; unit: string }[];
+  /** items that could not be processed, with the reason */
+  unprocessed: { item: string; reason: string }[];
+  notes: string[];
+}
+
 export interface ScoredResult {
   status: "ok" | "error";
   message?: string;
@@ -276,6 +286,7 @@ export interface ScoredResult {
   recommended?: Record<string, string>[];
   /** Tables the run could not score (a limit stopped it); the others are scored and kept. */
   unscored?: { table: string; reason: string }[];
+  completeness?: Completeness;
   saved_path?: string;
   save_error?: string;
 }

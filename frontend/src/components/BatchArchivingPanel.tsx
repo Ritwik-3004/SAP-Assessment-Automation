@@ -4,6 +4,7 @@ import { useScreenEpoch } from "../useScreenEpoch";
 import ResultsTable from "./ResultsTable";
 import ProgressBar from "./ProgressBar";
 import SavedNotice from "./SavedNotice";
+import CompletenessNotice from "./CompletenessNotice";
 import { usePublishResults } from "../assistantContext";
 import ReferenceDocPanel from "./ReferenceDocPanel";
 import type { Db15BatchResult, ProgressSnapshot, ScoredResult } from "../types";
@@ -387,6 +388,7 @@ export default function BatchArchivingPanel() {
               </div>
             </div>
           )}
+          <CompletenessNotice completeness={scored.completeness} hideUnprocessed />
 
           <div className="sheet-tabs" role="tablist">
             <button
