@@ -242,12 +242,33 @@ def not_configured_message(settings: Optional[Settings] = None) -> Optional[str]
     return None
 
 
+STATIC_BUDGET_WINDOW = 8000     # the window (tokens) the Groq/Ollama budget values below were sized for
+
+
+def input_window_tokens(settings: Optional[Settings] = None) -> int:
+    """Tokens one request can hold with the active model: Groq's free tier allows 8,000 per minute whatever the
+    model's context window (131,072 for the models offered, as Groq reports); a local Ollama model, the context it
+    is run with (at most OLLAMA_NUM_CTX, less if the model's own is smaller); Claude, 200,000."""
+    s = settings or load_settings()
+    if s.provider == GROQ:
+        return GROQ_LIMITS["tpm"]
+    if s.provider == OLLAMA:
+        try:
+            info = _ollama_model_info(s.model) or {}
+        except LLMError:
+            info = {}
+        return min(OLLAMA_NUM_CTX, info.get("context") or OLLAMA_NUM_CTX)
+    return 200000
+
+
 def budget(settings: Optional[Settings] = None) -> dict:
     """Prompt-size caps. Claude values equal the app's original limits; Groq values are
-    smaller so a single request stays well inside the 8,000 tokens/minute free-tier cap."""
+    smaller so a single request stays well inside the 8,000 tokens/minute free-tier cap. A model whose window is
+    smaller than the one these were sized for (a small local model) gets proportionally smaller caps, so a
+    request still fits and the work is simply done in more parts."""
     s = settings or load_settings()
     if s.provider in (GROQ, OLLAMA):   # both work with small windows (Groq: token cap; Ollama: context size)
-        return {
+        values = {
             "dvm_excerpt_chars": 3000,
             "article_chars": 3000,
             "reference_chars": 8000,
@@ -256,6 +277,14 @@ def budget(settings: Optional[Settings] = None) -> dict:
             "chat_max_rounds": 4,
             "score_chunk": 40,        # candidates per scoring request (sized so the answer fits Qwen's 1,000 output tokens/min)
         }
+        scale = min(1.0, input_window_tokens(s) / STATIC_BUDGET_WINDOW)
+        if scale < 1.0:
+            for key in ("dvm_excerpt_chars", "article_chars", "reference_chars"):
+                values[key] = max(600, int(values[key] * scale))
+            values["chat_context_tables"] = max(5, int(values["chat_context_tables"] * scale))
+            values["chat_history_messages"] = max(2, int(values["chat_history_messages"] * scale))
+            values["score_chunk"] = max(5, int(values["score_chunk"] * scale))
+        return values
     return {
         "dvm_excerpt_chars": 6000,
         "article_chars": 8000,
@@ -424,9 +453,40 @@ def _window(model: str) -> _RateWindow:
         return _windows[model]
 
 
-def _estimate_tokens(messages: list, tools: Optional[list] = None) -> int:
-    chars = len(json.dumps(messages, default=str)) + (len(json.dumps(tools)) if tools else 0)
-    return int(chars / 3.2) + 20
+DEFAULT_CHARS_PER_TOKEN = 3.2       # safe for any text; models that have been measured use their own ratio below
+# Measured on Groq (2026-10-14): GPT-OSS 4.8 characters per token on the chat prompt and 4.4 on a list of object names,
+# Qwen 3.8 and 4.5. The seeds are lower (an estimate that is too high only costs output allowance; too low risks a refusal).
+_CHARS_PER_TOKEN_SEEDS = (("openai/gpt-oss", 4.2), ("qwen/", 3.5))
+_calibrated_cpt: dict[str, float] = {}
+
+
+def chars_per_token(model: str = "") -> float:
+    """Characters per token to assume for *model*: learned from its own replies (see _learn_chars_per_token), else
+    a measured seed, else the safe default."""
+    if model in _calibrated_cpt:
+        return _calibrated_cpt[model]
+    for prefix, ratio in _CHARS_PER_TOKEN_SEEDS:
+        if model.startswith(prefix):
+            return ratio
+    return DEFAULT_CHARS_PER_TOKEN
+
+
+def _payload_chars(messages: list, tools: Optional[list] = None) -> int:
+    return len(json.dumps(messages, default=str)) + (len(json.dumps(tools)) if tools else 0)
+
+
+def _learn_chars_per_token(model: str, chars: int, prompt_tokens: int) -> None:
+    """Refine the ratio for *model* from a reply that reported how many tokens the prompt really was. The stored ratio
+    is 10% below the observed one, so the estimate stays on the high side."""
+    if not model or prompt_tokens < 300 or chars < 300:
+        return
+    observed = min(8.0, max(1.5, chars / prompt_tokens)) * 0.9
+    old = _calibrated_cpt.get(model)
+    _calibrated_cpt[model] = observed if old is None else 0.7 * old + 0.3 * observed
+
+
+def _estimate_tokens(messages: list, tools: Optional[list] = None, model: str = "") -> int:
+    return int(_payload_chars(messages, tools) / chars_per_token(model)) + 20
 
 
 def _groq_reason(exc: Exception) -> str:
@@ -494,7 +554,7 @@ def _groq_chat(
     model = settings.model
     _check_daily_block(model)
 
-    est_in = _estimate_tokens(messages, tools)
+    est_in = _estimate_tokens(messages, tools, model)
     tpm = GROQ_LIMITS["tpm"]
     if est_in + 200 > tpm:
         raise LLMTooLargeError(
@@ -591,6 +651,7 @@ def _groq_chat(
         usage = getattr(response, "usage", None)
         total = getattr(usage, "total_tokens", None) or reserve
         actual_out = getattr(usage, "completion_tokens", None)
+        _learn_chars_per_token(model, _payload_chars(messages, tools), int(getattr(usage, "prompt_tokens", 0) or 0))
         window.correct(event, int(total), None if OTPM_COUNTS_REQUESTED or actual_out is None else int(actual_out))
         _record_usage(model, int(total))
         return response
@@ -1212,7 +1273,7 @@ def _ollama_chat(
     model = settings.model
     info = _ollama_model_info(model) or {}
     ctx = min(OLLAMA_NUM_CTX, info.get("context") or OLLAMA_NUM_CTX)
-    est_in = _estimate_tokens(messages, tools)
+    est_in = _estimate_tokens(messages, tools, model)
     if est_in + 300 > ctx:
         raise LLMTooLargeError(
             f"This request is about {est_in:,} tokens, more than the {ctx:,}-token window used for the local model. "
@@ -1234,6 +1295,7 @@ def _ollama_chat(
         payload["stream"] = True
     data = _ollama_request("POST", "/api/chat", payload, timeout=OLLAMA_TIMEOUT, on_piece=on_piece)
     _record_usage(model, int(data.get("prompt_eval_count") or 0) + int(data.get("eval_count") or 0))
+    _learn_chars_per_token(model, _payload_chars(messages, tools), int(data.get("prompt_eval_count") or 0))
     return data
 
 
